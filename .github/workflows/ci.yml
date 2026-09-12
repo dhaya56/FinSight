@@ -1,0 +1,57 @@
+name: CI
+
+# Runs only checks that have already been validated locally on the developer's
+# Windows environment. New checks are added to this workflow after their local
+# commands pass, never before.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    # Matches the developer environment in which these commands were validated.
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Lint (Ruff)
+        run: python -m ruff check .
+
+      - name: Type check (MyPy)
+        run: python -m mypy src
+
+      - name: Tests with coverage (Pytest)
+        run: python -m pytest --cov=finsight --cov-report=term-missing
+
+      - name: Dependency consistency (pip check)
+        run: python -m pip check
+
+      # Informational: advisories are review items for the developer, not an
+      # automatic build failure. This remains informational until an approved
+      # dependency policy defines a gate.
+      - name: Known vulnerabilities (pip-audit)
+        continue-on-error: true
+        run: python -m pip_audit
