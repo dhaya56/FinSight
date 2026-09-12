@@ -1,5 +1,6 @@
-# Virtual environment
+# Virtual environments
 .venv/
+.venv-verify/
 
 # Python cache
 __pycache__/
@@ -13,5 +14,22 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# Coverage data and reports
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
 # IDE settings
 .vscode/
+
+# Generated evaluation outputs
+artifacts/
+
+# Downloaded and verified model artifacts
+model_cache/
+
+# Source documents: never committed unless redistribution is explicitly permitted
+data/corpus/development/
+data/corpus/held_out_pdf_core/
+data/corpus/held_out_format_supplement/
