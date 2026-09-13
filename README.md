@@ -11,14 +11,14 @@ implemented.
 
 ## Status
 
-Phase 1 — project foundation and environment validation.
+Phase 2 — PostgreSQL infrastructure and authoritative database connectivity.
 
-Implemented: packaging and tooling configuration, the `finsight` package skeleton, and foundation
-application settings.
+Implemented: packaging and tooling configuration, the `finsight` package, application settings
+including database configuration, and a local PostgreSQL service.
 
-Not yet implemented: document ingestion, parsing, the Fact Ledger, retrieval, generation, the
-Evidence Gate, the API, the user interface, and the evaluation harness. The repository grows one
-phase at a time; a directory exists only once its capability is implemented.
+Not yet implemented: database migrations, document ingestion, parsing, the Fact Ledger, retrieval,
+generation, the Evidence Gate, the user interface, and the evaluation harness. The repository grows
+one phase at a time; a directory exists only once its capability is implemented.
 
 ## Prerequisites
 
@@ -43,13 +43,52 @@ python -m pip install -r requirements.txt
 `requirements.txt` is the single pinned dependency file. It is generated from a verified
 environment and must remain installable at all times.
 
-Copy the environment template and adjust values as needed:
+Copy the environment template and set values:
 
 ```cmd
 copy .env.example .env
 ```
 
-`.env` is never committed.
+`.env` is never committed. `FINSIGHT_POSTGRES_PASSWORD` is required and has no default. It is
+rejected at startup when empty or when it matches a known default value such as `postgres` or
+`changeme`. That check guards against well-known defaults; it is not a password-strength check.
+
+## Local infrastructure
+
+PostgreSQL runs in a container and is authoritative for all application state. Docker Desktop must
+be running with the WSL 2 Linux-container backend.
+
+```cmd
+docker compose config
+docker compose up -d
+docker compose ps
+```
+
+`docker compose config` fails with a named variable if anything required is missing from `.env`.
+The database is published on the loopback interface only. Data lives in the named volume
+`finsight-postgres-data` and survives `docker compose down`.
+
+```cmd
+docker compose down
+```
+
+`docker compose down -v` additionally destroys the volume and every row in it.
+
+## Running the API
+
+```cmd
+python -m uvicorn finsight.api.app:create_app --factory --reload
+```
+
+Two health surfaces are available:
+
+| Endpoint | Behavior |
+|---|---|
+| `GET /health/live` | Reports that the process is running. Touches no dependency, so it answers while the database is down. |
+| `GET /health/ready` | Returns 200 when every essential dependency is healthy, and 503 when one is not. |
+
+Readiness currently checks database reachability only. Schema-compatibility
+checking arrives with the first migrations.
 
 ## Verification
 
@@ -60,6 +99,16 @@ python -m ruff check .
 python -m mypy src
 python -m pytest
 ```
+
+`python -m pytest` runs unit and contract tests only. Tests that require live infrastructure are
+marked `integration` and excluded from the default run, so the suite passes without Docker. Run
+them explicitly once the database is up:
+
+```cmd
+python -m pytest -m integration
+```
+
+They fail rather than skip when the database is unreachable.
 
 `check-environment.cmd` and `verify-dependencies.cmd` only inspect and report. They start no
 service, install nothing, and download nothing.

@@ -48,7 +48,12 @@ plugins = ["pydantic.mypy"]
 minversion = "8.0"
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra --strict-markers --strict-config"
+# Integration tests require live infrastructure and are excluded from the default
+# run. Request them explicitly with: python -m pytest -m integration
+addopts = "-ra --strict-markers --strict-config -m 'not integration'"
+markers = [
+    "integration: requires live infrastructure such as PostgreSQL; excluded by default",
+]
 
 [tool.coverage.run]
 source = ["src/finsight"]

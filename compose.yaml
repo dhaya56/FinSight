@@ -1,0 +1,47 @@
+# FinSight local infrastructure.
+#
+# Services are added as their capability is implemented. Phase 2 introduces
+# PostgreSQL, which is authoritative for all application state.
+#
+# Values come from the repository-root .env, which is never committed. The
+# ${VAR:?message} form makes `docker compose config` fail fast with a named
+# variable rather than starting with a silent default.
+
+name: finsight
+
+services:
+  postgres:
+    # Pinned by verified tag. The resolved digest is recorded in ENV-002 for
+    # reproducibility; it is not pinned here because a digest is platform
+    # specific and multi-platform compatibility has not been verified.
+    image: postgres:18.6
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${FINSIGHT_POSTGRES_DB:?set FINSIGHT_POSTGRES_DB in .env}
+      POSTGRES_USER: ${FINSIGHT_POSTGRES_USER:?set FINSIGHT_POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${FINSIGHT_POSTGRES_PASSWORD:?set FINSIGHT_POSTGRES_PASSWORD in .env}
+    ports:
+      # Loopback only: the database is not exposed to the local network.
+      - "127.0.0.1:${FINSIGHT_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 18 moved PGDATA to /var/lib/postgresql/<major>/docker and
+      # declares the volume at /var/lib/postgresql. Mounting the pre-18 path
+      # (/var/lib/postgresql/data) would not persist data for this image.
+      - finsight-postgres-data:/var/lib/postgresql
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # $$ prevents Compose substitution so the container shell expands these.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    # Resource limits are intentionally absent. PROJECT_BLUEPRINT.md §38.11
+    # requires them, but usable memory under the complete stack is unmeasured
+    # (ENV-001 open item), so any value here would be invented. They are added
+    # in the phase where multiple services coexist and memory is measured.
+
+volumes:
+  finsight-postgres-data:
