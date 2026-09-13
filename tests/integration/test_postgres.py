@@ -11,8 +11,10 @@ from collections.abc import Iterator
 from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from finsight.api.app import create_app
 from finsight.persistence.database import (
     dispose_engine,
     get_engine,
@@ -100,3 +102,12 @@ def test_dispose_engine_is_idempotent() -> None:
     dispose_engine()
 
     assert is_database_reachable() is True
+
+
+def test_readiness_reports_ready_against_the_live_database() -> None:
+    """Readiness with the real probe, not an override, against the running container."""
+    with TestClient(create_app()) as client:
+        response = client.get("/health/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"ready": True}

@@ -74,6 +74,22 @@ docker compose down
 
 `docker compose down -v` additionally destroys the volume and every row in it.
 
+## Running the API
+
+```cmd
+python -m uvicorn finsight.api.app:create_app --factory --reload
+```
+
+Two health surfaces are available:
+
+| Endpoint | Behavior |
+|---|---|
+| `GET /health/live` | Reports that the process is running. Touches no dependency, so it answers while the database is down. |
+| `GET /health/ready` | Returns 200 when every essential dependency is healthy, and 503 when one is not. |
+
+Readiness currently checks database reachability only. Schema-compatibility
+checking arrives with the first migrations.
+
 ## Verification
 
 ```cmd
