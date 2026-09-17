@@ -16,7 +16,7 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO
+from typing import IO
 
 from finsight.object_store.port import (
     ObjectAlreadyExistsError,
@@ -42,7 +42,7 @@ class FilesystemObjectStore:
     def put_if_absent(
         self,
         key: str,
-        source: BinaryIO,
+        source: IO[bytes],
         *,
         size_bytes: int,
         sha256_hex: str,
@@ -73,7 +73,7 @@ class FilesystemObjectStore:
         return ObjectInfo(key=key, size_bytes=path.stat().st_size)
 
     @contextmanager
-    def open_stream(self, key: str) -> Iterator[BinaryIO]:
+    def open_stream(self, key: str) -> Iterator[IO[bytes]]:
         """Open the stored object for reading."""
         path = self._path_for(key)
         try:

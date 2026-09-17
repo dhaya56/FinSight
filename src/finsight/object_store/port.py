@@ -11,7 +11,7 @@ under the same key twice is a no-op, not an error. See ``keys.py``.
 from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import BinaryIO, Protocol
+from typing import IO, Protocol
 
 
 class ObjectStoreError(RuntimeError):
@@ -50,7 +50,7 @@ class ObjectStore(Protocol):
     def put_if_absent(
         self,
         key: str,
-        source: BinaryIO,
+        source: IO[bytes],
         *,
         size_bytes: int,
         sha256_hex: str,
@@ -67,7 +67,7 @@ class ObjectStore(Protocol):
         """
         ...
 
-    def open_stream(self, key: str) -> AbstractContextManager[BinaryIO]:
+    def open_stream(self, key: str) -> AbstractContextManager[IO[bytes]]:
         """Open the stored object for reading.
 
         Returns a context manager because the underlying stream holds a network
@@ -93,7 +93,7 @@ class ObjectStore(Protocol):
         ...
 
 
-def read_in_chunks(stream: BinaryIO, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+def read_in_chunks(stream: IO[bytes], chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
     """Yield a stream's contents in bounded chunks.
 
     Used by callers that verify integrity on read without holding a whole filing

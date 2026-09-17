@@ -18,7 +18,7 @@ unmeasured initial defaults.
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any, BinaryIO
+from typing import IO, Any
 
 import boto3
 from boto3.s3.transfer import TransferConfig
@@ -125,7 +125,7 @@ class S3ObjectStore:
     def put_if_absent(
         self,
         key: str,
-        source: BinaryIO,
+        source: IO[bytes],
         *,
         size_bytes: int,
         sha256_hex: str,
@@ -156,7 +156,7 @@ class S3ObjectStore:
         return ObjectInfo(key=key, size_bytes=size_bytes)
 
     @contextmanager
-    def open_stream(self, key: str) -> Iterator[BinaryIO]:
+    def open_stream(self, key: str) -> Iterator[IO[bytes]]:
         """Open the stored object for reading, releasing the connection on exit."""
         try:
             response = self._client.get_object(Bucket=self._bucket, Key=key)
@@ -167,7 +167,7 @@ class S3ObjectStore:
         except BotoCoreError as error:
             raise ObjectStoreUnavailableError(f"could not read object: {error}") from error
 
-        body: BinaryIO = response["Body"]
+        body: IO[bytes] = response["Body"]
         try:
             yield body
         finally:

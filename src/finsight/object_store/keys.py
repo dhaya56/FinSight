@@ -20,8 +20,9 @@ prefix (PROJECT_BLUEPRINT.md §30.9).
 import re
 from typing import Final
 
-HASH_ALGORITHM: Final = "sha256"
-"""The digest used for content addressing. Recorded alongside every stored key."""
+from finsight.domain.identifiers import HASH_ALGORITHM
+
+__all__ = ["HASH_ALGORITHM", "ORIGINALS_PREFIX", "original_object_key"]
 
 ORIGINALS_PREFIX: Final = "originals"
 """Prefix for immutable source objects. Other object classes get their own."""
