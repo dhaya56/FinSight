@@ -1,0 +1,18 @@
+Alembic migrations for FinSight.
+
+PostgreSQL is authoritative for all application state, so every schema change
+arrives here as a reviewed, reversible revision.
+
+Run from the repository root with the project virtual environment activated:
+
+    alembic upgrade head          apply every pending revision
+    alembic current               show the revision the database is on
+    alembic downgrade -1          reverse the most recent revision
+
+The database URL is not configured in alembic.ini. env.py builds it from
+application settings so the password stays in .env alone. Offline mode
+(--sql) is refused for the same reason.
+
+Readiness reports the schema as current only when the database's revision
+matches the head of this directory, which is why this directory must ship with
+any image that serves the readiness endpoint.

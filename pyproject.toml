@@ -37,6 +37,12 @@ select = [
     "RUF", # ruff-specific
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Alembic generates these files and rewrites them on every autogenerate. Its
+# emitted calls exceed the line limit, and hand-wrapping each new revision would
+# be a recurring tax with no readability gain. Only the length rule is relaxed.
+"migrations/versions/*.py" = ["E501"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
