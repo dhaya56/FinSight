@@ -119,7 +119,7 @@ Use the detailed architecture in `PROJECT_BLUEPRINT.md`. Preserve these non-nego
 - Streamlit is an API-only frontend and holds no data-store credentials.
 - PostgreSQL is authoritative for application, processing, financial, query, audit, and evaluation state.
 - Qdrant is a rebuildable derived vector index.
-- MinIO is accessed through an object-store abstraction and preserves immutable originals.
+- Object storage is accessed only through the object-store abstraction and preserves immutable originals. SeaweedFS is the current local backend; adapters are named for the S3 protocol rather than the vendor, and no module outside the adapter imports a storage SDK.
 - Ollama runs on the Windows host and is accessed through HTTPX.
 - PyMuPDF and pdfplumber form the native PDF path; Docling is an evaluated layout-aware candidate; Camelot is a conditional table comparator or fallback.
 - pandas and openpyxl handle spreadsheets; Beautiful Soup, lxml, defusedxml, and nh3 handle HTML/XML safely; Arelle is conditional on genuine XBRL/iXBRL data.
@@ -176,7 +176,7 @@ Claude Code may implement experiment infrastructure but must not choose a winner
 Develop Docker and CI alongside the application:
 
 1. Validate Docker Desktop, WSL 2, Linux containers, and Compose.
-2. Introduce PostgreSQL, Qdrant, and MinIO infrastructure.
+2. Introduce PostgreSQL, Qdrant, and S3-compatible object-storage infrastructure.
 3. Run early Python services locally against containerized infrastructure and host-native Ollama.
 4. Containerize the API, restricted parser worker, processing worker, and UI after their local paths work.
 5. Add health checks, volumes, networking, and resource limits incrementally.
@@ -207,7 +207,7 @@ Do not claim hallucination freedom, prompt-injection immunity, universal accurac
 ## 11. Coding and validation
 
 - Write clear, typed Python 3.12 using canonical project terminology.
-- Keep domain logic independent of FastAPI, Streamlit, PostgreSQL, Qdrant, MinIO, Ollama, and other adapters where practical.
+- Keep domain logic independent of FastAPI, Streamlit, PostgreSQL, Qdrant, object storage, Ollama, and other adapters where practical.
 - Add abstractions only for a current boundary, approved alternative, or experiment.
 - Do not add placeholder implementations for future phases.
 - Use explicit errors, bounded transactions, deterministic identifiers, and idempotent background operations.
