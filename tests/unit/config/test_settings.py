@@ -6,8 +6,10 @@ import pytest
 from pydantic import ValidationError
 
 from finsight.config.settings import (
-    REJECTED_PASSWORD_VALUES,
+    DEFAULT_ALLOWED_CONTENT_TYPES,
+    REJECTED_SECRET_VALUES,
     Environment,
+    S3AddressingStyle,
     Settings,
     SettingsError,
     get_settings,
@@ -80,7 +82,7 @@ class TestPassword:
         with pytest.raises(SettingsError):
             Settings()
 
-    @pytest.mark.parametrize("known_default", sorted(REJECTED_PASSWORD_VALUES))
+    @pytest.mark.parametrize("known_default", sorted(REJECTED_SECRET_VALUES))
     def test_known_default_password_is_rejected(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -174,6 +176,116 @@ class TestPoolDefaults:
 
         assert settings.db_pool_size == 12
         assert settings.db_connect_timeout_seconds == 9
+
+
+class TestObjectStoreSettings:
+    def test_defaults_are_protocol_neutral(self) -> None:
+        settings = Settings()
+
+        assert settings.s3_endpoint_url is None
+        assert settings.s3_bucket == "finsight"
+        assert settings.s3_addressing_style is S3AddressingStyle.PATH
+        assert settings.s3_access_key_id is None
+        assert settings.s3_secret_access_key is None
+
+    def test_unset_credentials_are_allowed_for_the_default_chain(self) -> None:
+        """Cloud deployments supply credentials through instance or workload identity."""
+        assert Settings().s3_secret_access_key is None
+
+    def test_transfer_defaults(self) -> None:
+        settings = Settings()
+
+        assert settings.s3_connect_timeout_seconds == 5
+        assert settings.s3_read_timeout_seconds == 30
+        assert settings.s3_max_attempts == 3
+        assert settings.s3_multipart_threshold_bytes == 64 * 1024 * 1024
+        assert settings.s3_multipart_concurrency == 2
+
+    def test_checksums_are_sent_by_default(self) -> None:
+        """Verified working on the pinned backend, so the default is on."""
+        assert Settings().s3_send_checksum is True
+
+    def test_checksums_can_be_disabled_for_a_backend_that_rejects_them(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("FINSIGHT_S3_SEND_CHECKSUM", "false")
+
+        assert Settings().s3_send_checksum is False
+
+    def test_known_default_secret_key_is_rejected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("FINSIGHT_S3_SECRET_ACCESS_KEY", "minioadmin")
+
+        with pytest.raises(SettingsError) as error:
+            Settings()
+
+        assert "FINSIGHT_S3_SECRET_ACCESS_KEY" in str(error.value)
+        assert "minioadmin" not in str(error.value)
+
+    def test_accepted_secret_key_is_not_exposed_by_repr(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("FINSIGHT_S3_SECRET_ACCESS_KEY", TEST_PASSWORD)
+
+        assert TEST_PASSWORD not in repr(Settings())
+
+
+class TestEndpointSafety:
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://127.0.0.1:9000",
+            "http://localhost:9000",
+            "http://[::1]:9000",
+            "https://s3.example.com",
+        ],
+    )
+    def test_permitted_endpoints(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        endpoint: str,
+    ) -> None:
+        monkeypatch.setenv("FINSIGHT_S3_ENDPOINT_URL", endpoint)
+
+        assert Settings().s3_endpoint_url == endpoint
+
+    def test_plaintext_non_loopback_endpoint_is_rejected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Filings must never cross a network in clear text."""
+        monkeypatch.setenv("FINSIGHT_S3_ENDPOINT_URL", "http://storage.internal:9000")
+
+        with pytest.raises(SettingsError, match="non-loopback"):
+            Settings()
+
+    def test_unsupported_scheme_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FINSIGHT_S3_ENDPOINT_URL", "ftp://storage.internal")
+
+        with pytest.raises(SettingsError):
+            Settings()
+
+
+class TestUploadLimits:
+    def test_default_allowed_content_types_cover_the_supported_formats(self) -> None:
+        assert Settings().allowed_content_types == DEFAULT_ALLOWED_CONTENT_TYPES
+
+    def test_allowed_content_types_accept_a_comma_separated_list(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("FINSIGHT_ALLOWED_CONTENT_TYPES", "application/pdf, text/html")
+
+        assert Settings().allowed_content_types == ("application/pdf", "text/html")
+
+    def test_upload_limit_is_configurable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FINSIGHT_UPLOAD_MAX_BYTES", "1024")
+
+        assert Settings().upload_max_bytes == 1024
 
 
 def test_get_settings_returns_one_cached_instance() -> None:

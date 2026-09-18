@@ -37,12 +37,25 @@ select = [
     "RUF", # ruff-specific
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Alembic generates these files and rewrites them on every autogenerate. Its
+# emitted calls exceed the line limit, and hand-wrapping each new revision would
+# be a recurring tax with no readability gain. Only the length rule is relaxed.
+"migrations/versions/*.py" = ["E501"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
 warn_unreachable = true
 mypy_path = "src"
 plugins = ["pydantic.mypy"]
+
+# boto3 and botocore ship no type information. Adding stub packages would mean
+# another dependency for a boundary that is already isolated to one module, so
+# the untyped import is accepted there and nowhere else.
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"

@@ -9,6 +9,9 @@ __pycache__/
 # Local environment variables
 .env
 
+# Object-store identities file: contains the same credential as .env
+docker/seaweedfs/s3.json
+
 # Test and tool caches
 .pytest_cache/
 .mypy_cache/

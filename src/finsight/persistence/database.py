@@ -9,12 +9,23 @@ paths that never touch the database — such as liveness checks and contract tes
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
+from pathlib import Path
+from typing import Final
 
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from finsight.config.settings import get_settings
+
+MIGRATIONS_PATH: Final = Path(__file__).resolve().parents[3] / "migrations"
+"""Where the migration scripts live, relative to this module.
+
+Readiness compares the database's revision against the head of this directory, so
+any image that serves the readiness endpoint must ship it.
+"""
 
 
 @lru_cache(maxsize=1)
@@ -80,6 +91,28 @@ def is_database_reachable() -> bool:
     except SQLAlchemyError:
         return False
     return True
+
+
+def is_schema_current() -> bool:
+    """Report whether the database is migrated to the head revision.
+
+    PROJECT_BLUEPRINT.md §31.2 requires readiness to check schema compatibility as
+    well as dependency reachability: a reachable database running last week's
+    schema will fail in ways a connectivity probe cannot see.
+
+    Returns False rather than raising when the revision cannot be determined at
+    all — including when the migrations directory is absent from a deployment.
+    That is the honest answer for readiness, since an unverifiable schema is not a
+    verified one, though it cannot currently distinguish "behind" from
+    "unverifiable"; structured logging will separate them.
+    """
+    try:
+        head = ScriptDirectory(str(MIGRATIONS_PATH)).get_current_head()
+        with get_engine().connect() as connection:
+            applied = MigrationContext.configure(connection).get_current_heads()
+    except (SQLAlchemyError, OSError):
+        return False
+    return head is not None and applied == (head,)
 
 
 def dispose_engine() -> None:

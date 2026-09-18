@@ -302,7 +302,7 @@ All committed components are locally deployable and open-source or open-weight w
 | Frontend | Streamlit |
 | Authoritative database | PostgreSQL with SQLAlchemy, Psycopg, and Alembic |
 | Dense vector index | Qdrant |
-| Object storage | MinIO behind an object-storage abstraction; portability risk documented |
+| Object storage | S3-compatible object storage behind an object-store abstraction; SeaweedFS is the current local backend; portability risk documented |
 | Model runtime | Host-native Ollama accessed through HTTPX |
 | PDF fast path | PyMuPDF and pdfplumber |
 | Layout-aware PDF candidate | Docling |
@@ -346,7 +346,7 @@ PostgreSQL owns documents, processing jobs, source structure, chunks, facts, con
 
 ### 9.5 Object Storage
 
-MinIO stores immutable originals and approved artefacts through an abstraction that permits later replacement. The deployment pins and documents the chosen community image and its portability considerations.
+The object store holds immutable originals and approved artefacts through an abstraction that permits later replacement. SeaweedFS is the current local backend, reached only through the S3 API so that AWS S3, Cloudflare R2, or another S3-compatible service can replace it by configuration. A filesystem adapter implements the same port as the documented alternative path. The deployment pins the chosen image, records its resolved digest, and documents its portability considerations. ADR-001 records the current selection and the evidence behind it.
 
 ### 9.6 Dense Vector Storage
 
@@ -448,7 +448,7 @@ Users interact with the Streamlit client or API. The API coordinates authenticat
 
 ### 10.3 Infrastructure Components
 
-PostgreSQL, Qdrant, MinIO, and an optional validated execution-layer broker run as local infrastructure. Ollama runs on the host.
+PostgreSQL, Qdrant, the S3-compatible object store (currently SeaweedFS), and an optional validated execution-layer broker run as local infrastructure. Ollama runs on the host.
 
 ### 10.4 Host-Native Model Runtime
 
@@ -485,7 +485,7 @@ Upload
 
 ### 10.7 Authoritative and Derived State
 
-PostgreSQL is authoritative. Qdrant is derived and rebuildable. MinIO holds immutable source objects. No vector-store record can become financial truth.
+PostgreSQL is authoritative. Qdrant is derived and rebuildable. The object store holds immutable source objects. No vector-store record can become financial truth.
 
 ### 10.8 Trust Boundaries
 
@@ -493,7 +493,7 @@ Trust boundaries exist at upload, parser execution, retrieval-to-prompt assembly
 
 ### 10.9 Dependency Classification and Degradation
 
-Essential, degradable, and optional dependencies have explicit behavior. PostgreSQL gates readiness; Qdrant can degrade to lexical retrieval; MinIO loss disables source-object operations; generation loss enables deterministic fallback where possible.
+Essential, degradable, and optional dependencies have explicit behavior. PostgreSQL gates readiness; Qdrant can degrade to lexical retrieval; object-store loss disables source-object operations; generation loss enables deterministic fallback where possible.
 
 ## 11. Document Ingestion Architecture
 
@@ -535,7 +535,7 @@ The intended deployment separates two worker responsibilities:
 
 2. **Processing worker**
    - performs normalization, Fact Ledger construction, chunking, embedding, outbox processing, indexing, reconciliation, and evaluation work;
-   - may access PostgreSQL, MinIO, Qdrant, and configured local model endpoints as required.
+   - may access PostgreSQL, the object store, Qdrant, and configured local model endpoints as required.
 
 During early local development, parser isolation may not yet be technically enforced. Only trusted development documents are processed until the restricted parser container exists, and this limitation is recorded.
 
@@ -1446,11 +1446,11 @@ Qdrant stores vectors and filter payloads that can be rebuilt from PostgreSQL.
 
 ### 29.3 Object-Storage Abstraction
 
-Application code uses an object-store interface so MinIO can be replaced without changing domain logic.
+Application code uses an object-store interface so the backend can be replaced without changing domain logic. The interface, not the backend, is the architectural boundary: adapters are named for the protocol they speak rather than the vendor they address, and no module outside the adapter imports a storage SDK. ADR-001 records the occasion this was tested — a backend replacement that touched configuration and one adapter flag while the port, the key scheme, the domain model, and every unit test stayed unchanged.
 
-### 29.4 MinIO Deployment and Portability Risk
+### 29.4 Object-Store Deployment and Portability Risk
 
-The chosen MinIO deployment is documented and pinned. The project avoids proprietary coupling and preserves a filesystem or compatible S3 alternative path.
+The chosen object-store deployment is documented and pinned by tag, with its resolved digest recorded. The project avoids proprietary coupling and preserves a filesystem or compatible S3 alternative path. This risk has materialised once: the originally selected backend was archived upstream and its container images were withdrawn, and the recovery cost stayed within configuration because the abstraction held. Backend selection is revisited when upstream maintenance or image publication stops.
 
 ### 29.5 Immutable Source Storage
 
@@ -1952,7 +1952,7 @@ API behavior, authentication, decisions, codes, idempotency, and generated schem
 
 ### 37.4 Integration Testing
 
-Real PostgreSQL, Qdrant, MinIO, and selected model or stub boundaries.
+Real PostgreSQL, Qdrant, object storage, and selected model or stub boundaries.
 
 ### 37.5 Parser Comparison Testing
 
@@ -1990,13 +1990,13 @@ Docker Desktop uses the WSL 2 Linux-container backend and works from the VS Code
 
 ### 38.2 Docker Compose Topology
 
-The final local topology includes the API, restricted parser worker, processing worker, Streamlit UI, PostgreSQL, Qdrant, MinIO, and an optional validated Redis broker. Ollama remains on the Windows host.
+The final local topology includes the API, restricted parser worker, processing worker, Streamlit UI, PostgreSQL, Qdrant, the S3-compatible object store, and an optional validated Redis broker. Ollama remains on the Windows host.
 
 The Redis broker is included only if the Celery validation succeeds. PostgreSQL polling remains the fallback and requires no broker.
 
 ### 38.3 Containerized Infrastructure
 
-PostgreSQL, Qdrant, and MinIO are introduced before application containerization.
+PostgreSQL, Qdrant, and the object store are introduced before application containerization.
 
 ### 38.4 Restricted Parser Worker
 
@@ -2020,7 +2020,7 @@ Only required service ports and networks are exposed.
 
 ### 38.9 Persistent Volumes
 
-PostgreSQL, Qdrant, and MinIO data use named persistent volumes.
+PostgreSQL, Qdrant, and object-store data use named persistent volumes.
 
 ### 38.10 Health Checks and Start-Up Ordering
 
@@ -2184,9 +2184,9 @@ Small models may provide weaker prose or structured compliance than hosted front
 
 Layout and reranking models may compete with generation and infrastructure for memory.
 
-### 41.12 MinIO Ecosystem and Portability Risk
+### 41.12 Object-Store Ecosystem and Portability Risk
 
-Object storage is abstracted and the selected deployment is documented to reduce coupling.
+Object storage is abstracted and the selected deployment is documented to reduce coupling. This risk is realised rather than theoretical: the originally selected backend entered maintenance mode, stopped publishing container images, and was archived, which forced a replacement during Phase 3. The abstraction contained the cost. Self-hosted object storage remains a component whose upstream viability must be monitored rather than assumed.
 
 ### 41.13 Single-Node Deployment
 

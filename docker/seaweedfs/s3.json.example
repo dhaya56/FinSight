@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "Object-store identities. Copy to s3.json and fill in from .env, or generate it",
+    "with the command documented in the README. s3.json is gitignored because it",
+    "holds the same credential as .env.",
+    "",
+    "This file is required: without it the object store accepts ANY access key and",
+    "secret, which removes credential enforcement entirely."
+  ],
+  "identities": [
+    {
+      "name": "finsight",
+      "credentials": [
+        {
+          "accessKey": "REPLACE_WITH_FINSIGHT_S3_ACCESS_KEY_ID",
+          "secretKey": "REPLACE_WITH_FINSIGHT_S3_SECRET_ACCESS_KEY"
+        }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

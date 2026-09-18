@@ -11,12 +11,16 @@ implemented.
 
 ## Status
 
-Phase 2 — PostgreSQL infrastructure and authoritative database connectivity.
+Phase 3 — object storage, the first schema, and document intake.
 
-Implemented: packaging and tooling configuration, the `finsight` package, application settings
-including database configuration, and a local PostgreSQL service.
+Implemented: packaging and tooling, application settings, PostgreSQL with Alembic migrations, an
+S3-compatible object store behind a backend-neutral port, health and readiness endpoints, and
+document intake — validation, content-addressed preservation of originals, and identity recording.
 
-Not yet implemented: database migrations, document ingestion, parsing, the Fact Ledger, retrieval,
+Intake has no HTTP route yet. PROJECT_BLUEPRINT.md §28.2 requires authentication on every
+non-health route, so upload is exposed in the authentication phase.
+
+Not yet implemented: authentication, processing jobs, parsing, the Fact Ledger, retrieval,
 generation, the Evidence Gate, the user interface, and the evaluation harness. The repository grows
 one phase at a time; a directory exists only once its capability is implemented.
 
@@ -24,11 +28,13 @@ one phase at a time; a directory exists only once its capability is implemented.
 
 - Windows with Command Prompt
 - Python 3.12
-- Docker Desktop with the WSL 2 backend and Linux containers (verified, not used yet)
+- Docker Desktop with the WSL 2 backend and Linux containers
 - Ollama running on the Windows host (verified, not used yet)
 
-Measured host details are recorded in
-[ENV-001](evaluation/decision_records/architecture/ENV-001-environment-validation.md).
+Measured host details and validation results are recorded in the
+[decision records](evaluation/decision_records/architecture/): ENV-001 (host envelope), ENV-002
+(Docker and PostgreSQL), ENV-003 (object storage and schema), and ADR-001 (object-storage backend
+selection).
 
 ## Setup
 
@@ -55,8 +61,24 @@ rejected at startup when empty or when it matches a known default value such as 
 
 ## Local infrastructure
 
-PostgreSQL runs in a container and is authoritative for all application state. Docker Desktop must
-be running with the WSL 2 Linux-container backend.
+Two containers: PostgreSQL, authoritative for all application state, and SeaweedFS, which serves the
+S3 API for immutable source objects. Docker Desktop must be running with the WSL 2 Linux-container
+backend.
+
+### Object-store credentials
+
+SeaweedFS enforces S3 credentials only when given an identities file. Without one it accepts **any**
+access key and secret, so this file is a security control rather than a convenience. Generate it
+from the values already in `.env`:
+
+```cmd
+powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path docker/seaweedfs | Out-Null; $e=@{}; Get-Content .env | Where-Object { $_ -match '^FINSIGHT_S3_(ACCESS_KEY_ID|SECRET_ACCESS_KEY)=' } | ForEach-Object { $p=$_ -split '=',2; $e[$p[0]]=$p[1] }; $json=@{identities=@(@{name='finsight'; credentials=@(@{accessKey=$e['FINSIGHT_S3_ACCESS_KEY_ID']; secretKey=$e['FINSIGHT_S3_SECRET_ACCESS_KEY']}); actions=@('Admin','Read','Write','List','Tagging')})} | ConvertTo-Json -Depth 6; Set-Content -Path docker/seaweedfs/s3.json -Value $json -Encoding ascii"
+```
+
+`docker/seaweedfs/s3.json` is gitignored because it holds the same credential as `.env`.
+`s3.json.example` documents its shape.
+
+### Starting the stack
 
 ```cmd
 docker compose config
@@ -65,14 +87,27 @@ docker compose ps
 ```
 
 `docker compose config` fails with a named variable if anything required is missing from `.env`.
-The database is published on the loopback interface only. Data lives in the named volume
-`finsight-postgres-data` and survives `docker compose down`.
+Both services are published on the loopback interface only. Data lives in the named volumes
+`finsight-postgres-data` and `finsight-objectstore-data` and survives `docker compose down`.
 
 ```cmd
 docker compose down
 ```
 
-`docker compose down -v` additionally destroys the volume and every row in it.
+`docker compose down -v` additionally destroys the volumes and everything in them.
+
+## Database migrations
+
+PostgreSQL is authoritative, so every schema change is a reviewed, reversible Alembic revision.
+
+```cmd
+alembic upgrade head
+alembic current
+```
+
+Readiness reports the schema as current only when the database is at the head of `migrations/`, so
+run `alembic upgrade head` after pulling changes. The database URL is not configured in
+`alembic.ini`: it is built from settings so the password stays in `.env` alone.
 
 ## Running the API
 
@@ -87,8 +122,9 @@ Two health surfaces are available:
 | `GET /health/live` | Reports that the process is running. Touches no dependency, so it answers while the database is down. |
 | `GET /health/ready` | Returns 200 when every essential dependency is healthy, and 503 when one is not. |
 
-Readiness currently checks database reachability only. Schema-compatibility
-checking arrives with the first migrations.
+Readiness checks database reachability and schema currency. It returns 503 when the database is
+unreachable **or** when the schema is behind the head revision, and it names no component, because
+it is unauthenticated.
 
 ## Verification
 
@@ -120,6 +156,8 @@ service, install nothing, and download nothing.
 | `src/finsight/` | Application package |
 | `tests/` | Test suite, grouped by test type |
 | `config/` | Versioned runtime pipeline configuration |
+| `migrations/` | Alembic revisions; PostgreSQL schema history |
+| `docker/` | Service configuration for the local stack |
 | `data/` | Corpus manifest, reference seed data, fixtures, golden sets |
 | `evaluation/` | Experiment configurations and decision records |
 | `scripts/` | Environment and dependency verification helpers |

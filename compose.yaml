@@ -43,5 +43,44 @@ services:
     # (ENV-001 open item), so any value here would be invented. They are added
     # in the phase where multiple services coexist and memory is measured.
 
+  objectstore:
+    # SeaweedFS speaks the S3 API; the application knows only S3 and treats this
+    # as one endpoint among many. Pinned by tag; the resolved digest is recorded
+    # in ENV-003.
+    #
+    # The image lives on Docker Hub. GHCR hosts a Helm chart under the same name,
+    # not a container image, which is verified in ADR-001.
+    image: chrislusf/seaweedfs:4.47
+    restart: unless-stopped
+    # "mini" is the all-in-one single-node mode: master, volume, filer and S3 in
+    # one process. The admin UI is disabled because nothing here uses it.
+    #
+    # -s3.config is required, not optional: without an identities file SeaweedFS
+    # accepts ANY access key and secret, which would remove credential
+    # enforcement entirely. The file is generated locally and never committed.
+    command: >
+      mini
+      -dir=/data
+      -s3.config=/etc/seaweedfs/s3.json
+      -admin.ui=false
+    ports:
+      # Loopback only, and only the S3 port. Master, filer, volume and admin
+      # ports stay unpublished.
+      - "127.0.0.1:8333:8333"
+    volumes:
+      - finsight-objectstore-data:/data
+      - ./docker/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # Verified against this image: /status returns 200 on the S3 port, while
+      # / returns 403 because credentials are enforced.
+      test: ["CMD", "curl", "-f", "http://localhost:8333/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
 volumes:
   finsight-postgres-data:
+  finsight-objectstore-data:
