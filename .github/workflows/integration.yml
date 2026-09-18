@@ -1,12 +1,13 @@
 name: Integration
 
-# Runs only the integration checks that already pass locally, against an official
-# PostgreSQL service container. Kept separate from ci.yml, which runs unit and
-# contract checks and needs no infrastructure.
+# Runs only the integration checks that already pass locally, against official
+# service containers. Kept separate from ci.yml, which runs unit and contract
+# checks and needs no infrastructure.
 #
 # This job runs on Linux because GitHub service containers require a Linux
-# runner. The command is identical to the one proven locally on Windows, but the
-# runner operating system differs, so this workflow's own runs are its evidence.
+# runner. The commands are identical to the ones proven locally on Windows, but
+# the runner operating system differs, so this workflow's own runs are its
+# evidence.
 
 on:
   push:
@@ -22,7 +23,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  postgres:
+  infrastructure:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -47,6 +48,38 @@ jobs:
           --health-retries 5
           --health-start-period 30s
 
+      objectstore:
+        # Same pinned tag as compose.yaml.
+        #
+        # Service containers cannot override a command, so this runs the image's
+        # default and therefore without an S3 identities file, which means it
+        # accepts any credentials. That is acceptable for an ephemeral container
+        # holding no real data, and the path was verified to work locally before
+        # this workflow was written. Local development supplies the identities
+        # file and does enforce credentials.
+        image: chrislusf/seaweedfs:4.47
+        ports:
+          - 8333:8333
+        options: >-
+          --health-cmd "curl -f http://localhost:8333/status"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
+
+    env:
+      FINSIGHT_POSTGRES_HOST: 127.0.0.1
+      FINSIGHT_POSTGRES_PORT: "5432"
+      FINSIGHT_POSTGRES_DB: finsight
+      FINSIGHT_POSTGRES_USER: finsight
+      FINSIGHT_POSTGRES_PASSWORD: ephemeral-ci-value-not-a-real-credential
+      FINSIGHT_S3_ENDPOINT_URL: http://127.0.0.1:8333
+      FINSIGHT_S3_BUCKET: finsight
+      FINSIGHT_S3_REGION: us-east-1
+      FINSIGHT_S3_ADDRESSING_STYLE: path
+      FINSIGHT_S3_ACCESS_KEY_ID: finsight
+      FINSIGHT_S3_SECRET_ACCESS_KEY: ephemeral-ci-value-not-a-real-credential
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -61,11 +94,10 @@ jobs:
       - name: Install pinned dependencies
         run: python -m pip install -r requirements.txt
 
+      - name: Apply migrations
+        # Readiness reports the schema as current only at head, and the
+        # repository tests need the tables to exist.
+        run: python -m alembic upgrade head
+
       - name: Integration tests
-        env:
-          FINSIGHT_POSTGRES_HOST: 127.0.0.1
-          FINSIGHT_POSTGRES_PORT: "5432"
-          FINSIGHT_POSTGRES_DB: finsight
-          FINSIGHT_POSTGRES_USER: finsight
-          FINSIGHT_POSTGRES_PASSWORD: ephemeral-ci-value-not-a-real-credential
         run: python -m pytest -m integration
