@@ -13,6 +13,15 @@ ordering. Instead each depth of the element tree is inserted in one statement
 that returns its new ids in parameter order, and those ids become the next
 depth's parents.
 
+**Only a depth whose elements have children asks for those ids back**, and that
+is a measured decision rather than a tidy one. Correlating returned ids to the
+rows that produced them forces SQLAlchemy into much smaller insert batches: on
+this project's PostgreSQL 18 container, 20,000 rows took 23.2s with
+``sort_by_parameter_order=True`` and 2.5s without — 861 against 7,930 rows per
+second. Leaf elements dominate the row count and nothing ever reads their ids,
+so paying that for them would mean a five-hundred-page filing holding a
+transaction open for half a minute to buy nothing.
+
 There is no delete method, for the reason given in ``documents.py``: removal
 arrives as tombstoning (§29.12), and superseded runs stay resolvable so that
 citations issued against them keep working (§27.7).
@@ -81,6 +90,8 @@ class SourceRepository:
 
         One statement per depth. The root elements go first, their returned ids
         become the parents of the next depth, and so on until the tree runs out.
+        A depth with no children anywhere in it is the last, and is inserted
+        without asking for its ids back.
         """
         written = 0
         level: list[tuple[UUID | None, ExtractedElement]] = [
@@ -92,6 +103,10 @@ class SourceRepository:
                 _row_for(run_id=run_id, parent_id=parent_id, element=element)
                 for parent_id, element in level
             ]
+            if not any(element.children for _, element in level):
+                written += self._insert(rows)
+                break
+
             new_ids = self._insert_returning_ids(rows)
             written += len(new_ids)
             level = [
@@ -183,12 +198,23 @@ class SourceRepository:
         )
         return list(self._session.execute(statement).scalars())
 
+    def _insert(self, rows: list[dict[str, Any]]) -> int:
+        """Insert rows whose identifiers nobody needs, and report how many.
+
+        The fast path, used for the leaves of the tree. See the module docstring
+        for the measurement that makes this worth distinguishing.
+        """
+        self._session.execute(insert(SourceElement), rows)
+        return len(rows)
+
     def _insert_returning_ids(self, rows: list[dict[str, Any]]) -> list[UUID]:
         """Insert one depth of the tree and return the new ids in parameter order.
 
         ``sort_by_parameter_order`` is what makes the returned ids line up with
         the rows that produced them. Without it the database may return them in
         any order, and every parent link would be assigned to the wrong child.
+        It is also roughly ten times slower, which is why only a depth that
+        actually has children pays for it.
         """
         statement = insert(SourceElement).returning(
             SourceElement.id, sort_by_parameter_order=True
