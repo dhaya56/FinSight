@@ -14,6 +14,7 @@ from alembic import context
 
 from finsight.persistence.database import get_engine
 from finsight.persistence.tables import documents as _documents  # noqa: F401
+from finsight.persistence.tables import source as _source  # noqa: F401
 from finsight.persistence.tables.base import Base
 
 config = context.config

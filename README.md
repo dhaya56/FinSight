@@ -11,16 +11,23 @@ implemented.
 
 ## Status
 
-Phase 3 — object storage, the first schema, and document intake.
+Phase 4 — extraction and the source representation.
 
 Implemented: packaging and tooling, application settings, PostgreSQL with Alembic migrations, an
-S3-compatible object store behind a backend-neutral port, health and readiness endpoints, and
-document intake — validation, content-addressed preservation of originals, and identity recording.
+S3-compatible object store behind a backend-neutral port, health and readiness endpoints, document
+intake — validation, content-addressed preservation of originals, and identity recording — and PDF
+extraction into a citable source representation of pages and blocks with exact coordinates.
 
 Intake has no HTTP route yet. PROJECT_BLUEPRINT.md §28.2 requires authentication on every
-non-health route, so upload is exposed in the authentication phase.
+non-health route, so upload is exposed in the authentication phase. Extraction is driven from the
+command line in the meantime.
 
-Not yet implemented: authentication, processing jobs, parsing, the Fact Ledger, retrieval,
+The PDF producer is **provisional**, not selected. No evaluation has compared it against
+alternatives on real filings; see [ADR-002](evaluation/decision_records/architecture/ADR-002-provisional-pdf-producer.md).
+Reading order is single-column, tables are not yet extracted, and scanned pages record a coverage
+gap rather than being read.
+
+Not yet implemented: authentication, processing jobs, chunking, the Fact Ledger, retrieval,
 generation, the Evidence Gate, the user interface, and the evaluation harness. The repository grows
 one phase at a time; a directory exists only once its capability is implemented.
 
@@ -33,8 +40,8 @@ one phase at a time; a directory exists only once its capability is implemented.
 
 Measured host details and validation results are recorded in the
 [decision records](evaluation/decision_records/architecture/): ENV-001 (host envelope), ENV-002
-(Docker and PostgreSQL), ENV-003 (object storage and schema), and ADR-001 (object-storage backend
-selection).
+(Docker and PostgreSQL), ENV-003 (object storage and schema), ENV-004 (extraction), ADR-001
+(object-storage backend selection), and ADR-002 (provisional PDF producer).
 
 ## Setup
 
@@ -125,6 +132,38 @@ Two health surfaces are available:
 Readiness checks database reachability and schema currency. It returns 503 when the database is
 unreachable **or** when the schema is behind the head revision, and it names no component, because
 it is unauthenticated.
+
+## Extracting a document
+
+Extraction turns a stored document version into source elements — pages and blocks with exact
+coordinates — that later phases cite. It runs from the command line until there is an authenticated
+route to trigger it.
+
+```cmd
+python -m finsight.cli.main extract <document-version-id>
+```
+
+The identifier is the version recorded by intake. Both containers must be running: the original is
+read from object storage, and the elements are written to PostgreSQL.
+
+Re-running against the same version under the same extraction configuration is a **no-op**, and
+reports itself as one. Changing `EXTRACTION_CONFIG_VERSION` records a new run and moves the version
+to it; the superseded run and its elements are kept, so citations issued against them keep
+resolving.
+
+A run reports one of three states:
+
+| State | Meaning |
+|---|---|
+| `succeeded` | Every page yielded text |
+| `partial` | Some regions were not extracted, each recorded as a coverage gap with a reason |
+| `failed` | Nothing usable was produced; the attempt is recorded and may be retried |
+
+`partial` is not a warning to dismiss. A page that could not be read is stored as a row with a
+failure reason rather than silently omitted, so that later phases can tell a reader a region was
+never searched rather than implying it held nothing.
+
+The command prints identifiers, a state and a count. It never prints document content.
 
 ## Verification
 

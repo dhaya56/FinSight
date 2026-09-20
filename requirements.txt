@@ -35,6 +35,7 @@ mypy_extensions==1.1.0
 packageurl-python==0.17.6
 packaging==26.3
 pathspec==1.1.1
+pillow==12.3.0
 pip-requirements-parser==32.0.1
 pip_api==0.0.35
 pip_audit==2.10.1
@@ -48,11 +49,13 @@ pydantic==2.13.5
 pydantic-settings==2.15.0
 pydantic_core==2.46.5
 Pygments==2.21.0
+pymupdf==1.28.2
 pyparsing==3.3.2
 pytest==9.1.1
 pytest-cov==7.1.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.3
+reportlab==5.0.1
 requests==2.34.2
 rich==15.0.0
 ruff==0.16.7
