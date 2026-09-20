@@ -32,6 +32,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Final
+from uuid import UUID
 
 from finsight.domain.errors import DomainError
 
@@ -244,3 +245,24 @@ class ExtractedElement:
         describes. The database repeats the check as a constraint.
         """
         return None if self.text is None else len(self.text)
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedExtraction:
+    """The outcome of recording one extraction run.
+
+    Mirrors ``RecordedVersion``: a plain value the caller can hold after the
+    transaction has closed, rather than an ORM row that would expire with it.
+    """
+
+    run_id: UUID
+    document_version_id: UUID
+    state: ExtractionState
+    element_count: int
+    already_existed: bool = False
+    """True when a run for this configuration was already recorded.
+
+    Re-extracting the same version under the same producer policy and
+    configuration version is a no-op, enforced by the partial unique index
+    rather than by a prior read.
+    """

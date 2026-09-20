@@ -66,7 +66,10 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-pythonpath = ["src"]
+# "tests" is on the path so shared fixture builders such as pdf_fixtures.py are
+# importable from unit and integration suites alike, rather than relying on
+# pytest inserting each test file's own directory.
+pythonpath = ["src", "tests"]
 # Integration tests require live infrastructure and are excluded from the default
 # run. Request them explicitly with: python -m pytest -m integration
 addopts = "-ra --strict-markers --strict-config -m 'not integration'"

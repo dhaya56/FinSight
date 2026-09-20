@@ -45,6 +45,19 @@ class DocumentUnreadableError(ExtractionError):
     """
 
 
+class UnsupportedFormatError(ExtractionError):
+    """No producer is registered for this document's format.
+
+    Intake accepts spreadsheets, HTML and XML alongside PDFs, and only the PDF
+    path exists so far. Refusing is the honest outcome: handing a workbook to a
+    PDF producer would record a failed run and blame the document.
+    """
+
+
+class UnknownDocumentVersionError(ExtractionError):
+    """No document version exists with the requested identifier."""
+
+
 @runtime_checkable
 class PdfProducer(Protocol):
     """Produces source elements from PDF bytes.
