@@ -50,6 +50,12 @@ warn_unreachable = true
 mypy_path = "src"
 plugins = ["pydantic.mypy"]
 
+# PyMuPDF ships py.typed but annotates almost nothing, so strict mode rejects
+# every call into it. This exempts calls to that one library rather than
+# relaxing the adapter module, which would also hide genuinely untyped calls of
+# our own. Only pymupdf_adapter.py imports it, so the reach is one file.
+untyped_calls_exclude = ["pymupdf"]
+
 # boto3 and botocore ship no type information. Adding stub packages would mean
 # another dependency for a boundary that is already isolated to one module, so
 # the untyped import is accepted there and nowhere else.
