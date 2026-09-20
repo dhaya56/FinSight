@@ -101,6 +101,23 @@ class DocumentVersion(Base):
     """
 
     state: Mapped[str] = mapped_column(String(32), nullable=False, default=STATE_RECEIVED)
+    """Intake state only, and deliberately never widened for processing progress.
+
+    Extraction, chunking and indexing each record their own run and outcome. A
+    column that tracked both intake and processing would be two facts in one
+    place, and the two would eventually disagree.
+    """
+
+    current_extraction_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("extraction_runs.id", use_alter=True), nullable=True
+    )
+    """The extraction run whose elements are the current output of that stage.
+
+    Not named "active": §11.12 reserves activation for a *generation*, which
+    spans extraction, chunking and indexing and is what §20.2 filters retrieval
+    on. This pointer records what exists; it does not make anything queryable.
+    """
+
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
