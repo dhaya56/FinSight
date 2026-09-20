@@ -9,14 +9,6 @@ would just be in the wrong place.
 import io
 
 import pytest
-from pdf_fixtures import (
-    PAGE_HEIGHT,
-    PAGE_WIDTH,
-    PlacedText,
-    build_encrypted_pdf,
-    build_image_only_pdf,
-    build_pdf,
-)
 
 from finsight.domain.representations.source import (
     BlockLocation,
@@ -31,6 +23,14 @@ from finsight.extraction.contracts import (
 )
 from finsight.extraction.pdf.pymupdf_adapter import PyMuPdfProducer
 from finsight.extraction.pdf.quality_signals import NO_TEXT_EXTRACTED
+from pdf_fixtures import (
+    PAGE_HEIGHT,
+    PAGE_WIDTH,
+    PlacedText,
+    build_encrypted_pdf,
+    build_image_only_pdf,
+    build_pdf,
+)
 
 
 @pytest.fixture
