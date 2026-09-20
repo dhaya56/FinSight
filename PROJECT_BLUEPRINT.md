@@ -577,9 +577,13 @@ Page or table failures may produce partial readiness when remaining evidence is 
 
 Reprocessing creates a shadow generation while the active valid generation remains queryable.
 
+A generation is the unit of reprocessing. It spans extraction, normalization, chunking, and index synchronization for one document version, and it is the granularity at which retrieval filters evidence (§20.2). A generation is assembled from component runs — an extraction run, a chunking run, an indexing run — each recording its own producer, configuration version, and outcome. A component run completing does not make a generation active.
+
 ### 11.13 Atomic Generation Activation
 
 The active pointer switches only after required indexing and validation succeed. Failed shadow runs never replace active evidence.
+
+Component runs carry their own pointers identifying the current output of that stage. Those pointers record what exists; only generation activation determines what is queryable. The distinction matters because a stage may complete correctly while the generation it belongs to remains incomplete.
 
 ## 12. PDF Parsing and Layout Analysis
 
@@ -699,6 +703,8 @@ Source, retrieval, and canonical fact representations are independently stored a
 
 Format adapters emit a common set of page, section, block, table, cell, and span concepts without erasing format-specific source locations.
 
+The records of this model are source elements. Where later sections refer to source regions, they mean one or more source elements.
+
 ### 14.6 Contextual Metadata Enrichment
 
 Issuer, document type, heading path, page, period, basis, currency, scale, caption, and source location may be added deterministically to retrieval text.
@@ -709,7 +715,7 @@ Every chunk identifies the source regions from which it was constructed.
 
 ### 14.8 Source-to-Fact Provenance
 
-Every Fact resolves through provenance to a cell or span, ingest run, document version, and original object.
+Every Fact resolves through provenance to a cell or span, extraction run, document version, and original object.
 
 ### 14.9 Citation Boundaries
 
@@ -778,7 +784,7 @@ Financial context includes issuer, fiscal period, reporting basis, currency, pre
 
 ### 16.5 Fact Provenance
 
-Provenance records document version, ingest run, source cell or span, and extraction method and version.
+Provenance records document version, extraction run, source cell or span, and extraction method and version.
 
 ### 16.6 Financial Value States
 
@@ -894,7 +900,7 @@ Page furniture may be excluded when detection is reliable. Repeated substantive 
 
 ### 18.9 Source Attribution Preservation
 
-Each chunk retains explicit links to source regions and extraction generation.
+Each chunk retains explicit links to source regions and to the generation it belongs to.
 
 ### 18.10 Chunk Configuration Versioning
 

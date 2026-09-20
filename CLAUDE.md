@@ -32,19 +32,19 @@ Expected terminal state:
 
 Use Windows Command Prompt semantics for project commands. Do not use Ubuntu or WSL paths for project files.
 
-When Claude Code's internal shell is not Command Prompt, use:
+The developer runs commands from an activated Command Prompt, where `python`, `alembic`, and the `scripts\windows\*.cmd` helpers resolve normally.
 
-```cmd
-cmd.exe /d /c "<command>"
+Claude Code's internal shell is not Command Prompt, and wrapping commands as `cmd.exe /d /c "<command>"` does not work there: it opens an interactive shell and returns without executing the command string. Claude Code therefore invokes the project interpreter directly, which is the same interpreter an activated prompt would use:
+
+```text
+.venv/Scripts/python.exe -m pytest
+.venv/Scripts/python.exe -m ruff check .
+.venv/Scripts/python.exe -m alembic upgrade head
 ```
 
-For Python-dependent commands, use the project virtual environment in the same invocation when required:
+`.cmd` scripts cannot be executed from Claude Code's shell at all. Ask the developer to run them and report the output.
 
-```cmd
-cmd.exe /d /c "call .venv\Scripts\activate.bat && <command>"
-```
-
-Before Python work, verify that `python` resolves inside `.venv`. Docker commands may run from Windows Command Prompt while Docker Desktop uses its WSL 2 Linux-container backend.
+Before Python work, verify that the interpreter resolves inside `.venv`. Docker commands run directly and may be issued from either shell, while Docker Desktop uses its WSL 2 Linux-container backend.
 
 Claude Code can read only commands it executes and outputs supplied by the developer. Do not assume access to unrelated terminal history.
 
@@ -176,7 +176,7 @@ Claude Code may implement experiment infrastructure but must not choose a winner
 Develop Docker and CI alongside the application:
 
 1. Validate Docker Desktop, WSL 2, Linux containers, and Compose.
-2. Introduce PostgreSQL, Qdrant, and S3-compatible object-storage infrastructure.
+2. Introduce PostgreSQL, Qdrant, and S3-compatible object-storage infrastructure, each as its first consumer arrives rather than all at once. A service with no consumer is scaffolding.
 3. Run early Python services locally against containerized infrastructure and host-native Ollama.
 4. Containerize the API, restricted parser worker, processing worker, and UI after their local paths work.
 5. Add health checks, volumes, networking, and resource limits incrementally.
