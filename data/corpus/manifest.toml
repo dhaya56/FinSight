@@ -1,0 +1,21 @@
+# FinSight corpus manifest
+#
+# What was acquired, from where, and which split it belongs to
+# (PROJECT_BLUEPRINT.md §32.6). This file is committed; the documents it
+# describes are not — see data/corpus/README.md.
+#
+# Entries are authored by hand after a document has been downloaded, using the
+# block printed by:
+#
+#     python -m finsight.cli.main corpus checksum <path>
+#
+# An entry is never edited once its checksum is recorded. A re-download whose
+# bytes differ is a new candidate version (§32.7): add a new entry and set
+# superseded_by on the old one.
+
+manifest_version = 1
+
+# No documents are recorded yet. Acquisition is approval-gated (CLAUDE.md §4:
+# downloading corpus documents, and choosing dataset sources or split
+# assignments), and splits are assigned at acquisition so that no question is
+# ever authored against a document whose split is undecided (§32.9, §34.9).
