@@ -14,6 +14,7 @@ from finsight.domain.representations.source import (
     BlockLocation,
     ElementType,
     ExtractedElement,
+    ExtractionState,
     PageLocation,
 )
 from finsight.extraction.contracts import (
@@ -28,8 +29,15 @@ from pdf_fixtures import (
     PAGE_WIDTH,
     PlacedText,
     build_encrypted_pdf,
+    build_hyphenated_pdf,
     build_image_only_pdf,
+    build_malformed_pdf,
+    build_mixed_page_size_pdf,
     build_pdf,
+    build_rotated_pdf,
+    build_staggered_columns_pdf,
+    build_truncated_pdf,
+    build_two_column_pdf,
 )
 
 
@@ -269,10 +277,7 @@ class TestPageStructure:
 
     def test_page_rotation_is_recorded(self, producer: PyMuPdfProducer) -> None:
         """A viewer applies rotation, so a highlight must agree with it."""
-        data = build_pdf(
-            [[PlacedText("one", x=72, y_from_bottom=700)]], rotation=90
-        )
-        page = only_page(producer, data)
+        page = only_page(producer, build_rotated_pdf(90))
         assert isinstance(page.location, PageLocation)
 
         assert page.location.rotation == 90
@@ -325,6 +330,86 @@ class TestCoverageGaps:
         assert derive_state(extract(producer, data)).value == "succeeded"
 
 
+class TestLayoutFixtures:
+    """A synthetic control group.
+
+    When a real filing extracts badly, these say whether the document is unusual
+    or our code is wrong. Without them every real-document failure is a guess.
+    """
+
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    def test_a_rotated_page_still_yields_text(
+        self,
+        producer: PyMuPdfProducer,
+        rotation: int,
+    ) -> None:
+        """Landscape fold-outs are common in filings for wide tables.
+
+        This is also the assertion that was missing: the earlier rotation
+        fixture drew outside the rotated media box, so it produced a page with
+        no text at all, and a test that only checked the recorded angle passed
+        against nothing.
+        """
+        page = only_page(producer, build_rotated_pdf(rotation))
+        assert isinstance(page.location, PageLocation)
+
+        assert page.location.rotation == rotation
+        assert page.failure_reason is None
+        assert len(page.children) == 1
+
+    def test_page_dimensions_vary_within_one_document(
+        self,
+        producer: PyMuPdfProducer,
+    ) -> None:
+        """Geometry is per page; caching the first page's size mis-places citations."""
+        pages = extract(producer, build_mixed_page_size_pdf())
+        sizes = [
+            (round(page.location.width), round(page.location.height))
+            for page in pages
+            if isinstance(page.location, PageLocation)
+        ]
+
+        assert len(sizes) == 2
+        assert sizes[0] != sizes[1]
+
+    def test_aligned_columns_read_in_the_correct_order(
+        self,
+        producer: PyMuPdfProducer,
+    ) -> None:
+        """The control: each column merges into one block, and both start level."""
+        page = only_page(producer, build_two_column_pdf())
+        texts = [child.text or "" for child in page.children]
+
+        assert len(texts) == 2
+        assert texts[0].startswith("Revenue from operations")
+        assert texts[1].startswith("Finance costs")
+
+    def test_staggered_columns_are_read_across_rather_than_down(
+        self,
+        producer: PyMuPdfProducer,
+    ) -> None:
+        """The known multi-column failure, asserted rather than left implicit.
+
+        Correct reading order is the whole left column, then the right:
+        LEFT TOP, LEFT BOTTOM, RIGHT MIDDLE. The positional rule interleaves
+        them. Fixing this needs real filings and a recorded evaluation (§12.9),
+        so the failure is pinned here instead of hidden.
+        """
+        page = only_page(producer, build_staggered_columns_pdf())
+        order = [(child.text or "").strip() for child in page.children]
+
+        assert order == ["LEFT TOP", "RIGHT MIDDLE", "LEFT BOTTOM"]
+
+    def test_a_hyphen_at_a_line_break_is_preserved(
+        self,
+        producer: PyMuPdfProducer,
+    ) -> None:
+        """Rejoining is a retrieval-representation decision (§18.7), not extraction's."""
+        page = only_page(producer, build_hyphenated_pdf())
+
+        assert page.children[0].text == "consoli-\ndated statements\n"
+
+
 class TestControlledFailure:
     def test_an_encrypted_document_is_refused(
         self,
@@ -343,6 +428,47 @@ class TestControlledFailure:
     def test_an_empty_stream_is_refused(self, producer: PyMuPdfProducer) -> None:
         with pytest.raises(DocumentUnreadableError):
             extract(producer, b"")
+
+    def test_a_truncated_document_is_refused(self, producer: PyMuPdfProducer) -> None:
+        """Signed as a PDF, so it reaches the producer rather than intake."""
+        with pytest.raises(DocumentUnreadableError):
+            extract(producer, build_truncated_pdf())
+
+    @pytest.mark.parametrize(
+        "builder", [build_truncated_pdf, build_encrypted_pdf]
+    )
+    def test_unopenable_documents_raise(
+        self,
+        producer: PyMuPdfProducer,
+        builder: object,
+    ) -> None:
+        """No negative fixture may raise something the caller cannot classify.
+
+        An escaping ``RuntimeError`` from the parser would reach the service as
+        an unknown failure and be recorded as a defect rather than as a document
+        FinSight declined to read.
+        """
+        assert callable(builder)
+        with pytest.raises(DocumentUnreadableError):
+            extract(producer, builder())
+
+    def test_a_recovered_document_yields_nothing_rather_than_raising(
+        self,
+        producer: PyMuPdfProducer,
+    ) -> None:
+        """The second shape of controlled failure, and the less obvious one.
+
+        PyMuPDF **repairs** a broken cross-reference table rather than refusing
+        it, so a structurally malformed file opens cleanly with zero pages. That
+        is why ``derive_state`` treats an empty result as failed: a recovered
+        document with nothing in it is indistinguishable from a genuinely empty
+        one, and calling either a success would publish a filing FinSight never
+        read.
+        """
+        elements = extract(producer, build_malformed_pdf())
+
+        assert elements == ()
+        assert derive_state(elements) is ExtractionState.FAILED
 
     def test_failure_messages_carry_no_document_content(
         self,

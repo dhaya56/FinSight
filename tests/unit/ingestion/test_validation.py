@@ -17,6 +17,7 @@ from finsight.ingestion.validation.structural_limits import (
     ensure_not_empty,
     ensure_within_limit,
 )
+from pdf_fixtures import build_unsupported_format
 
 PDF = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\ntrailer\n%%EOF\n"
 HTML = b"<!DOCTYPE html><html><head><title>t</title></head><body>x</body></html>"
@@ -108,6 +109,22 @@ class TestAllowList:
             ensure_content_type_allowed(
                 "application/x-dosexec", DEFAULT_ALLOWED_CONTENT_TYPES
             )
+
+    def test_a_real_image_is_rejected_on_its_signature(self) -> None:
+        """End to end on real bytes rather than a MIME string.
+
+        §30.5 refuses a document for what its bytes are, not for what it is
+        called — so the negative fixture is a genuine PNG, and the rejection has
+        to survive detection before the allow-list ever sees a type.
+        """
+        detected = detect_content_type(build_unsupported_format(), filename="scan.png")
+
+        assert detected.startswith("image/")
+
+        with pytest.raises(DocumentRejectedError) as error:
+            ensure_content_type_allowed(detected, DEFAULT_ALLOWED_CONTENT_TYPES)
+
+        assert error.value.reason is RejectionReason.UNSUPPORTED_CONTENT_TYPE
 
 
 class TestStructuralLimits:

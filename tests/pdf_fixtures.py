@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from PIL import Image
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, LETTER
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
@@ -86,3 +86,140 @@ def build_encrypted_pdf() -> bytes:
         [[PlacedText("Confidential", x=72, y_from_bottom=700)]],
         encrypt=StandardEncryption("fixture-only-not-a-secret"),
     )
+
+
+# --- Layout fixtures (§33.6, layout half) -----------------------------------
+
+
+def build_rotated_pdf(rotation: int, *, text: str = "Revenue from operations") -> bytes:
+    """One rotated page that actually contains text.
+
+    The baseline is chosen against the rotated media box, not the nominal page.
+    ``setPageRotation(90)`` makes ReportLab write an 842x595 media box, so text
+    drawn 700pt up — comfortably inside a portrait A4 — lands *outside* the page
+    and extracts as nothing at all. A fixture that silently produced an empty
+    page would let a rotation test pass while proving nothing.
+    """
+    baseline = 500.0 if rotation in {90, 270} else 700.0
+    return build_pdf([[PlacedText(text, x=72, y_from_bottom=baseline)]], rotation=rotation)
+
+
+def build_mixed_page_size_pdf() -> bytes:
+    """A4 followed by Letter, so page geometry cannot be assumed document-wide.
+
+    Real filings mix sizes — a landscape fold-out for a wide table inside an
+    otherwise portrait report — and a reader that caches the first page's
+    dimensions would mis-place every citation after it.
+    """
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    pdf.setFont(FONT, FONT_SIZE)
+    pdf.drawString(72, 700, "A4 page")
+    pdf.showPage()
+
+    pdf.setPageSize(LETTER)
+    pdf.setFont(FONT, FONT_SIZE)
+    pdf.drawString(72, 700, "Letter page")
+    pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
+
+
+def build_two_column_pdf() -> bytes:
+    """Two aligned columns of continuous prose.
+
+    Both columns start at the same height, and PyMuPDF merges each into a single
+    block, so the positional rule orders them correctly. Kept as the control for
+    :func:`build_staggered_columns_pdf`, which is the case that fails.
+    """
+    left = ["Revenue from operations", "Other income", "Total income"]
+    right = ["Finance costs", "Depreciation", "Profit before tax"]
+    placements = [
+        PlacedText(line, x=72, y_from_bottom=700 - index * 16)
+        for index, line in enumerate(left)
+    ] + [
+        PlacedText(line, x=320, y_from_bottom=700 - index * 16)
+        for index, line in enumerate(right)
+    ]
+    return build_pdf([placements])
+
+
+def build_staggered_columns_pdf() -> bytes:
+    """Two columns whose blocks sit at different heights.
+
+    This is where top-to-bottom-then-left-to-right genuinely fails. Correct
+    reading order is the whole left column, then the right. The positional rule
+    interleaves them, because the right column's block starts higher than the
+    left column's second block.
+
+    Separated vertically on purpose: adjacent lines merge into one block, and a
+    merged column would hide the failure.
+    """
+    placements = [
+        PlacedText("LEFT TOP", x=72, y_from_bottom=700),
+        PlacedText("LEFT BOTTOM", x=72, y_from_bottom=400),
+        PlacedText("RIGHT MIDDLE", x=320, y_from_bottom=550),
+    ]
+    return build_pdf([placements])
+
+
+def build_hyphenated_pdf() -> bytes:
+    """A word split across a line break by a hyphen.
+
+    Extraction must not silently rejoin it: the hyphen is in the document, and
+    repairing it is a retrieval-representation decision (§18.7), not something
+    the source representation may do on its way past.
+    """
+    return build_pdf(
+        [
+            [
+                PlacedText("consoli-", x=72, y_from_bottom=700),
+                PlacedText("dated statements", x=72, y_from_bottom=684),
+            ]
+        ]
+    )
+
+
+# --- Negative fixtures (§33.9) ----------------------------------------------
+
+
+def build_truncated_pdf(keep: float = 0.4) -> bytes:
+    """A valid PDF cut short mid-stream.
+
+    Detected as a PDF by signature, so it reaches the producer rather than being
+    refused at intake — which is the point: the controlled failure being tested
+    is extraction's, not validation's.
+    """
+    whole = build_pdf([[PlacedText("Revenue from operations", x=72, y_from_bottom=700)]])
+    return whole[: int(len(whole) * keep)]
+
+
+def build_malformed_pdf() -> bytes:
+    """A PDF header with a structurally broken body.
+
+    Distinct from truncation in what it provokes, not just in shape. PyMuPDF
+    *repairs* a broken cross-reference table rather than refusing it, so this
+    file opens cleanly and reports zero pages — a silent emptiness rather than
+    an error. A truncated file, by contrast, cannot be opened at all. Both are
+    controlled failures; only one of them raises.
+    """
+    return (
+        b"%PDF-1.7\n"
+        b"1 0 obj\n<< /Type /Catalog /Pages 99 0 R >>\nendobj\n"
+        b"xref\n0 1\n0000000000 65535 f \n"
+        b"trailer\n<< /Size 1 /Root 1 0 R >>\n"
+        b"startxref\n999999\n"
+        b"%%EOF\n"
+    )
+
+
+def build_unsupported_format() -> bytes:
+    """A real PNG.
+
+    A genuine signature for a format the allow-list does not admit, so intake
+    refuses it on what the bytes are rather than on what they are called
+    (§30.5). Not a PDF pretending to be an image, and not random bytes.
+    """
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(buffer, format="PNG")
+    return buffer.getvalue()
