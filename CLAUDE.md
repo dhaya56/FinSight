@@ -241,3 +241,53 @@ After an approved task, stop and provide:
 Distinguish planned, implemented, tested, measured, approved, experimental, deferred, and complete work.
 
 File creation alone does not complete a phase.
+
+## 13. Evidence for significant engineering decisions
+
+Quantitative evidence is required for significant decisions, and only for those. The purpose is to preserve engineering evidence and measured achievements, not to benchmark routine work or to slow implementation.
+
+### When measurement is required
+
+All three conditions must hold:
+
+1. a significant engineering decision, problem, or tradeoff exists;
+2. a realistic alternative, fix, or candidate solution exists;
+3. the outcome could materially affect quality, accuracy, reliability, latency, memory, storage, scalability, maintainability, user experience, or operational cost.
+
+Situations that normally satisfy all three:
+
+- a production-selection decision;
+- a parser evaluation;
+- a chunking-method comparison;
+- a retrieval-strategy comparison;
+- an embedding-model comparison;
+- a reranker comparison;
+- a proposed optimization;
+- a significant bug fix;
+- a performance, memory, or latency issue;
+- a storage or infrastructure change under evaluation;
+- a claimed measurable quality improvement;
+- an investigation that finds a meaningful bottleneck, limitation, or unexpected behavior.
+
+### When measurement is not required
+
+Do not benchmark trivial choices, run an experiment for every comparison, or create process where no meaningful decision exists. When any of the three conditions above is absent, implement and move on.
+
+Measurement must not block implementation. When a measurement is needed but not yet possible — the data, workload, or infrastructure does not exist — implement under a stated assumption, record what is unmeasured as an open item with its owning phase, and measure when the missing piece arrives.
+
+### What to record
+
+- baseline;
+- candidate or proposed fix;
+- measurement method;
+- dataset or workload;
+- before result;
+- after result;
+- limitations;
+- final decision.
+
+Record it in the relevant decision record, or in the experiment record when the comparison is a versioned experiment. State limitations plainly: synthetic fixtures are evidence about plumbing, not about real documents, and a measurement taken on one is not a claim about the other.
+
+This rule does not relax any approval boundary. §3's prohibition on inventing measurements and §4's and §8's requirement of recorded evidence plus developer approval for production admission continue to apply.
+
+`ENV-004` is the worked example: a bottleneck found during validation, measured against a stated baseline and workload, with before and after figures, the limitation of its synthetic fixtures, and the resulting decision.
