@@ -342,7 +342,7 @@ Streamlit presents upload, query, comparison, evidence, status, and administrati
 
 ### 9.4 Authoritative Relational Storage
 
-PostgreSQL owns documents, processing jobs, source structure, chunks, facts, conflicts, queries, answers, traces, audits, and evaluation records.
+PostgreSQL owns documents, processing jobs, source structure, generations, chunks, index outbox events, facts, conflicts, queries, answers, traces, audits, and evaluation records.
 
 ### 9.5 Object Storage
 
@@ -355,6 +355,8 @@ Qdrant is the rebuildable vector index. It stores vectors and filter payloads, n
 ### 9.7 Runtime Lexical Search
 
 PostgreSQL full-text search is the committed lexical path. It is not described as BM25. `rank-bm25` remains an offline evaluation baseline.
+
+The text-search configuration is **not yet selected**. §32.3 makes the corpus India-first with non-Indian supplements, so a single hardcoded language is not a safe default. The configuration, how per-document language is determined, the index type, and any field weighting are chosen with recorded evidence when the lexical index is built, not assumed when it is first written.
 
 ### 9.8 Local Model Runtime
 
@@ -392,7 +394,9 @@ Pytest and Hypothesis cover deterministic and generated cases. Ruff, MyPy, cover
 
 Docker Compose runs application and infrastructure services. Ollama remains host-native to avoid container accelerator and memory complexity.
 
-The current target environment is a Windows laptop with Python 3.12, Docker Desktop using WSL 2, approximately 16 GB of system memory, and no assumed dedicated GPU.
+The current target environment is a Windows laptop with Python 3.12, Docker Desktop using WSL 2, approximately 16 GB of installed system memory, and no assumed dedicated GPU.
+
+Installed memory describes the machine, not the budget. Memory actually available under the complete running stack is materially smaller, is recorded in the environment validation records, and is the figure that governs parser and model selection. Sizing any component against the installed figure would overcommit the host.
 
 CPU model, available cores, usable memory under the complete stack, available disk space, and accelerator availability are measured during the environment and model validation phase. Parser and model selection must fit the measured resource envelope.
 
@@ -673,6 +677,8 @@ Real XBRL/iXBRL files are distinguished from generic XML before parser selection
 
 Arelle is introduced only if the selected authoritative corpus contains relevant XBRL/iXBRL. It remains an adapter into FinSight’s context and provenance model.
 
+The condition is assessed against the corpus manifest rather than assumed. A held-out format supplement does not activate it while that document remains frozen and unread; activation follows the first development-split document containing real XBRL or inline XBRL.
+
 ### 13.10 Format-Specific Source Locations
 
 PDF uses pages and regions, XLSX uses sheets and cells, HTML uses DOM elements, and XML/XBRL uses node or fact paths.
@@ -897,6 +903,8 @@ Only deterministic source-derived metadata is added.
 ### 18.8 Boilerplate Detection and Demotion
 
 Page furniture may be excluded when detection is reliable. Repeated substantive content is demoted or deduplicated rather than universally removed.
+
+Exclusion here means exclusion from retrieval ranking, never from storage. §5.3 and §15.1 require every successfully extracted narrative region to remain eligible for search, so boilerplate handling is a reversible, configuration-controlled ranking decision recorded against the affected unit — not a destructive filter that drops source-derived text.
 
 ### 18.9 Source Attribution Preservation
 
@@ -1734,6 +1742,18 @@ Fixtures are written test-first or alongside the code path they exercise. The en
 
 Synthetic results are always reported separately from real-filing results.
 
+### 33.12 Citation-Boundary Fixtures
+
+The same sentence repeated on two pages, a value appearing in both a table cell and narrative prose at differing precision, and a value split across a line break. §36.6 measures citation accuracy, and §27.6 and §27.7 require citation resolution and context validation; without fixtures that attack those boundaries deliberately, there is nothing deterministic to measure them against.
+
+### 33.13 Language and Script Fixtures
+
+Devanagari, bilingual headings, and Indian digit grouping. §9.7 commits to PostgreSQL full-text search without fixing a text-search configuration, and a single-language assumption fails silently rather than loudly.
+
+### 33.14 Boilerplate and Repetition Fixtures
+
+Controlled repetition of page furniture and of substantive content. §18.8 requires demotion rather than removal and §36.3 measures duplication; neither is evaluable without fixtures that generate repetition deliberately.
+
 ## 34. Golden Set and Evaluation Splits
 
 ### 34.1 Golden-Set Purpose
@@ -1779,6 +1799,10 @@ Held-out labels and documents are frozen at declared points. Corrections trigger
 ### 34.11 Annotation Quality and Self-Consistency
 
 A delayed blind second pass over a sample measures single-annotator consistency.
+
+### 34.12 Issuer Disjointness Between Splits
+
+No issuer appears in both a development split and a held-out split. Two filings from one issuer restate the same financial facts, so holding one out while developing against the other leaks the answer across the split boundary and invalidates the held-out measurement. This applies across formats: an issuer's annual report and its regulator-filed equivalent are the same issuer.
 
 ## 35. Experiment-Driven Configuration Selection
 
@@ -1864,9 +1888,7 @@ A technique enters runtime only after reproducible benefit, acceptable cost, pre
 
 ## 36. Evaluation Methodology
 
-The evaluation harness is a dedicated command-line application that can also be dispatched through an administrator-controlled background job after the execution layer is available.
-
-PostgreSQL stores evaluation-run identity, configuration, provenance, status, and compact metric records. Versioned JSON, CSV, Markdown, and plot artifacts are written to the approved artifact store. Measured results are never embedded directly into the project blueprint.
+This section defines what is measured. The harness itself and the storage of its results are defined once, in §36.16.
 
 ### 36.1 Parsing and Extraction Metrics
 
