@@ -57,7 +57,17 @@ _DOCUMENT_ID: Final = re.compile(r"\A[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 names, report output and decision records, so it must never need escaping."""
 
 
-class ManifestError(RuntimeError):
+class CorpusError(RuntimeError):
+    """Base class for corpus governance failures.
+
+    A separate family from ``DomainError`` and ``ObjectStoreError`` because these
+    are failures of the *record* — a malformed manifest, a document that no
+    longer matches its checksum, an attempt to read frozen evidence — rather than
+    of a document or a backend.
+    """
+
+
+class ManifestError(CorpusError):
     """The manifest is malformed, or violates a corpus rule.
 
     Messages name the offending ``document_id`` and the rule it broke. They never
