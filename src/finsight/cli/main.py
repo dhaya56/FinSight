@@ -9,12 +9,14 @@ piping it into a log, must not thereby disclose the contents of a filing.
 """
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from uuid import UUID
 
 from finsight.corpus.manifest import MANIFEST_PATH, CorpusError, Split, load_manifest
+from finsight.corpus.service import IngestionReport, build_corpus_ingestion_service
 from finsight.corpus.store import CorpusStore, digest_of
 from finsight.domain.errors import DomainError
 from finsight.extraction.service import build_extraction_service
@@ -78,6 +80,26 @@ def _add_corpus_commands(subcommands: argparse._SubParsersAction) -> None:  # ty
     listing = commands.add_parser("list", help="List recorded documents.")
     _add_split_option(listing)
     listing.set_defaults(handler=run_corpus_list)
+
+    ingest = commands.add_parser(
+        "ingest", help="Put corpus documents through intake and extraction."
+    )
+    ingest.add_argument(
+        "--split",
+        type=Split,
+        choices=list(Split),
+        default=Split.DEVELOPMENT,
+        help="Which split to ingest. Defaults to development; held-out is refused.",
+    )
+    ingest.add_argument(
+        "--report", type=Path, default=None, help="Write a JSON report to this path."
+    )
+    ingest.add_argument(
+        "--measure-memory",
+        action="store_true",
+        help="Record peak Python allocation. Slows extraction and distorts timings.",
+    )
+    ingest.set_defaults(handler=run_corpus_ingest)
 
 
 def _add_split_option(parser: argparse.ArgumentParser) -> None:
@@ -169,6 +191,86 @@ def run_corpus_verify(args: argparse.Namespace) -> int:
 
     print(f"{len(entries) - failed} intact, {failed} failed")
     return EXIT_FAILED if failed else EXIT_OK
+
+
+def run_corpus_ingest(args: argparse.Namespace) -> int:
+    """Ingest a split and report what each document produced.
+
+    The default split is ``development``, not every split: a command that
+    processes documents must not reach frozen evidence because a flag was
+    omitted. Held-out entries are refused by the store regardless.
+    """
+    entries = _selected(args)
+    if not entries:
+        print("no documents recorded for that selection")
+        return EXIT_OK
+
+    service = build_corpus_ingestion_service(_corpus_store())
+    report = service.ingest(entries, measure_memory=args.measure_memory)
+
+    for outcome in report.outcomes:
+        if outcome.failure is not None:
+            print(f"  {outcome.document_id:40} FAILED {outcome.failure}")
+            continue
+        counts = outcome.counts
+        state = outcome.state.value if outcome.state else "unknown"
+        detail = (
+            f"pages={counts.pages} blocks={counts.blocks} gaps={counts.coverage_gaps}"
+            if counts
+            else ""
+        )
+        memory = (
+            f" peak_python_mib={outcome.peak_python_mib:.1f}"
+            if outcome.peak_python_mib is not None
+            else ""
+        )
+        print(
+            f"  {outcome.document_id:40} {state:10} {detail} "
+            f"{outcome.seconds:.2f}s{memory}"
+        )
+
+    failed = len(report.failures)
+    print(
+        f"{len(report.outcomes) - failed} succeeded, {failed} failed, "
+        f"{report.total_seconds:.2f}s total"
+    )
+
+    if args.report is not None:
+        _write_report(args.report, report)
+        print(f"report written to {args.report}")
+
+    return EXIT_FAILED if failed else EXIT_OK
+
+
+def _write_report(path: Path, report: IngestionReport) -> None:
+    """Write per-document detail that is too long for a decision record.
+
+    A real offer document produces more coverage detail than belongs in ENV
+    prose. The file holds identifiers and counts only — never document content.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "total_seconds": round(report.total_seconds, 3),
+        "documents": [
+            {
+                "document_id": outcome.document_id,
+                "byte_size": outcome.byte_size,
+                "state": outcome.state.value if outcome.state else None,
+                "already_existed": outcome.already_existed,
+                "pages": outcome.counts.pages if outcome.counts else None,
+                "blocks": outcome.counts.blocks if outcome.counts else None,
+                "elements": outcome.counts.total if outcome.counts else None,
+                "coverage_gaps": (
+                    outcome.counts.coverage_gaps if outcome.counts else None
+                ),
+                "seconds": round(outcome.seconds, 3),
+                "peak_python_mib": outcome.peak_python_mib,
+                "failure": outcome.failure,
+            }
+            for outcome in report.outcomes
+        ],
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def run_corpus_list(args: argparse.Namespace) -> int:

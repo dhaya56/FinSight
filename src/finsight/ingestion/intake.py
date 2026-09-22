@@ -19,7 +19,7 @@ transactions bounded as §29.7 requires.
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import BinaryIO, Protocol
+from typing import IO, Protocol
 
 from sqlalchemy.orm import Session
 
@@ -122,7 +122,7 @@ class IntakeService:
 
     def receive(
         self,
-        source: BinaryIO,
+        source: IO[bytes],
         *,
         declared_content_type: str | None = None,
         filename: str | None = None,
