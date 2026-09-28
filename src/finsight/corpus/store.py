@@ -19,7 +19,7 @@ below the CLI, so that no future command can forget to apply it.
 """
 
 import hashlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,6 +149,36 @@ class CorpusStore:
                 "its content may not be read (§34.6). Checksum verification is "
                 "permitted and does not require this."
             )
+
+
+MEDIA_TYPES: Final[Mapping[str, str]] = {
+    ".pdf": "application/pdf",
+    ".htm": "text/html",
+    ".html": "text/html",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xml": "application/xml",
+}
+"""Extensions to the media types intake admits.
+
+Deliberately an explicit table rather than :mod:`mimetypes`, whose answers on
+Windows come partly from the registry and therefore differ between machines. A
+manifest is a reproducible record; a lookup that varies by host is not.
+
+It covers exactly the formats on intake's allow-list. Mapping anything else
+would produce a manifest entry that intake would refuse anyway.
+"""
+
+
+def media_type_for(path: Path) -> str | None:
+    """Suggest the media type for a freshly acquired file, or None if unknown.
+
+    A hint for whoever is writing the manifest entry, **not** detection. What a
+    document actually is gets decided at intake from its signature (§30.5), and a
+    declared type that contradicts the bytes is refused there. So a misleading
+    extension here costs an edit, not an integrity failure — which is why
+    guessing is better replaced by admitting the extension is unrecognised.
+    """
+    return MEDIA_TYPES.get(path.suffix.lower())
 
 
 def digest_of(path: Path) -> tuple[str, int]:

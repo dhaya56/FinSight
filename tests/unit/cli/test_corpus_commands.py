@@ -228,6 +228,31 @@ class TestChecksum:
     def test_a_missing_file_exits_non_zero(self, corpus: Path, tmp_path: Path) -> None:
         assert cli.main(["corpus", "checksum", str(tmp_path / "absent.pdf")]) == 1
 
+    def test_the_media_type_follows_the_file(self, corpus: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+        """An HTML format supplement must not be described as a PDF."""
+        path = corpus / "held_out_format_supplement" / "us-10k-probe-2026.htm"
+        path.write_bytes(b"<!DOCTYPE html><html><body>x</body></html>")
+
+        cli.main(["corpus", "checksum", str(path)])
+        out = capsys.readouterr().out
+
+        assert 'format            = "text/html"' in out
+        assert "application/pdf" not in out
+
+    def test_an_unrecognised_extension_is_flagged_rather_than_guessed(
+        self,
+        corpus: Path,
+        capsys,  # type: ignore[no-untyped-def]
+    ) -> None:
+        path = corpus / "development" / "acquired.dat"
+        path.write_bytes(CONTENT)
+
+        cli.main(["corpus", "checksum", str(path)])
+        out = capsys.readouterr().out
+
+        assert 'format            = "<media type>"' in out
+        assert "Unrecognised extension" in out
+
 
 class TestArgumentParsing:
     def test_the_group_requires_a_subcommand(self, corpus: Path) -> None:

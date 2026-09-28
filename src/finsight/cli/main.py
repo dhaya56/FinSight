@@ -17,7 +17,7 @@ from uuid import UUID
 
 from finsight.corpus.manifest import MANIFEST_PATH, CorpusError, Split, load_manifest
 from finsight.corpus.service import IngestionReport, build_corpus_ingestion_service
-from finsight.corpus.store import CorpusStore, digest_of
+from finsight.corpus.store import CorpusStore, digest_of, media_type_for
 from finsight.domain.errors import DomainError
 from finsight.extraction.service import build_extraction_service
 from finsight.object_store.port import ObjectStoreError
@@ -139,6 +139,7 @@ def run_corpus_checksum(args: argparse.Namespace) -> int:
     digest, byte_size = digest_of(path)
     split = path.parent.name
     known = split if split in {member.value for member in Split} else "<split>"
+    media_type = media_type_for(path)
 
     print("[[document]]")
     print('document_id       = "<issuer-type-period>"')
@@ -146,11 +147,13 @@ def run_corpus_checksum(args: argparse.Namespace) -> int:
     print(f'filename          = "{path.name}"')
     print(f"byte_size         = {byte_size}")
     print(f'sha256            = "{digest}"')
-    print('format            = "application/pdf"')
+    print(f'format            = "{media_type or "<media type>"}"')
     print("# Complete the remaining fields listed in data/corpus/README.md.")
     print("# Record expected_challenges BEFORE running extraction.")
     if known == "<split>":
         print("# This file is not in a split directory; move it first.")
+    if media_type is None:
+        print("# Unrecognised extension; set format to the type intake will detect.")
     return EXIT_OK
 
 

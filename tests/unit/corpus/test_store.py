@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from finsight.config.settings import DEFAULT_ALLOWED_CONTENT_TYPES
 from finsight.corpus.manifest import (
     CorpusEntry,
     DocumentType,
@@ -19,12 +20,16 @@ from finsight.corpus.manifest import (
     Split,
 )
 from finsight.corpus.store import (
+    MEDIA_TYPES,
     ChecksumMismatchError,
     CorpusStore,
     DocumentMissingError,
     HeldOutAccessError,
     digest_of,
+    media_type_for,
 )
+
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 CONTENT = b"%PDF-1.7\nnot a real filing, but real bytes\n"
 DIGEST = hashlib.sha256(CONTENT).hexdigest()
@@ -185,6 +190,40 @@ class TestHeldOutGuard:
         """
         with pytest.raises(HeldOutAccessError), corpus.open_content(held_out()):
             pass
+
+
+class TestMediaTypeFor:
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("report.pdf", "application/pdf"),
+            ("filing.htm", "text/html"),
+            ("filing.html", "text/html"),
+            ("book.xlsx", XLSX_MEDIA_TYPE),
+            ("facts.xml", "application/xml"),
+        ],
+    )
+    def test_recognises_the_formats_intake_admits(
+        self, tmp_path: Path, name: str, expected: str
+    ) -> None:
+        assert media_type_for(tmp_path / name) == expected
+
+    @pytest.mark.parametrize("name", ["REPORT.PDF", "Filing.HtM"])
+    def test_the_extension_is_matched_case_insensitively(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        assert media_type_for(tmp_path / name) is not None
+
+    @pytest.mark.parametrize("name", ["scan.png", "notes.docx", "archive", "data.csv"])
+    def test_an_unrecognised_extension_admits_it_rather_than_guessing(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        """Defaulting to PDF is how a wrong media type reaches the manifest."""
+        assert media_type_for(tmp_path / name) is None
+
+    def test_every_mapped_type_is_one_intake_allows(self) -> None:
+        """A suggestion intake would refuse is worse than no suggestion."""
+        assert set(MEDIA_TYPES.values()) <= set(DEFAULT_ALLOWED_CONTENT_TYPES)
 
 
 class TestDigestOf:
