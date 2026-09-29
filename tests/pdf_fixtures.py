@@ -92,16 +92,38 @@ def build_encrypted_pdf() -> bytes:
 
 
 def build_rotated_pdf(rotation: int, *, text: str = "Revenue from operations") -> bytes:
-    """One rotated page that actually contains text.
+    """One rotated page whose text is placed where rotation actually matters.
 
-    The baseline is chosen against the rotated media box, not the nominal page.
-    ``setPageRotation(90)`` makes ReportLab write an 842x595 media box, so text
-    drawn 700pt up — comfortably inside a portrait A4 — lands *outside* the page
-    and extracts as nothing at all. A fixture that silently produced an empty
-    page would let a rotation test pass while proving nothing.
+    Two traps are avoided here, and the second one hid a real defect for a while.
+
+    ``setPageRotation(90)`` makes ReportLab swap the media box, so text drawn
+    700pt up — comfortably inside a portrait A4 — lands *outside* the page and
+    extracts as nothing. A fixture that silently produced an empty page lets a
+    rotation test pass while proving nothing.
+
+    Worse, text near the origin corner sits inside *both* the rotated and the
+    unrotated coordinate space, so a box that was never transformed still looks
+    valid. The placement below is deliberately far from that corner: on a
+    rotated page the untransformed box falls outside the displayed rectangle,
+    which is what makes the assertion in the producer's tests able to fail.
     """
-    baseline = 500.0 if rotation in {90, 270} else 700.0
-    return build_pdf([[PlacedText(text, x=72, y_from_bottom=baseline)]], rotation=rotation)
+    if rotation in {90, 270}:
+        # Landscape page size, so ReportLab writes a portrait media box and a
+        # /Rotate entry — the shape real annual reports use for fold-out tables.
+        page_size = (PAGE_HEIGHT, PAGE_WIDTH)
+        placement = PlacedText(text, x=300, y_from_bottom=100)
+    else:
+        page_size = (PAGE_WIDTH, PAGE_HEIGHT)
+        placement = PlacedText(text, x=300, y_from_bottom=100)
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=page_size)
+    pdf.setPageRotation(rotation)
+    pdf.setFont(FONT, FONT_SIZE)
+    pdf.drawString(placement.x, placement.y_from_bottom, placement.text)
+    pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
 
 
 def build_mixed_page_size_pdf() -> bytes:

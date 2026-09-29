@@ -343,19 +343,58 @@ class TestLayoutFixtures:
         producer: PyMuPdfProducer,
         rotation: int,
     ) -> None:
-        """Landscape fold-outs are common in filings for wide tables.
-
-        This is also the assertion that was missing: the earlier rotation
-        fixture drew outside the rotated media box, so it produced a page with
-        no text at all, and a test that only checked the recorded angle passed
-        against nothing.
-        """
+        """Landscape fold-outs are common in filings for wide tables."""
         page = only_page(producer, build_rotated_pdf(rotation))
         assert isinstance(page.location, PageLocation)
 
         assert page.location.rotation == rotation
         assert page.failure_reason is None
         assert len(page.children) == 1
+
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    def test_a_block_box_lies_within_its_own_page(
+        self,
+        producer: PyMuPdfProducer,
+        rotation: int,
+    ) -> None:
+        """The assertion that was missing, and the defect it would have caught.
+
+        PyMuPDF reports text in unrotated page space while ``page.rect`` is the
+        rotated display box, so on a ``/Rotate 90`` page an untransformed block
+        sits outside the page it belongs to. Checking only that text came back
+        passed regardless; checking only a box near the origin passed too,
+        because that corner is inside both spaces.
+
+        On the development corpus this was 2,401 blocks across 78 pages of one
+        annual report, every one of them a citation pointing somewhere the
+        reader is not looking.
+        """
+        page = only_page(producer, build_rotated_pdf(rotation))
+        assert isinstance(page.location, PageLocation)
+        block = page.children[0]
+        assert isinstance(block.location, BlockLocation)
+
+        x0, y0, x1, y1 = block.location.bbox
+        assert x0 >= 0 and x1 <= page.location.width + 1
+        assert y0 >= 0 and y1 <= page.location.height + 1
+
+    def test_an_untransformed_box_would_fail_that_check(self) -> None:
+        """Proves the fixture can actually fail, rather than passing by luck.
+
+        Without this, a future change that dropped the rotation transform could
+        be met by a fixture whose text happened to sit inside both coordinate
+        spaces, and the suite would stay green.
+        """
+        import pymupdf
+
+        with pymupdf.open(stream=build_rotated_pdf(90), filetype="pdf") as document:
+            pdf_page = document[0]
+            raw = next(e for e in pdf_page.get_text("blocks") if e[6] == 0)
+            rotation = pdf_page.rotation
+            width, height = pdf_page.rect.width, pdf_page.rect.height
+
+        assert rotation == 90
+        assert raw[3] > height or raw[2] > width
 
     def test_page_dimensions_vary_within_one_document(
         self,
