@@ -11,12 +11,13 @@ implemented.
 
 ## Status
 
-Phase 4 — extraction and the source representation.
+Phase 5 — the development corpus and real-document validation.
 
 Implemented: packaging and tooling, application settings, PostgreSQL with Alembic migrations, an
 S3-compatible object store behind a backend-neutral port, health and readiness endpoints, document
-intake — validation, content-addressed preservation of originals, and identity recording — and PDF
-extraction into a citable source representation of pages and blocks with exact coordinates.
+intake — validation, content-addressed preservation of originals, and identity recording — PDF
+extraction into a citable source representation of pages and blocks with exact coordinates, and a
+governed development corpus of real filings that the extraction path has been measured against.
 
 Intake has no HTTP route yet. PROJECT_BLUEPRINT.md §28.2 requires authentication on every
 non-health route, so upload is exposed in the authentication phase. Extraction is driven from the
@@ -24,8 +25,14 @@ command line in the meantime.
 
 The PDF producer is **provisional**, not selected. No evaluation has compared it against
 alternatives on real filings; see [ADR-002](evaluation/decision_records/architecture/ADR-002-provisional-pdf-producer.md).
-Reading order is single-column, tables are not yet extracted, and scanned pages record a coverage
-gap rather than being read.
+Tables are not yet extracted, and pages that yield no text record a coverage gap rather than being
+read by other means.
+
+Reading order is **positional** — top to bottom, then left to right — which is not column-aware.
+Measured across the 1,403 pages of the development corpus, a column-aware ordering would differ on
+195 of them (14%): 25% of one annual report, 13% of another, and under 1% of the offer document.
+Choosing between the two needs a recorded comparison on development data (§35.4), so the limitation
+is measured and asserted by test rather than assumed away.
 
 Not yet implemented: authentication, processing jobs, chunking, the Fact Ledger, retrieval,
 generation, the Evidence Gate, the user interface, and the evaluation harness. The repository grows
@@ -40,8 +47,9 @@ one phase at a time; a directory exists only once its capability is implemented.
 
 Measured host details and validation results are recorded in the
 [decision records](evaluation/decision_records/architecture/): ENV-001 (host envelope), ENV-002
-(Docker and PostgreSQL), ENV-003 (object storage and schema), ENV-004 (extraction), ADR-001
-(object-storage backend selection), and ADR-002 (provisional PDF producer).
+(Docker and PostgreSQL), ENV-003 (object storage and schema), ENV-004 (extraction), ENV-005 (corpus
+and real-document validation), ADR-001 (object-storage backend selection), and ADR-002 (provisional
+PDF producer).
 
 ## Setup
 
@@ -164,6 +172,51 @@ failure reason rather than silently omitted, so that later phases can tell a rea
 never searched rather than implying it held nothing.
 
 The command prints identifiers, a state and a count. It never prints document content.
+
+## The development corpus
+
+The filings FinSight develops and measures against, governed by PROJECT_BLUEPRINT.md §32 and §34.
+Acquisition is manual and approval-gated; the procedure is in
+[data/corpus/README.md](data/corpus/README.md).
+
+### Two rules that the tooling enforces
+
+**Corpus documents are never committed.** Public availability is not redistribution permission
+(§32.8), so the repository holds `data/corpus/manifest.toml` and its checksums while the bytes stay
+local. The three split directories are gitignored. The checksum is what makes the corpus
+reproducible, not the files.
+
+**Held-out documents are hashed but never read.** Entries in `held_out_pdf_core/` and
+`held_out_format_supplement/` carry a `frozen_at` date, and any command that would read their
+content is refused. Checksum verification is still permitted: hashing bytes discloses nothing, and
+§34.6 forbids tuning against held-out data, not checking that it is intact. A freeze applied after
+someone has looked inside protects nothing.
+
+### Commands
+
+```cmd
+python -m finsight.cli.main corpus checksum data\corpus\<split>\<file>
+python -m finsight.cli.main corpus validate
+python -m finsight.cli.main corpus verify [--split <split>]
+python -m finsight.cli.main corpus list [--split <split>]
+python -m finsight.cli.main corpus ingest [--split development] [--report <path>] [--measure-memory]
+```
+
+| Command | Behaviour |
+|---|---|
+| `checksum` | Prints a paste-ready `[[document]]` block for a freshly acquired file, with split, filename, size, digest and media type filled in. It prints rather than writes, so the manifest stays a reviewed artefact rather than a generated one. |
+| `validate` | Checks the manifest against the corpus rules — split names, freeze dates, digests, issuer disjointness across splits (§34.12), unique identifiers. Also reports any entry with unrecorded fields, so a gap stays distinguishable from an oversight. |
+| `verify` | Confirms local bytes still hash to what was recorded. Runs across held-out splits too. |
+| `list` | Lists recorded documents and marks the frozen ones. |
+| `ingest` | Puts documents through intake and extraction. Defaults to the development split; held-out is refused by the store, not by a flag check. Re-running is a no-op. `--measure-memory` records peak Python allocation and inflates the timings, so it is off by default. |
+
+`validate`, `verify`, `list` and `checksum` need no running services. `ingest` needs both
+PostgreSQL and the object store.
+
+Measured results from the first real-document run are in
+[ENV-005](evaluation/decision_records/architecture/ENV-005-corpus-and-real-document-validation.md).
+Three documents are not a basis for quality claims: that run establishes that extraction is
+complete, bounded and internally consistent, not that it is accurate.
 
 ## Verification
 
