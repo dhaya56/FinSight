@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from tempfile import SpooledTemporaryFile
-from typing import IO, BinaryIO, Final
+from typing import IO, Final
 
 from finsight.domain.identifiers import ContentAddress
 from finsight.ingestion.validation.structural_limits import (
@@ -40,7 +40,7 @@ class SpooledContent:
 
 
 @contextmanager
-def spool_and_hash(source: BinaryIO, *, max_bytes: int) -> Iterator[SpooledContent]:
+def spool_and_hash(source: IO[bytes], *, max_bytes: int) -> Iterator[SpooledContent]:
     """Buffer a stream while hashing it, enforcing the size limit as it arrives.
 
     The limit is checked per chunk, so an oversized upload stops being read at the

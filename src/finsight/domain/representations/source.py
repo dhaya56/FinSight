@@ -150,6 +150,12 @@ class BlockLocation:
     space. The convention is fixed here and pinned by the producer's tests: a
     silent flip would leave every stored citation pointing at the mirror image of
     its evidence, and nothing downstream could detect it.
+
+    "As displayed" includes page rotation. A box must lie within the page
+    rectangle recorded on its parent, and producers are responsible for putting
+    it there — PyMuPDF, for one, reports text in the *unrotated* space and
+    leaves the transform to the caller. This is stated because assuming
+    otherwise cost 78 pages of a real annual report their citation coordinates.
     """
 
     bbox: tuple[float, float, float, float]

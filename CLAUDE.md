@@ -225,7 +225,9 @@ python -m pip_audit
 docker compose config
 ```
 
-Report every command as passed, failed, or skipped. Do not claim success when required checks remain failing.
+Ruff caches results per file. After moving, renaming, or deleting files, run `python -m ruff clean` before `python -m ruff check .`: a cached pass can hide an import-ordering break that CI, which has no cache, will fail on.
+
+Report every command as passed, failed, or skipped. Do not claim success when required checks remain failing. A cached pass is not a verified pass.
 
 ## 12. Completion report
 

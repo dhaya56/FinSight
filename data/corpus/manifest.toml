@@ -1,0 +1,179 @@
+# FinSight corpus manifest
+#
+# What was acquired, from where, and which split it belongs to
+# (PROJECT_BLUEPRINT.md §32.6). This file is committed; the documents it
+# describes are not — see data/corpus/README.md.
+#
+# An entry is never edited once its checksum is recorded. A re-download whose
+# bytes differ is a new candidate version (§32.7): add a new entry and set
+# superseded_by on the old one.
+#
+# Some fields are deliberately absent rather than estimated. `period_end` and
+# `published_at` may be omitted, and descriptive fields may read "unknown",
+# where the value could not be established without either guessing or opening a
+# frozen document. `corpus validate` prints every such gap, so an absent field
+# stays distinguishable from an overlooked one. ENV-005 records why each is
+# absent.
+
+manifest_version = 1
+
+
+# --- Development split -------------------------------------------------------
+# Opened and iterated on. §34.5.
+
+[[document]]
+document_id        = "in-ar-infosys-fy2025"
+split              = "development"
+filename           = "in-ar-infosys-fy2025.pdf"
+issuer_name        = "Infosys Limited"
+issuer_identifier  = "L85110KA1981PLC013115"
+document_type      = "annual_report"
+jurisdiction       = "IN"
+fiscal_period      = "FY2024-25"
+period_end         = 2025-03-31
+reporting_basis    = "both"
+currency           = "INR"
+units_as_presented = "INR crore"
+format             = "application/pdf"
+byte_size          = 7010611
+sha256             = "a2b9acdfbe79586ffdbe1780c4f14e5b2630743a4c81ee626f812f4c2fff1b44"
+source_repository  = "issuer_ir"
+source_url         = "https://www.infosys.com/investors/reports-filings/annual-report/annual-reports.html"
+published_at       = 2025-06-02
+retrieved_at       = 2026-09-29
+redistribution     = "not_redistributable"
+selection_rationale = "The cleanest text-native large Indian filing class, and the baseline against which extraction failures indicate our defects rather than document pathology. Slot A of the approved slate."
+expected_challenges = "369 pages at 18.6 KB/page, produced by Adobe PDF Library. 106 pages (29%) display as landscape, and uniquely in this corpus they arrive two different ways: 28 have a natively wide MediaBox, while 78 are portrait pages carrying /Rotate 90. No page is upside down — no /Rotate 180 appears. The two sets are disjoint. This is the only document in the corpus that exercises the rotated coordinate path at all. Three page geometries including 1224x792 double-width spreads, likely to present as wide multi-column layouts that the positional reading-order rule will read across rather than down; measured at 48 pages (13%) where a column-aware ordering would differ. Every page yielded text on inspection, so no coverage gaps are predicted; any that appear are a defect. Consolidated and standalone statements both present (§16.9)."
+
+[[document]]
+document_id        = "in-ar-hdfcbank-fy2025"
+split              = "development"
+filename           = "in-ar-hdfcbank-fy2025.pdf"
+issuer_name        = "HDFC Bank Limited"
+issuer_identifier  = "L65920MH1994PLC080618"
+document_type      = "annual_report"
+jurisdiction       = "IN"
+fiscal_period      = "FY2024-25"
+period_end         = 2025-03-31
+reporting_basis    = "both"
+currency           = "INR"
+units_as_presented = "INR crore, lakh and million mixed within one document"
+format             = "application/pdf"
+byte_size          = 9438688
+sha256             = "2a1879eee544526b7cecacb5380c2664f92e0d031361f5d54ffe55370c9487ea"
+source_repository  = "issuer_ir"
+source_url         = "https://www.hdfc.bank.in/about-us/investor-relations/annual-report"
+published_at       = 2025-07-14
+retrieved_at       = 2026-09-29
+redistribution     = "not_redistributable"
+selection_rationale = "§32.4's domain-shift issuer. Banks report under a different Schedule III division, so this is the check that §16.3's bounded concept catalogue does not silently assume non-financial issuers. Slot C of the approved slate."
+expected_challenges = "590 pages at 15.6 KB/page, produced by Acrobat Distiller 11. Two page geometries including 1188x738 double-width spreads; 7 pages display as landscape, all via a natively wide MediaBox rather than /Rotate, so this document does not exercise the rotated path. Exactly one page yielded no text on inspection, so exactly one coverage gap is predicted — more than one is a defect. The most multi-column document in the corpus: 145 pages (25%) where a column-aware ordering would differ from the positional rule. Units are mixed within the single document (crore, lakh and million all appear), which is the case unit resolution must not assume away. Banking-format statements with schedules rather than a conventional balance sheet."
+
+[[document]]
+document_id        = "in-drhp-ola-electric-2023"
+split              = "development"
+filename           = "in-drhp-ola-electric-2023.pdf"
+issuer_name        = "Ola Electric Mobility Limited"
+issuer_identifier  = "U74999KA2017PLC099619"
+document_type      = "drhp"
+jurisdiction       = "IN"
+fiscal_period      = "FY2022-23"
+period_end         = 2023-03-31
+reporting_basis    = "consolidated"
+currency           = "INR"
+units_as_presented = "INR million"
+format             = "application/pdf"
+byte_size          = 10723883
+sha256             = "61b8733a123fa1274d4854a34b65ceabab6ab4c2dd3106a20e677bdc80fa6c94"
+source_repository  = "sebi"
+source_url         = "https://www.sebi.gov.in/filings/public-issues/dec-2023/ola-electric-mobility-limited-drhp_80215.html"
+published_at       = 2023-12-26
+retrieved_at       = 2026-09-29
+redistribution     = "not_redistributable"
+selection_rationale = "Manufacturing issuer whose full balance sheet and P&L exercise the most of §16.3's concept catalogue — inventory, PP&E, cost of materials, depreciation, finance costs — none of which Infosys or HDFC Bank supply. Loss-making at filing, giving genuine negative PAT and accumulated losses as real §16.6 value states. Slot B of the approved slate."
+expected_challenges = "444 pages at 23.6 KB/page, the densest of the three, produced by Microsoft Word rather than a professional publishing tool. Five distinct page geometries including A3 portrait and A3 landscape, the most varied in the corpus; 31 pages display as landscape, all via a natively wide MediaBox rather than /Rotate, and the landscape A3 pages are most likely wide restated financial tables. Multi-page tables continuing across page breaks (§12.8), which nothing else in the development split exercises. Numbered risk factors with highly repetitive phrasing. Despite being a dense offer document it is effectively single-column: only 2 pages (0%) would order differently under a column-aware rule. Values are presented in INR million, not crore — an earlier prediction of crore was wrong. Every page yielded text on inspection, so the earlier prediction of image-only regions producing coverage gaps is already falsified: none are expected."
+
+
+# --- Held-out PDF core -------------------------------------------------------
+# Acquired, checksummed, frozen and never opened. §34.6, §34.10.
+# Descriptive fields read "unknown" and dates are omitted where establishing
+# them would require reading the document.
+
+[[document]]
+document_id        = "in-ar-tcs-fy2025"
+split              = "held_out_pdf_core"
+filename           = "in-ar-tcs-fy2025.pdf"
+issuer_name        = "Tata Consultancy Services Limited"
+issuer_identifier  = "L22210MH1995PLC084781"
+document_type      = "annual_report"
+jurisdiction       = "IN"
+fiscal_period      = "FY2024-25"
+period_end         = 2025-03-31
+reporting_basis    = "consolidated"
+currency           = "INR"
+units_as_presented = "INR crore"
+format             = "application/pdf"
+byte_size          = 23905717
+sha256             = "62ace414871697ed4c7ef34fd235fc3c89ed6208a30afe5ff2e49b5260fd8a57"
+source_repository  = "issuer_ir"
+source_url         = "https://www.tcs.com/investor-relations"
+published_at       = 2025-05-27
+retrieved_at       = 2026-09-29
+redistribution     = "not_redistributable"
+frozen_at          = 2026-09-29
+selection_rationale = "The natural pair to Infosys: measures generalisation within a familiar layout family and sector, which is what a held-out core should do. Slot D of the approved slate."
+expected_challenges = "not inspected; held out and deliberately unopened (§34.10). Basis and units come from NSE-hosted filing material rather than from the document. At 23.9 MB it is by far the largest document in the corpus, which is itself unexamined."
+
+[[document]]
+document_id        = "in-drhp-urban-company-2025"
+split              = "held_out_pdf_core"
+filename           = "in-drhp-urban-company-2025.pdf"
+issuer_name        = "Urban Company Limited"
+issuer_identifier  = "U74140DL2014PLC274413"
+document_type      = "drhp"
+jurisdiction       = "IN"
+fiscal_period      = "nine months ended 31 December 2024"
+period_end         = 2024-12-31
+reporting_basis    = "consolidated"
+currency           = "INR"
+units_as_presented = "INR millions"
+format             = "application/pdf"
+byte_size          = 10517414
+sha256             = "e5cdb6924a0440b6eccfcbf353b72cd2836fa81c828c71b5a5806f0d9511b826"
+source_repository  = "sebi"
+source_url         = "https://www.sebi.gov.in/filings/public-issues/apr-2025/urban-company-limited_93736.html"
+published_at       = 2025-04-30
+retrieved_at       = 2026-09-29
+redistribution     = "not_redistributable"
+frozen_at          = 2026-09-29
+selection_rationale = "Asset-light services marketplace: a genuine sector shift from the manufacturing development DRHP while staying within the same Schedule III regime, so the generalisation test is fair rather than confounded by accounting format. Slot E of the approved slate."
+expected_challenges = "not inspected; held out and deliberately unopened (§34.10). Period, basis and units come from SEBI-hosted public filing material rather than from the document: the restated consolidated financial information covers a nine-month stub ended 31 December 2024, consistent with an April 2025 filing that could not yet carry audited FY2024-25 accounts."
+
+
+# --- Held-out format supplement ----------------------------------------------
+# Non-PDF, reported separately from the PDF core. §34.7.
+
+[[document]]
+document_id        = "us-10k-microsoft-2026"
+split              = "held_out_format_supplement"
+filename           = "us-10k-microsoft-2026.htm"
+issuer_name        = "Microsoft Corporation"
+issuer_identifier  = "0000789019"
+document_type      = "form_10k"
+jurisdiction       = "US"
+fiscal_period      = "FY2026"
+period_end         = 2026-06-30
+reporting_basis    = "consolidated"
+currency           = "USD"
+units_as_presented = "USD millions"
+format             = "text/html"
+byte_size          = 8585500
+sha256             = "4561138eb81082fd06a693e6a2036eeae14e321d0c75a77aee5c28f1d4dc6d1d"
+source_repository  = "sec_edgar"
+source_url         = "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/0001193125-26-323660-index.htm"
+published_at       = 2026-07-29
+retrieved_at       = 2026-09-29
+redistribution     = "not_redistributable"
+frozen_at          = 2026-09-29
+selection_rationale = "§34.7 format and jurisdiction supplement. Deliberately a US filer rather than an Indian issuer's Form 20-F, which would restate development-split facts and leak across the split boundary (§34.12). A 30 June fiscal year-end differs from both the calendar year and India's 31 March, exercising §16.8."
+expected_challenges = "not inspected; held out and deliberately unopened (§34.10). Basis and units come from EDGAR rather than from the document. HTML rather than PDF, so no producer handles it yet and extraction will refuse it with UnsupportedFormatError until the HTML path exists. Likely carries inline XBRL, which is the §13.8/§13.9 activation condition currently deferred."

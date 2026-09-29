@@ -29,15 +29,31 @@ citations issued against them keep working (§27.7).
 
 import datetime
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import insert, select
+from sqlalchemy import func, insert, select
 from sqlalchemy.orm import Session
 
-from finsight.domain.representations.source import ExtractedElement, ExtractionState
+from finsight.domain.representations.source import (
+    ElementType,
+    ExtractedElement,
+    ExtractionState,
+)
 from finsight.persistence.tables.documents import DocumentVersion
 from finsight.persistence.tables.source import ExtractionRun, SourceElement
+
+
+@dataclass(frozen=True, slots=True)
+class ElementCounts:
+    """What a run produced, counted rather than loaded."""
+
+    total: int
+    pages: int
+    blocks: int
+    coverage_gaps: int
+    """Elements recording why they hold no text (§11.11), not elements missing."""
 
 
 class SourceRepository:
@@ -178,6 +194,25 @@ class SourceRepository:
             ExtractionRun.state != ExtractionState.FAILED.value,
         )
         return self._session.execute(statement).scalar_one_or_none()
+
+    def counts_for_run(self, *, run_id: UUID) -> ElementCounts:
+        """Summarise a run without loading its elements.
+
+        A five-hundred-page filing yields tens of thousands of rows, and reading
+        them all back to count pages would make reporting cost more than the
+        extraction it reports on. One query with conditional aggregates instead.
+        """
+        statement = select(
+            func.count(),
+            func.count().filter(SourceElement.element_type == ElementType.PAGE.value),
+            func.count().filter(SourceElement.element_type == ElementType.BLOCK.value),
+            func.count().filter(SourceElement.failure_reason.is_not(None)),
+        ).where(SourceElement.extraction_run_id == run_id)
+
+        total, pages, blocks, gaps = self._session.execute(statement).one()
+        return ElementCounts(
+            total=total, pages=pages, blocks=blocks, coverage_gaps=gaps
+        )
 
     def elements_for_run(self, *, run_id: UUID) -> Sequence[SourceElement]:
         """Return a run's elements with roots first, then children by parent.
