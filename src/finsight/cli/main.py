@@ -158,12 +158,28 @@ def run_corpus_checksum(args: argparse.Namespace) -> int:
 
 
 def run_corpus_validate(_args: argparse.Namespace) -> int:
-    """Validate the manifest. Any rule violation raises and is reported by main."""
+    """Validate the manifest. Any rule violation raises and is reported by main.
+
+    Unrecorded fields are printed rather than ignored. The manifest permits
+    honest absence — an estimate would be worse — but a gap that never appears
+    anywhere stops being a known limitation and becomes an oversight.
+    """
     manifest = load_manifest(MANIFEST_PATH)
 
     print(f"manifest valid: {len(manifest.entries)} document(s)")
     for split in Split:
         print(f"  {split.value:30} {len(manifest.for_split(split))}")
+
+    incomplete = [
+        (entry.document_id, entry.unrecorded_fields)
+        for entry in manifest.entries
+        if entry.unrecorded_fields
+    ]
+    if incomplete:
+        print(f"  {len(incomplete)} of {len(manifest.entries)} entries have "
+              "unrecorded fields:")
+        for document_id, missing in incomplete:
+            print(f"    {document_id:32} {', '.join(missing)}")
     return EXIT_OK
 
 

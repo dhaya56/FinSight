@@ -313,6 +313,71 @@ class TestCorpusRules:
             load_manifest(write(tmp_path, body))
 
 
+def without(field: str) -> str:
+    """The one-document manifest with one key removed."""
+    body = ONE_DOCUMENT.format(digest=DIGEST)
+    original = next(
+        line for line in body.splitlines() if line.startswith(f"{field} = ")
+    )
+    return body.replace(original + "\n", "")
+
+
+class TestHonestAbsence:
+    """Absence is permitted where an estimate would be worse, and never silent."""
+
+    @pytest.mark.parametrize(
+        "field", ["period_end", "published_at", "retrieved_at"]
+    )
+    def test_every_date_is_mandatory(self, tmp_path: Path, field: str) -> None:
+        """Both were briefly optional; exhausting official sources removed the case.
+
+        Exchange submission letters carry publication dates and SEBI-hosted
+        filing material states restated periods, so every entry can record both.
+        A field left optional for a situation that never arose is the
+        speculative flexibility CLAUDE.md §11 warns against — and it would let a
+        future entry omit a date that is in fact obtainable.
+        """
+        with pytest.raises(ManifestError, match=field):
+            load_manifest(write(tmp_path, without(field)))
+
+    @pytest.mark.parametrize(
+        "field",
+        ["issuer_identifier", "fiscal_period", "reporting_basis", "units_as_presented"],
+    )
+    def test_the_unknown_marker_counts_as_unrecorded(self, field: str) -> None:
+        assert field in entry(**{field: "unknown"}).unrecorded_fields
+
+    @pytest.mark.parametrize(
+        "field",
+        ["issuer_identifier", "fiscal_period", "reporting_basis", "units_as_presented"],
+    )
+    def test_an_empty_descriptive_field_counts_as_unrecorded(self, field: str) -> None:
+        assert field in entry(**{field: "  "}).unrecorded_fields
+
+    def test_a_complete_entry_reports_nothing_unrecorded(self) -> None:
+        assert entry().unrecorded_fields == ()
+
+    def test_a_descriptive_key_may_be_empty_but_not_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """Omission stays a deliberate act; a forgotten line is still an error."""
+        body = ONE_DOCUMENT.format(digest=DIGEST).replace('currency = "INR"\n', "")
+
+        with pytest.raises(ManifestError, match="missing manifest keys"):
+            load_manifest(write(tmp_path, body))
+
+    def test_the_four_load_bearing_fields_stay_mandatory(self) -> None:
+        """Always determinable, so relaxing them would weaken the record."""
+        for field in (
+            "issuer_name",
+            "source_url",
+            "selection_rationale",
+            "expected_challenges",
+        ):
+            with pytest.raises(ManifestError, match=field):
+                entry(**{field: "   "})
+
+
 class TestLookups:
     def test_entries_can_be_filtered_by_split(self) -> None:
         manifest = Manifest(

@@ -52,6 +52,18 @@ Checked rather than assumed, so a future layout change fails loudly instead of
 being half-parsed by old code.
 """
 
+UNRECORDED: Final = "unknown"
+"""The value an entry carries when a descriptive field cannot be established.
+
+Spelled out rather than left blank, so a reader can tell "nobody could determine
+this" from "nobody filled this in".
+"""
+
+
+def _is_unrecorded(value: str) -> bool:
+    return not value.strip() or value.strip().lower() == UNRECORDED
+
+
 _DOCUMENT_ID: Final = re.compile(r"\A[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 """Lowercase, hyphen-separated. Restrictive on purpose: the id appears in file
 names, report output and decision records, so it must never need escaping."""
@@ -202,6 +214,25 @@ class CorpusEntry:
         """Where the bytes sit, relative to the repository root."""
         return CORPUS_ROOT / self.split.value / self.filename
 
+    @property
+    def unrecorded_fields(self) -> tuple[str, ...]:
+        """Fields §32.6 asks for that this entry does not actually carry.
+
+        The manifest permits honest absence, which is better than an estimate —
+        but an absent field must not look like an overlooked one, so every gap
+        is enumerable and gets printed during validation.
+        """
+        return tuple(
+            name
+            for name in (
+                "issuer_identifier",
+                "fiscal_period",
+                "reporting_basis",
+                "units_as_presented",
+            )
+            if _is_unrecorded(getattr(self, name))
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class Manifest:
@@ -259,6 +290,22 @@ def _enum_value[E: StrEnum](
 
 _FIELD_NAMES: Final[frozenset[str]] = frozenset(field.name for field in fields(CorpusEntry))
 
+_OPTIONAL_FIELDS: Final[frozenset[str]] = frozenset({"frozen_at", "superseded_by"})
+"""Keys an entry may omit entirely, both conditional by nature.
+
+Every date is mandatory, including ``period_end`` and ``published_at``. Both
+were briefly made optional on the belief that they could not always be
+established — an annual report dates its board approval rather than its
+publication, and a frozen offer document's restated period sits inside the
+document. Exhausting the official sources disproved it: exchange submission
+letters carry publication dates, and SEBI-hosted filing material states the
+restated period. Every entry in the corpus now records both, so the flexibility
+had no case left.
+
+A descriptive field may still read ``UNRECORDED``, but its key must be present,
+so an absent value is a deliberate act rather than a line someone forgot.
+"""
+
 
 def _entry_from(raw: Mapping[str, Any]) -> CorpusEntry:
     """Build one entry, refusing unknown and missing keys.
@@ -273,7 +320,7 @@ def _entry_from(raw: Mapping[str, Any]) -> CorpusEntry:
     if unknown:
         raise ManifestError(f"{document_id}: unknown manifest keys: {unknown}")
 
-    required = _FIELD_NAMES - {"frozen_at", "superseded_by"}
+    required = _FIELD_NAMES - _OPTIONAL_FIELDS
     missing = sorted(required - set(raw))
     if missing:
         raise ManifestError(f"{document_id}: missing manifest keys: {missing}")
