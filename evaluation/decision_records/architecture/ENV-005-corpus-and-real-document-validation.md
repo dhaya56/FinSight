@@ -84,7 +84,7 @@ Real documents exposed a defect no synthetic fixture had.
 | **Limitations** | Only one document exercises `/Rotate`; rotations of 180 and 270 remain covered by synthetic fixtures alone |
 | **Decision** | Applied unconditionally; the matrix is the identity on unrotated pages |
 
-`page.rect` is the displayed rectangle with rotation applied, while `get_text("blocks")` returns boxes in the unrotated page space. Storing one of each meant every citation on 78 pages — 16% of that document — pointed somewhere the reader is not looking, with a median displacement of 124pt. Reading order was affected too, since sorting raw coordinates on a rotated page sorts along the wrong axis.
+`page.rect` is the displayed rectangle with rotation applied, while `get_text("blocks")` returns boxes in the unrotated page space. Storing one of each meant every citation on 78 pages — 21% of that document's 369 — pointed somewhere the reader is not looking, with a median displacement of 124pt. Reading order was affected too, since sorting raw coordinates on a rotated page sorts along the wrong axis.
 
 The existing rotation test did not catch it because it asserted that text was *recovered*, never that its box was correct, and its fixture placed text near the origin corner, which lies inside both coordinate spaces. Both faults are now fixed: a test asserts every block box lies within its page, and a second asserts the fixture itself would fail without the transform.
 
@@ -179,6 +179,43 @@ The acquired file's own internal creation date is 19 November 2025, after both. 
 7. **Table detection is unvalidated.** On a 40-page sample per document the `lines` strategy found 10 to 26 tables and the `text` strategy 37 to 40 — the latter implausibly close to one per page, indicating over-detection. Neither is trustworthy without the §36.2 metrics.
 8. **§32.5 format coverage is partial.** PDF core plus one HTML supplement; XLSX and XML supplements are deferred.
 9. **One integration test failed once and has not reproduced.** `test_an_unreadable_document_records_a_failed_run` failed during a full check set, then passed in isolation and across five consecutive full suite runs. No extraction code changed in that window — the edits were manifest data and prose. The assertion uses `scalar_one()` over `extraction_runs` for a single document version, so it fails on either zero or multiple rows, which points at cross-test state rather than logic. Phase 5 is not blocked on it, but it is recorded as **observed and currently unreproducible** rather than dismissed: an earlier bug in this phase had the same shape, a module-scoped fixture disposing shared clients that another module still held, and a failure seen once at roughly one run in seven will eventually surface in CI.
+
+   **Resolved during Phase 6, and it was not a test problem.** The cause was two
+   clocks adjudicated by one constraint: `extraction_runs.started_at` defaulted to
+   the server's `now()` while `complete_run` set `completed_at` from the
+   *application's* clock, and `ck_extraction_runs_completed_after_started`
+   compared them. The guess above — cross-test state, zero or multiple rows — was
+   wrong; the real failure was an `IntegrityError` on that constraint. A second
+   guess, that the test's random `uuid4()` content sometimes let PyMuPDF repair
+   the file rather than refuse it, was also wrong: 2,000 random variants all
+   raised. Neither guess survived being tested, which is why the traceback was
+   worth capturing instead.
+
+   | | |
+   |---|---|
+   | **Baseline** | Application clock for `completed_at`; **3 of 6** cycles failed, with 1, 3 and 6 test failures in the failing cycles |
+   | **Candidate** | `completed_at` from the database clock via `clock_timestamp()` |
+   | **Method** | Six cycles of `alembic downgrade -1`, `upgrade head`, then the full integration suite — the sequence that made the failure frequent — plus direct sampling of both clocks |
+   | **Workload** | 86 integration tests against PostgreSQL 18.6 and the object store |
+   | **After** | **0 of 6** cycles failed, 87 passed each time |
+   | **Limitations** | The after-run happened under *favourable* skew (6 of 300 samples inverted, against 277 of 300 during the baseline), so the six green cycles are weak evidence on their own. The load-bearing evidence is the invariant, not the run count |
+   | **Decision** | Applied. `clock_timestamp()` rather than `now()` because `now()` is transaction-start time and would make every duration exactly zero |
+
+   Measured skew between the Python process and the PostgreSQL container ranged
+   from **5.3ms behind to 13.1ms ahead**, reversing direction within an hour — so
+   the old code's correctness depended on an external variable nothing in the
+   system controlled. That is what made it intermittent, and why one run in seven
+   was the wrong model: the rate tracks drift, not chance. Under a deterministic
+   5ms adverse skew, inside the measured range, an application timestamp fails the
+   constraint and a database timestamp holds. `clock_timestamp() >= now()` held in
+   1,000 of 1,000 samples inside real transactions, because PostgreSQL fixes
+   `now()` at transaction start and `clock_timestamp()` advances from there.
+
+   The exposure was never limited to that one test. A second reproduction failed
+   `test_a_failed_run_leaves_the_pointer_unset` instead, and the success path is
+   equally affected: any extraction completing faster than the prevailing skew
+   could have its run rejected. A small filing qualifies, so this was a production
+   correctness defect that happened to surface first in tests.
 
 ## Proposed additions to §33
 
