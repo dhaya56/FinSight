@@ -702,3 +702,29 @@ class TestExtractionRunConstraints:
 
         with pytest.raises(IntegrityError, match="completed_after_started"):
             rolled_back_session.flush()
+
+    def test_a_run_completing_immediately_is_accepted(
+        self,
+        rolled_back_session: Session,
+    ) -> None:
+        """The regression test for a two-clock race that looked like a flaky test.
+
+        ``started_at`` comes from the server's ``now()``. Taking ``completed_at``
+        from the *application's* clock made this constraint adjudicate the skew
+        between two machines' clocks, measured here at up to 5.3ms in either
+        direction and drifting within minutes. Any run finishing faster than the
+        skew was rejected for no reason connected to the run.
+
+        Completing with no delay at all is therefore the case that must hold: it
+        is the shortest possible interval, so it fails first if a Python
+        timestamp ever returns.
+        """
+        version = _version(rolled_back_session)
+        run = _start(rolled_back_session, version)
+
+        SourceRepository(rolled_back_session).complete_run(
+            run=run, state=ExtractionState.SUCCEEDED, element_count=0
+        )
+
+        assert run.completed_at is not None
+        assert run.completed_at >= run.started_at

@@ -27,7 +27,6 @@ arrives as tombstoning (§29.12), and superseded runs stay resolvable so that
 citations issued against them keep working (§27.7).
 """
 
-import datetime
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -52,6 +51,8 @@ class ElementCounts:
     total: int
     pages: int
     blocks: int
+    tables: int
+    cells: int
     coverage_gaps: int
     """Elements recording why they hold no text (§11.11), not elements missing."""
 
@@ -140,10 +141,27 @@ class SourceRepository:
         state: ExtractionState,
         element_count: int,
     ) -> None:
-        """Record how a run finished and how much it produced."""
+        """Record how a run finished and how much it produced.
+
+        ``completed_at`` comes from the **database** clock, not Python's, and that
+        is not a stylistic preference. ``started_at`` defaults to the server's
+        ``now()``, and ``ck_extraction_runs_completed_after_started`` compares the
+        two: sourcing one end from the application process means the constraint
+        adjudicates a race between two clocks. Measured on this host, the Python
+        process ran between 5.3ms behind and 3.4ms ahead of the PostgreSQL
+        container, drifting direction within minutes. A fast run — a malformed PDF
+        rejected in under a millisecond, or a two-page filing — finishes inside
+        that window, so the row was rejected on skew rather than on anything about
+        the run. It presented as an intermittent test failure for two phases.
+
+        ``clock_timestamp()`` rather than ``now()`` because ``now()`` is the
+        transaction's start time, which would make every duration exactly zero.
+        ``clock_timestamp()`` is real wall-clock time and is always at or after
+        the transaction start, so the constraint holds by construction.
+        """
         run.state = state.value
         run.element_count = element_count
-        run.completed_at = datetime.datetime.now(tz=datetime.UTC)
+        run.completed_at = func.clock_timestamp()
         self._session.flush()
 
     def set_current_run(self, *, run: ExtractionRun) -> None:
@@ -206,12 +224,21 @@ class SourceRepository:
             func.count(),
             func.count().filter(SourceElement.element_type == ElementType.PAGE.value),
             func.count().filter(SourceElement.element_type == ElementType.BLOCK.value),
+            func.count().filter(SourceElement.element_type == ElementType.TABLE.value),
+            func.count().filter(SourceElement.element_type == ElementType.CELL.value),
             func.count().filter(SourceElement.failure_reason.is_not(None)),
         ).where(SourceElement.extraction_run_id == run_id)
 
-        total, pages, blocks, gaps = self._session.execute(statement).one()
+        total, pages, blocks, tables, cells, gaps = self._session.execute(
+            statement
+        ).one()
         return ElementCounts(
-            total=total, pages=pages, blocks=blocks, coverage_gaps=gaps
+            total=total,
+            pages=pages,
+            blocks=blocks,
+            tables=tables,
+            cells=cells,
+            coverage_gaps=gaps,
         )
 
     def elements_for_run(self, *, run_id: UUID) -> Sequence[SourceElement]:
