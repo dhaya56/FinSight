@@ -1,0 +1,218 @@
+# Reconstruction Heuristics — Limitation Register
+
+**Status:** living document. Updated whenever a reconstruction rule changes.
+
+## Why this exists
+
+Table semantics — which rows are headers, which cells are merged, which row states
+the units, which characters are a footnote marker, how rows nest — are *not*
+supplied by any detector in use. They are reconstructed above the detector layer
+in `src/finsight/extraction/tables/structure.py`.
+
+That reconstruction is heuristic. It is deliberately **not** recorded as an
+architectural decision: an ADR asserts a choice made on evidence, and these rules
+have been tried against synthetic fixtures and one corpus of three documents.
+Calling them decisions would claim a confidence they have not earned.
+
+This register is the alternative. Every rule appears here with the misfire it is
+known to have and whether that misfire's rate has ever been measured. A rule whose
+limitation is unmeasured is not thereby acceptable — it is an open item with a
+stated owner phase.
+
+**Two reminders from this project's own history.** A defect can affect thousands
+of extracted objects while every test passes — the rotation defect reached 2,401
+block boxes that way. And a synthetic fixture can misrepresent real behaviour
+while validating the plumbing perfectly: ENV-004 overstated producer throughput by
+roughly 3.5x, and a borderless-table fixture overstated strategy complementarity
+so thoroughly that the conclusion drawn from it was contradicted by the first
+real-document measurement. Nothing in this register should be read as settled
+because its tests are green.
+
+---
+
+## 1. Header-row boundary
+
+**Rule.** Rows above the first *data* row form the preamble. A data row has a
+non-empty first column **and** at least one cell beyond it that reads as a
+magnitude — a numeral that is not a bare four-digit year.
+
+**Why the year exclusion exists.** `Particulars | 2025 | 2024` is one of the
+commonest header shapes in an Indian filing and satisfies the naive test on both
+counts. Without separating a bare year from a magnitude the header boundary lands
+one row early and every column loses its heading.
+
+**Known misfire.** A genuine data row whose values are all bare four-digit numbers
+— a headcount written `2025` rather than `2,025` — reads as a header. Bounded by
+the rule stopping at the first real data row, so it can only misfire in a table's
+opening rows.
+
+**Measured?** No. Rate unknown. Owner: Phase 6 ground truth.
+
+---
+
+## 2. Merged-cell span inference
+
+**Rule.** A populated cell followed by consecutive *absent* cells spans them.
+Absent means the detector reported no cell at that position; an empty cell, which
+has a box and empty text, is a different fact and does not trigger a span.
+
+**Known limitation — structural, not a tuning problem.** A genuine merge and a
+detector that simply failed to find a cell produce an identical signal. This is
+**undecidable** from a grid. No refinement of this rule can separate them.
+
+**Consequence.** A detection failure silently becomes a span, which silently
+widens a header's reach to a column it does not describe.
+
+**Mitigation.** Not a better heuristic — a parser that reports spans directly.
+This is the clearest single argument for the reconstruction-burden criterion in
+ADR-004.
+
+**Measured — and it is not a corner case.** Across the 861 tables the `lines`
+strategy found in the development split, the share of grid positions reported as
+absent had **mean 19% and median 11%**, and **436 of 861 tables (51%) had more
+than 10% of their positions absent**.
+
+So for the majority of real tables this ambiguity applies to a non-trivial part of
+the grid. Every one of those positions is either a merge, which the span records
+correctly, or a detection failure, which the span silently papers over — and
+nothing available at this layer can say which. This is the strongest quantitative
+argument in the project for preferring a parser that reports spans directly.
+
+Owner: ADR-004.
+
+---
+
+## 3. Units detection and scoping
+
+**Rule.** A preamble row whose text names a scale word (crore, lakh, million,
+billion, thousand) or a currency token, and contains no digits, is a units row and
+is recorded verbatim. Scope follows position: a declaration in the label column
+governs the table; one above a specific column governs that column and any columns
+its span covers; the most specific wins.
+
+**Why position decides scope.** §17.3 requires table-level *and* column-level unit
+context. A scale note above one column, applied table-wide, misscales every other
+column — and a table mixing crore figures with percentages is ordinary.
+
+**Known misfire.** A **row**-level scale change is not detected. A "Margin %" row
+among crore figures inherits the table's declaration, which is wrong for that row.
+Detecting it requires reading the cell's own content as a unit, and reading content
+is §16's work rather than extraction's — so extraction records the declared scope
+and §16 must be able to refuse a value whose scale it cannot place.
+
+**Measured — and the bigger problem is not scoping.** Of the 861 tables found in
+the development split, only **104 (12%) carry a units declaration this rule can
+see**, and 31 (4%) show a mixed-scale signature.
+
+That 12% is the finding. Either financial tables mostly declare their scale
+*outside* the table — in a section heading, a column header above the detected
+region, or a page-level note — or this rule misses the forms they use. Both
+readings are bad: a cell whose `units` is NULL is a figure whose scale is unknown,
+and §16 must refuse to normalise it. 88% of tables currently produce such cells.
+
+Distinguishing "declared elsewhere" from "declaration missed" needs the ground
+truth. Owner: Phase 6 ground truth, and this is now one of its highest-value
+questions.
+
+---
+
+## 4. Footnote marker separation
+
+**Rule.** A trailing `(x)` with one to three alphanumeric characters, or a run of
+`*`, `†`, `‡`, **preceded by other text**, is a footnote marker. It is recorded in
+`footnote_refs` and the cell's `text` is left byte-identical.
+
+**Why "preceded by other text" is load-bearing.** `(45)` and `(1,234)` are
+*negative values*. A pattern matching a trailing parenthesis without requiring a
+body would read the parentheses as a marker and discard the sign — the worst defect
+available in a financial table.
+
+**Why text is never rewritten.** Citations are character offsets into the stored
+string (§14.9). Separation is additive metadata, not a transformation.
+
+**Vocabulary: measured, and the first version was wrong.** Marker forms counted
+across the whole development split, as trailing markers:
+
+| Form | Count | | Form | Count |
+|---|---|---|---|---|
+| `(digit)` | 937 | | `**` | 39 |
+| `(alpha)` | 450 | | `***` | 6 |
+| `*` | 361 | | `##` | 1 |
+| `#` | **56** | | `###` | 1 |
+
+**`#` was missed entirely** by the assumed pattern — 56 occurrences silently
+dropped. Fixed, with a test that pins every measured form so the set cannot
+regress to guesswork. No superscript digits appear anywhere in the corpus, and
+neither do `†` or `‡`; those two are retained because other filings use them, but
+their validation here is zero.
+
+**Resolution target: confirmed to exist, still unbuilt.** The same pass counted
+*leading* markers, which is what a footnote's own text line looks like:
+parenthesised letters 472, parenthesised digits 426, `*` 103, `#` 23, `**` 20,
+`***` 3 — roughly a thousand candidate footnote text lines.
+
+So the notes are present and mechanically findable. A marker still resolves to
+nothing: there is no footnote element, no footnote text, and no link. A number
+released without its qualifier is wrong, not merely incomplete. Owner: footnote
+commit.
+
+---
+
+## 5. Row-label hierarchy from indentation
+
+**Rule.** Row labels form a path. Nesting comes from `text_left` — where the
+label's text begins — using a stack that unwinds when a label starts at or left of
+the previous one. Tolerance 1.0 pt. Header rows and units rows are excluded from
+the stack.
+
+**Why `text_left` and not the cell box.** In a ruled table every first-column cell
+shares the ruling line's left edge. Measured on the project fixture, three label
+cells all had box left edge 60.0 while their text began at 64.0, 72.0 and 64.0 —
+the 72.0 being the only record that "Of which: term deposits" is a component of the
+line above rather than a peer of it. Reading indentation from the box produced a
+flat path for a visibly nested table.
+
+**Why units rows are excluded.** A scale note drawn left of the line items would
+otherwise become their indentation parent and appear as the outermost label on
+every row in the table. This was a real defect, found by a test written to look
+for it.
+
+**Known misfires.**
+
+- A table that expresses hierarchy by **typography** rather than indentation — bold
+  totals, italic sub-items — reads as flat.
+- A label that wraps onto a second line may report a different `text_left`.
+- The 1.0 pt tolerance is a guess, not a measurement.
+
+**Measured?** No. Owner: Phase 6 ground truth.
+
+---
+
+## 6. Numeric recognition
+
+**Rule.** Strip currency tokens, then strip separators, signs, percent and
+parentheses, including the non-breaking space, Unicode minus and en dash that
+filings use. What remains must be digits only.
+
+**Why the homoglyphs are deliberate.** The character class exists *because* filings
+use a non-breaking space as a group separator and a Unicode minus where a hyphen is
+expected. The lint rule that objects to them is suppressed with that reason
+recorded.
+
+**Known misfire.** A date (`31.03.2025`) or a footnote-only cell may read as
+numeric. Used only to classify rows, not to extract values, so the consequence is
+a misplaced header boundary rather than a wrong number.
+
+**Measured?** No.
+
+---
+
+## 7. Not implemented, and recorded so absence is not read as a finding
+
+| Gap | Consequence if forgotten |
+|---|---|
+| **Caption derivation** | `source_tables.caption` is always NULL. NULL currently means "not looked for", which is the opposite of what a reader would assume. No consumer may treat it as evidence a table is uncaptioned |
+| **Footnote resolution** | `footnote_refs` points at nothing |
+| **Figure-region marking** | Chart axis and data labels extract as ordinary text. Measured across the full split: **841 of 1,403 pages (60%)** carry more than 40 drawing items, but only **50 (4%)** also show five or more bare-numeric short blocks. So heavy vector content is the norm and is mostly design furniture; the chart-label signature is real but confined to about 4% of pages |
+| **Table-aware reading order** | Measured at 14% page divergence; tables now make a table-aware ordering possible but it is unbuilt |
+| **Duplicate text between blocks and cells** | Text inside a table is stored twice, once as a block and once as cells. Deliberate — suppressing the blocks would let a false-positive table delete narrative prose, and §18 requires exclusion to be a reversible ranking decision. §18.4's table-aware chunking must avoid retrieving the same sentence twice |
