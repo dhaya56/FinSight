@@ -6,21 +6,23 @@ of elements, and a per-row insert would hold a transaction open for the whole of
 it — exactly what §29.7 forbids and what CLAUDE.md §7 means by bounded
 transactions.
 
-Identifiers stay server-side. ``uuidv7()`` gives time-ordered keys with good
-index locality, and Python 3.12 has no UUIDv7 generator, so generating them in
-the application would mean falling back to random UUIDs and losing that
-ordering. Instead each depth of the element tree is inserted in one statement
-that returns its new ids in parameter order, and those ids become the next
-depth's parents.
+**Identifiers are allocated up front, in one batch, from the database.**
+``uuidv7()`` gives time-ordered keys with good index locality and Python 3.12 has
+no UUIDv7 generator, so the ids must come from PostgreSQL — but they do not have
+to come back from the inserts. One ``SELECT uuidv7() FROM generate_series`` names
+every id in the tree before anything is written, after which every depth inserts
+through the plain path and nothing needs ``RETURNING``.
 
-**Only a depth whose elements have children asks for those ids back**, and that
-is a measured decision rather than a tidy one. Correlating returned ids to the
-rows that produced them forces SQLAlchemy into much smaller insert batches: on
-this project's PostgreSQL 18 container, 20,000 rows took 23.2s with
-``sort_by_parameter_order=True`` and 2.5s without — 861 against 7,930 rows per
-second. Leaf elements dominate the row count and nothing ever reads their ids,
-so paying that for them would mean a five-hundred-page filing holding a
-transaction open for half a minute to buy nothing.
+That replaces an earlier strategy where each depth with children asked for its
+ids back. Two measurements forced the change. ENV-004 established that
+correlating returned ids to their parameters costs roughly ten times the plain
+insert rate, so the old strategy only avoided that cost for leaves. Tables broke
+the assumption twice over: cells are leaves *and* need their ids, because
+``source_table_cells`` is keyed on them; and a page holding both blocks and tables
+puts leaves and parents on one depth, which sent the whole depth down the slow
+path. Measured on 20,000 cells with their extension rows, returning ids ran at
+1,302 and 1,152 cells/s across two runs against 4,539 and 3,878 pre-allocated —
+about 3.4x, and 16s against 5s inside one transaction that §29.7 wants bounded.
 
 There is no delete method, for the reason given in ``documents.py``: removal
 arrives as tombstoning (§29.12), and superseded runs stay resolvable so that
@@ -33,15 +35,22 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, insert, select
+from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 
 from finsight.domain.representations.source import (
     ElementType,
     ExtractedElement,
     ExtractionState,
+    TableSemantics,
 )
 from finsight.persistence.tables.documents import DocumentVersion
-from finsight.persistence.tables.source import ExtractionRun, SourceElement
+from finsight.persistence.tables.source import (
+    ExtractionRun,
+    SourceElement,
+    SourceTable,
+    SourceTableCell,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,36 +112,72 @@ class SourceRepository:
         run_id: UUID,
         elements: Sequence[ExtractedElement],
     ) -> int:
-        """Insert an element tree and return how many rows were written.
+        """Insert an element tree with its semantics and return rows written.
 
-        One statement per depth. The root elements go first, their returned ids
-        become the parents of the next depth, and so on until the tree runs out.
-        A depth with no children anywhere in it is the last, and is inserted
-        without asking for its ids back.
+        Ids for the whole tree are allocated first, so every depth inserts through
+        the plain path and a cell's id is known before its extension row is built.
+        Depths are still written one statement at a time, parents before children,
+        which keeps the foreign key satisfied without deferring it.
+
+        The count returned is element rows only. Extension rows are semantics
+        *about* those elements rather than elements in their own right, and
+        ``extraction_runs.element_count`` has to keep meaning what §11.11's coverage
+        arithmetic assumes it means.
         """
+        total = count_elements(elements)
+        if total == 0:
+            return 0
+
+        identifiers = iter(self._allocate_ids(total))
         written = 0
         level: list[tuple[UUID | None, ExtractedElement]] = [
             (None, element) for element in elements
         ]
+        table_rows: list[dict[str, Any]] = []
+        cell_rows: list[dict[str, Any]] = []
 
         while level:
-            rows = [
-                _row_for(run_id=run_id, parent_id=parent_id, element=element)
-                for parent_id, element in level
-            ]
-            if not any(element.children for _, element in level):
-                written += self._insert(rows)
-                break
+            rows: list[dict[str, Any]] = []
+            following: list[tuple[UUID | None, ExtractedElement]] = []
 
-            new_ids = self._insert_returning_ids(rows)
-            written += len(new_ids)
-            level = [
-                (new_id, child)
-                for new_id, (_, element) in zip(new_ids, level, strict=True)
-                for child in element.children
-            ]
+            for parent_id, element in level:
+                element_id = next(identifiers)
+                rows.append(
+                    _row_for(
+                        run_id=run_id,
+                        parent_id=parent_id,
+                        element=element,
+                        element_id=element_id,
+                    )
+                )
+                extension = _extension_row(element_id, element)
+                if extension is not None:
+                    target, payload = extension
+                    (table_rows if target is SourceTable else cell_rows).append(payload)
+                following.extend(
+                    (element_id, child) for child in element.children
+                )
+
+            written += self._insert(rows)
+            level = following
+
+        if table_rows:
+            self._session.execute(insert(SourceTable), table_rows)
+        if cell_rows:
+            self._session.execute(insert(SourceTableCell), cell_rows)
 
         return written
+
+    def _allocate_ids(self, count: int) -> list[UUID]:
+        """Reserve ``count`` time-ordered identifiers in one round trip.
+
+        From the database rather than from Python, because ``uuidv7()`` is what
+        gives these keys their index locality and the standard library cannot
+        produce them. One query for the whole tree, not one per depth.
+        """
+        statement = sql_text("SELECT uuidv7() FROM generate_series(1, :count)")
+        result = self._session.execute(statement.bindparams(count=count))
+        return list(result.scalars())
 
     def complete_run(
         self,
@@ -269,33 +314,21 @@ class SourceRepository:
         self._session.execute(insert(SourceElement), rows)
         return len(rows)
 
-    def _insert_returning_ids(self, rows: list[dict[str, Any]]) -> list[UUID]:
-        """Insert one depth of the tree and return the new ids in parameter order.
-
-        ``sort_by_parameter_order`` is what makes the returned ids line up with
-        the rows that produced them. Without it the database may return them in
-        any order, and every parent link would be assigned to the wrong child.
-        It is also roughly ten times slower, which is why only a depth that
-        actually has children pays for it.
-        """
-        statement = insert(SourceElement).returning(
-            SourceElement.id, sort_by_parameter_order=True
-        )
-        result = self._session.execute(statement, rows)
-        return list(result.scalars())
-
-
 def _row_for(
     *,
     run_id: UUID,
     parent_id: UUID | None,
     element: ExtractedElement,
+    element_id: UUID,
 ) -> dict[str, Any]:
     """Flatten one element into an insert parameter set.
 
-    ``id`` and ``created_at`` are omitted so the server defaults apply.
+    ``created_at`` is omitted so the server default applies. ``id`` is supplied,
+    because it was allocated before the insert so that extension rows could be
+    built against it.
     """
     return {
+        "id": element_id,
         "extraction_run_id": run_id,
         "parent_id": parent_id,
         "ordinal": element.ordinal,
@@ -307,6 +340,33 @@ def _row_for(
         "char_count": element.char_count,
         "failure_reason": element.failure_reason,
         "location": element.location.to_mapping(),
+    }
+
+
+def _extension_row(
+    element_id: UUID, element: ExtractedElement
+) -> tuple[type[SourceTable] | type[SourceTableCell], dict[str, Any]] | None:
+    """Build the semantics row for an element, or None when it has none.
+
+    Returns the target table alongside the payload rather than inspecting the
+    element type again at the call site, so adding a format's extension table is
+    one branch here instead of a branch in every caller.
+    """
+    semantics = element.semantics
+    if semantics is None:
+        return None
+    if isinstance(semantics, TableSemantics):
+        return SourceTable, {
+            "source_element_id": element_id,
+            "caption": semantics.caption,
+        }
+    return SourceTableCell, {
+        "source_element_id": element_id,
+        "header_path": list(semantics.header_path),
+        "row_label_path": list(semantics.row_label_path),
+        "footnote_refs": list(semantics.footnote_refs),
+        "is_header": semantics.is_header,
+        "units": semantics.units,
     }
 
 

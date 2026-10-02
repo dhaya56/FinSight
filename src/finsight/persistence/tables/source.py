@@ -244,10 +244,11 @@ class SourceTable(Base):
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
     """The table's caption as the producer read it, verbatim (§12.6).
 
-    NULL when the document gives none, which is common in financial statements
-    where a heading above the table serves as its title. NULL means "none found",
-    never "not looked for" — a producer that cannot look for captions at all
-    would be recorded as a coverage gap on the element instead.
+    **Currently always NULL, and that is a gap rather than a finding.** No detector
+    in use reports a caption and nothing yet looks for one, so NULL here means "not
+    looked for" — the opposite of what a reader would reasonably assume. Caption
+    derivation is tracked in the reconstruction limitation register; until it
+    lands, no consumer may treat NULL as evidence that a table is uncaptioned.
     """
 
 
@@ -321,4 +322,14 @@ class SourceTableCell(Base):
     Stored rather than derived from ``row_index == 0``: financial tables open with
     units rows, blank rows and two-level headers often enough that position does
     not identify a header.
+    """
+
+    units: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The units declaration governing this cell, verbatim (§17.3).
+
+    Per cell, not per table, because §17.3 requires table-level *and column-level*
+    context and a table-wide column cannot express a scale note that governs one
+    column. NULL means no declaration was found — never that the figure is
+    unscaled, a distinction §16 depends on when it refuses to normalise a value it
+    cannot place.
     """

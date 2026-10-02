@@ -13,17 +13,20 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from finsight.api.app import create_app
 from finsight.domain.representations.source import (
     BlockLocation,
+    CellLocation,
+    CellSemantics,
     ElementType,
     ExtractedElement,
     ExtractionState,
     PageLocation,
+    TableLocation,
     location_from_mapping,
 )
 from finsight.persistence.database import (
@@ -728,3 +731,211 @@ class TestExtractionRunConstraints:
 
         assert run.completed_at is not None
         assert run.completed_at >= run.started_at
+
+
+class TestTableSemanticsPersistence:
+    """Tables, cells and their semantics survive the round trip.
+
+    The derivation is unit-tested without a database. This checks that what it
+    derives lands in typed columns, because a header path arriving as an empty
+    array is a citation trail that silently ends.
+    """
+
+    @staticmethod
+    def _tree() -> ExtractedElement:
+        value = ExtractedElement(
+            element_type=ElementType.CELL,
+            ordinal=0,
+            locator="p. 1, table 1, R4C2",
+            location=CellLocation(
+                bbox=(240.0, 60.0, 350.0, 80.0), row_index=3, column_index=1
+            ),
+            extraction_method=METHOD,
+            extraction_method_version=METHOD_VERSION,
+            text="1,234",
+            semantics=CellSemantics(
+                header_path=("Year ended March 31", "2025"),
+                row_label_path=("Deposits", "Of which: term deposits"),
+                footnote_refs=("a",),
+                is_header=False,
+                units="(Rs in crore)",
+            ),
+        )
+        header = ExtractedElement(
+            element_type=ElementType.CELL,
+            ordinal=1,
+            locator="p. 1, table 1, R1C2",
+            location=CellLocation(
+                bbox=(240.0, 10.0, 350.0, 30.0),
+                row_index=0,
+                column_index=1,
+                column_span=2,
+            ),
+            extraction_method=METHOD,
+            extraction_method_version=METHOD_VERSION,
+            text="Year ended March 31",
+            semantics=CellSemantics(is_header=True),
+        )
+        table = ExtractedElement(
+            element_type=ElementType.TABLE,
+            ordinal=0,
+            locator="p. 1, table 1",
+            location=TableLocation(bbox=(60.0, 10.0, 460.0, 140.0)),
+            extraction_method=METHOD,
+            extraction_method_version=METHOD_VERSION,
+            children=(value, header),
+        )
+        block = ExtractedElement(
+            element_type=ElementType.BLOCK,
+            ordinal=1,
+            locator="p. 1",
+            location=BlockLocation(bbox=(60.0, 200.0, 460.0, 220.0)),
+            extraction_method=METHOD,
+            extraction_method_version=METHOD_VERSION,
+            text="Narrative prose beside the table.\n",
+        )
+        return ExtractedElement(
+            element_type=ElementType.PAGE,
+            ordinal=0,
+            locator="p. 1",
+            location=PageLocation(
+                page_number=1, width=595.0, height=842.0, rotation=0
+            ),
+            extraction_method=METHOD,
+            extraction_method_version=METHOD_VERSION,
+            children=(table, block),
+        )
+
+    def _record(self, session: Session) -> ExtractionRun:
+        run = _start(session, _version(session))
+        SourceRepository(session).record_elements(
+            run_id=run.id, elements=(self._tree(),)
+        )
+        session.flush()
+        return run
+
+    def test_a_mixed_depth_tree_is_written(
+        self, rolled_back_session: Session
+    ) -> None:
+        """A leaf block and a table with children sit on the same depth.
+
+        This is the shape that defeated the previous id strategy: asking for ids
+        back because the depth had a parent in it dragged the leaf along too.
+        """
+        run = _start(rolled_back_session, _version(rolled_back_session))
+        tree = (self._tree(),)
+
+        written = SourceRepository(rolled_back_session).record_elements(
+            run_id=run.id, elements=tree
+        )
+
+        assert written == count_elements(tree)
+
+    def test_counts_report_tables_and_cells(
+        self, rolled_back_session: Session
+    ) -> None:
+        run = self._record(rolled_back_session)
+
+        counts = SourceRepository(rolled_back_session).counts_for_run(run_id=run.id)
+
+        assert (counts.pages, counts.blocks, counts.tables, counts.cells) == (
+            1,
+            1,
+            1,
+            2,
+        )
+        assert counts.total == 5
+
+    def test_cell_semantics_land_in_typed_columns(
+        self, rolled_back_session: Session
+    ) -> None:
+        run = self._record(rolled_back_session)
+
+        row = rolled_back_session.execute(
+            text(
+                "SELECT c.header_path, c.row_label_path, c.footnote_refs,"
+                "       c.is_header, c.units"
+                "  FROM source_table_cells c"
+                "  JOIN source_elements e ON e.id = c.source_element_id"
+                " WHERE e.extraction_run_id = :run AND e.text = '1,234'"
+            ).bindparams(run=run.id)
+        ).one()
+
+        assert list(row[0]) == ["Year ended March 31", "2025"]
+        assert list(row[1]) == ["Deposits", "Of which: term deposits"]
+        assert list(row[2]) == ["a"]
+        assert row[3] is False
+        assert row[4] == "(Rs in crore)"
+
+    def test_an_absent_path_is_an_empty_array_not_null(
+        self, rolled_back_session: Session
+    ) -> None:
+        """Empty, never NULL, so no consumer has to tell the two apart."""
+        run = self._record(rolled_back_session)
+
+        row = rolled_back_session.execute(
+            text(
+                "SELECT c.header_path, c.is_header, c.units"
+                "  FROM source_table_cells c"
+                "  JOIN source_elements e ON e.id = c.source_element_id"
+                " WHERE e.extraction_run_id = :run"
+                "   AND e.text = 'Year ended March 31'"
+            ).bindparams(run=run.id)
+        ).one()
+
+        assert list(row[0]) == []
+        assert row[1] is True
+        assert row[2] is None
+
+    def test_only_cells_get_extension_rows(
+        self, rolled_back_session: Session
+    ) -> None:
+        run = self._record(rolled_back_session)
+
+        stray = rolled_back_session.execute(
+            text(
+                "SELECT count(*) FROM source_table_cells c"
+                "  JOIN source_elements e ON e.id = c.source_element_id"
+                " WHERE e.extraction_run_id = :run AND e.element_type <> 'cell'"
+            ).bindparams(run=run.id)
+        ).scalar_one()
+
+        assert stray == 0
+
+    def test_a_cell_resolves_to_its_table_and_page(
+        self, rolled_back_session: Session
+    ) -> None:
+        """§14.9 citations depend on this chain holding across two levels."""
+        run = self._record(rolled_back_session)
+
+        row = rolled_back_session.execute(
+            text(
+                "SELECT parent.element_type, grandparent.element_type"
+                "  FROM source_elements cell"
+                "  JOIN source_elements parent ON parent.id = cell.parent_id"
+                "  JOIN source_elements grandparent"
+                "    ON grandparent.id = parent.parent_id"
+                " WHERE cell.extraction_run_id = :run AND cell.text = '1,234'"
+            ).bindparams(run=run.id)
+        ).one()
+
+        assert tuple(row) == ("table", "page")
+
+    def test_a_spanning_cell_keeps_its_span_through_storage(
+        self, rolled_back_session: Session
+    ) -> None:
+        """The span lives in ``location``, so JSONB round-tripping must preserve it."""
+        run = self._record(rolled_back_session)
+
+        stored = rolled_back_session.execute(
+            select(SourceElement).where(
+                SourceElement.extraction_run_id == run.id,
+                SourceElement.text == "Year ended March 31",
+            )
+        ).scalar_one()
+        restored = location_from_mapping(
+            ElementType.CELL, dict(stored.location)
+        )
+
+        assert isinstance(restored, CellLocation)
+        assert restored.column_span == 2
