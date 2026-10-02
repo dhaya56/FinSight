@@ -134,8 +134,20 @@ But horizontal ruling is near-universal on table pages: only **21–25 of 504
 constraint, and no horizontal predicate reaches 100% recall because of them.
 
 **Conclusion: cascaded routing works, and does not pay here.** Recorded as a
-closed line of enquiry rather than a half-remembered dead end. The per-page
-feature set is retained, so re-testing a better signal costs nothing.
+closed line of enquiry rather than a half-remembered dead end.
+
+**The evidence is stored, not merely described.** The per-page features and the
+detection ground truth for all 1,403 pages are committed at
+`evaluation/data/routing-features-development.tsv`, with provenance, column
+definitions and a SHA-256 in `evaluation/data/README.md`. The expensive column is
+the ground truth — `find_tables` at ~7.9 pages/s means re-collecting costs another
+multi-minute corpus pass — so evaluating a new predicate is an offline scan rather
+than a re-measurement. The conclusion above is therefore checkable, and a better
+signal can be tested without touching the corpus.
+
+That file supports the *routing* conclusion only, which concerns relative cost at
+fixed detector behaviour. Its ground-truth column is a detector's output, not
+human-verified truth, so it supports no claim about detection quality.
 
 ---
 
