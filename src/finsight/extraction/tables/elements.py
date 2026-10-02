@@ -1,0 +1,120 @@
+"""Turning a derived table into source elements.
+
+The last library-neutral step: a :class:`DerivedTable` becomes an
+:class:`ExtractedElement` tree that the repository can persist, with semantics
+attached as typed values rather than as text.
+
+**Absent cells do not become elements.** A position the detector reported nothing
+for is covered by its neighbour's ``column_span``, which is the honest best
+statement available — and since a merge and a detection failure are
+indistinguishable from a grid, writing a row for "something might be missing here"
+would record a conclusion the evidence does not support. The span is the record.
+
+**A table carries no semantics yet, and so writes no extension row.** §12.6 wants
+captions; no detector in use reports one and nothing here looks for one. Attaching
+``TableSemantics(caption=None)`` would write a ``source_tables`` row per table
+saying nothing, and a table full of NULLs reads as evidence that filings have no
+captions rather than as evidence that we never looked. No row is the honest
+record. Caption derivation shares its machinery with footnote binding — text above
+a table and text below it are the same geometric problem — so both arrive
+together, and ``source_tables`` gets its writer then.
+"""
+
+from finsight.domain.representations.source import (
+    CellLocation,
+    CellSemantics,
+    ElementType,
+    ExtractedElement,
+    TableLocation,
+)
+from finsight.extraction.tables.structure import DerivedCell, DerivedTable
+
+
+def table_locator(page_number: int, ordinal: int) -> str:
+    """The human-readable citation address of a table."""
+    return f"p. {page_number}, table {ordinal + 1}"
+
+
+def cell_locator(page_number: int, table_ordinal: int, cell: DerivedCell) -> str:
+    """The human-readable citation address of a cell.
+
+    Row and column are one-based in the address because it is shown to a reader,
+    while the stored indices are zero-based because they index a grid. Keeping the
+    two conventions apart here means neither leaks into the other.
+    """
+    return (
+        f"{table_locator(page_number, table_ordinal)}, "
+        f"R{cell.row_index + 1}C{cell.column_index + 1}"
+    )
+
+
+def to_element(
+    derived: DerivedTable,
+    *,
+    ordinal: int,
+    method: str,
+    method_version: str,
+) -> ExtractedElement:
+    """Build the table element and its cells.
+
+    ``ordinal`` positions the table among its page's children, so it participates
+    in the same reading order as the blocks around it.
+    """
+    cells = tuple(
+        _cell(
+            cell,
+            page_number=derived.page_number,
+            table_ordinal=ordinal,
+            cell_ordinal=index,
+            method=method,
+            method_version=method_version,
+        )
+        for index, cell in enumerate(
+            cell for cell in derived.cells if not cell.is_absent
+        )
+    )
+
+    return ExtractedElement(
+        element_type=ElementType.TABLE,
+        ordinal=ordinal,
+        locator=table_locator(derived.page_number, ordinal),
+        location=TableLocation(bbox=derived.bbox),
+        extraction_method=method,
+        extraction_method_version=method_version,
+        children=cells,
+        semantics=None,
+    )
+
+
+def _cell(
+    cell: DerivedCell,
+    *,
+    page_number: int,
+    table_ordinal: int,
+    cell_ordinal: int,
+    method: str,
+    method_version: str,
+) -> ExtractedElement:
+    assert cell.bbox is not None  # absent cells are filtered before this point
+    return ExtractedElement(
+        element_type=ElementType.CELL,
+        ordinal=cell_ordinal,
+        locator=cell_locator(page_number, table_ordinal, cell),
+        location=CellLocation(
+            bbox=cell.bbox,
+            row_index=cell.row_index,
+            column_index=cell.column_index,
+            row_span=cell.row_span,
+            column_span=cell.column_span,
+        ),
+        extraction_method=method,
+        extraction_method_version=method_version,
+        text=cell.text,
+        semantics=CellSemantics(
+            header_path=cell.header_path,
+            row_label_path=cell.row_label_path,
+            footnote_refs=cell.footnote_refs,
+            is_header=cell.is_header,
+            units=cell.units,
+        ),
+    )

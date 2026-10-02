@@ -41,6 +41,7 @@ starts. A different producer may legitimately return different text for the same
 page, which is why the method is recorded per element.
 """
 
+from dataclasses import replace
 from typing import IO, Final
 
 import pymupdf
@@ -52,21 +53,45 @@ from finsight.domain.representations.source import (
     PageLocation,
 )
 from finsight.extraction.contracts import DocumentUnreadableError
+from finsight.extraction.pdf.geometry import displayed_bbox
+from finsight.extraction.pdf.pymupdf_tables import (
+    STRATEGY_LINES,
+    PyMuPdfTableDetector,
+)
 from finsight.extraction.pdf.quality_signals import NO_TEXT_EXTRACTED, PageSignals
 from finsight.extraction.pdf.reading_order import reading_order_key
+from finsight.extraction.tables.elements import to_element
+from finsight.extraction.tables.structure import DerivedTable, derive
 
 _TEXT_BLOCK: Final = 0
 """PyMuPDF's block-type marker for text. Image blocks carry 1."""
 
 
 class PyMuPdfProducer:
-    """Produces page and block elements from PDF bytes using PyMuPDF."""
+    """Produces page, block, table and cell elements from PDF bytes using PyMuPDF.
+
+    **The table strategy is provisional and deliberately narrow.** ``lines`` is
+    used because it is the conservative one: measured across 150 real corpus pages
+    it proposed a table on 31% of them, while ``text`` proposed one on 97% —
+    implausible for a filing, and the kind of over-detection that turns narrative
+    prose into something that presents as a financial table. Neither is selected
+    under §12.12; the comparison and its ground truth decide that, and this
+    producer takes the one less likely to fabricate structure in the meantime.
+    """
 
     METHOD: Final = "pymupdf"
+
+    def __init__(self, table_strategy: str = STRATEGY_LINES) -> None:
+        self._tables = PyMuPdfTableDetector(strategy=table_strategy)
 
     @property
     def method(self) -> str:
         return self.METHOD
+
+    @property
+    def table_strategy(self) -> str:
+        """Which table strategy this producer is configured with."""
+        return self._tables.strategy
 
     @property
     def method_version(self) -> str:
@@ -110,10 +135,15 @@ class PyMuPdfProducer:
         ]
         placed.sort(key=lambda item: reading_order_key(item[0]))
 
-        blocks = tuple(
-            self._block(ordinal, bbox, text, locator=locator)
-            for ordinal, (bbox, text) in enumerate(placed)
-        )
+        tables = [
+            derive(detected)
+            for detected in self._tables.tables_on_page(page, page_number=page_number)
+        ]
+
+        children = self._ordered_children(placed, tables, locator=locator)
+        blocks = [
+            child for child in children if child.element_type is ElementType.BLOCK
+        ]
         signals = PageSignals(
             text_block_count=len(text_entries),
             image_block_count=len(entries) - len(text_entries),
@@ -133,7 +163,54 @@ class PyMuPdfProducer:
             extraction_method=self.method,
             extraction_method_version=self.method_version,
             failure_reason=NO_TEXT_EXTRACTED if signals.yielded_nothing else None,
-            children=blocks,
+            children=children,
+        )
+
+    def _ordered_children(
+        self,
+        placed: list[tuple[tuple[float, float, float, float], str]],
+        tables: list[DerivedTable],
+        *,
+        locator: str,
+    ) -> tuple[ExtractedElement, ...]:
+        """Order a page's blocks and tables together by position.
+
+        Blocks and tables share one ordinal sequence because they share a page,
+        and ``ordinal`` records reading order as the producer judged it. Appending
+        tables after the blocks would have been easier and would have asserted that
+        every table sits below every paragraph.
+
+        **Text inside a table is emitted twice**, once as the blocks PyMuPDF
+        reports for the page and once as cells. That is deliberate and it is not
+        free. Suppressing the overlapping blocks would mean a false-positive table
+        deletes narrative prose from the block stream — and §18 is explicit that
+        boilerplate-style exclusion is a reversible *ranking* decision, never a
+        destructive one. So both representations are stored, both are separately
+        citable, and §18.4's table-aware chunking is what must avoid retrieving the
+        same sentence twice. Recorded as a risk rather than resolved here.
+        """
+        blocks: list[tuple[tuple[float, float, float, float], ExtractedElement]] = [
+            (bbox, self._block(0, bbox, text, locator=locator))
+            for bbox, text in placed
+        ]
+        table_elements = [
+            (
+                derived.bbox,
+                to_element(
+                    derived,
+                    ordinal=0,
+                    method=self.method,
+                    method_version=self.method_version,
+                ),
+            )
+            for derived in tables
+        ]
+
+        combined = blocks + table_elements
+        combined.sort(key=lambda item: reading_order_key(item[0]))
+        return tuple(
+            _with_ordinal(element, ordinal)
+            for ordinal, (_, element) in enumerate(combined)
         )
 
     def _block(
@@ -159,12 +236,15 @@ def _displayed_bbox(
     entry: tuple[float, float, float, float, str, int, int],
     rotation_matrix: pymupdf.Matrix,
 ) -> tuple[float, float, float, float]:
-    """Move a block's box from unrotated page space into displayed space.
+    """Move a block's box from unrotated page space into displayed space."""
+    return displayed_bbox(entry[0], entry[1], entry[2], entry[3], rotation_matrix)
 
-    The identity matrix on an unrotated page, so this costs nothing and is
-    applied unconditionally rather than behind a rotation check — a conditional
-    would be one more place for the two coordinate spaces to drift apart.
+
+def _with_ordinal(element: ExtractedElement, ordinal: int) -> ExtractedElement:
+    """Return the element with its page ordinal set.
+
+    Elements are frozen, so position is applied once the full set of a page's
+    children is known and sorted. A table's own cells keep the ordinals they were
+    built with, since those index a grid rather than a page.
     """
-    box = pymupdf.Rect(entry[0], entry[1], entry[2], entry[3]) * rotation_matrix
-    box.normalize()
-    return (box.x0, box.y0, box.x1, box.y1)
+    return replace(element, ordinal=ordinal)

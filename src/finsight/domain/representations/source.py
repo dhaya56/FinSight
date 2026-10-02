@@ -354,6 +354,18 @@ class CellSemantics:
     row_label_path: tuple[str, ...] = ()
     footnote_refs: tuple[str, ...] = ()
     is_header: bool = False
+    units: str | None = None
+    """The units declaration governing this cell, verbatim, or None.
+
+    Per cell rather than per table because §17.3 requires "table-level **and
+    column-level**" unit context: a scale note above one column governs that
+    column, and applying it table-wide would misscale every other column. A table
+    mixing crore figures with percentages is the ordinary case, not the exotic one.
+
+    Verbatim and uninterpreted. Turning "Rs in crore" into a factor of 10^7 is
+    §16's work; None means no declaration was found, never that the figures are
+    unscaled.
+    """
 
 
 ElementSemantics = TableSemantics | CellSemantics

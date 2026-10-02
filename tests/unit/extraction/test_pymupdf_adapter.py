@@ -29,6 +29,7 @@ from pdf_fixtures import (
     PAGE_WIDTH,
     PlacedText,
     build_encrypted_pdf,
+    build_financial_table_pdf,
     build_hyphenated_pdf,
     build_image_only_pdf,
     build_malformed_pdf,
@@ -562,3 +563,111 @@ class TestProducerIdentity:
         )
 
         assert extract(producer, data) == extract(producer, data)
+
+
+class TestTablesOnAPage:
+    """Tables arrive as page children alongside blocks, carrying their semantics."""
+
+    def test_a_ruled_table_becomes_a_table_element(
+        self, producer: PyMuPdfProducer
+    ) -> None:
+        page = extract(producer, build_financial_table_pdf(ruled=True))[0]
+
+        tables = [
+            child
+            for child in page.children
+            if child.element_type is ElementType.TABLE
+        ]
+
+        assert len(tables) == 1
+
+    def test_blocks_and_tables_share_one_ordinal_sequence(
+        self, producer: PyMuPdfProducer
+    ) -> None:
+        """They share a page, so they share its reading order.
+
+        Appending tables after the blocks would assert that every table sits below
+        every paragraph, which is false the moment a statement opens a section.
+        """
+        page = extract(producer, build_financial_table_pdf(ruled=True))[0]
+
+        ordinals = [child.ordinal for child in page.children]
+
+        assert ordinals == list(range(len(page.children)))
+
+    def test_a_table_at_the_top_of_a_page_is_ordered_first(
+        self, producer: PyMuPdfProducer
+    ) -> None:
+        page = extract(producer, build_financial_table_pdf(ruled=True))[0]
+
+        assert page.children[0].element_type is ElementType.TABLE
+
+    def test_absent_cells_do_not_become_elements(
+        self, producer: PyMuPdfProducer
+    ) -> None:
+        """The fixture's grid is 7x3 with one position the spanning header covers.
+
+        A row for "something may be missing here" would record a conclusion the
+        evidence cannot support, since a merge and a detection failure look alike.
+        """
+        page = extract(producer, build_financial_table_pdf(ruled=True))[0]
+        table = next(
+            child
+            for child in page.children
+            if child.element_type is ElementType.TABLE
+        )
+
+        assert len(table.children) == 20
+
+    def test_a_value_cell_carries_its_full_context(
+        self, producer: PyMuPdfProducer
+    ) -> None:
+        """The whole point of the layer. Without any one of these the number is wrong.
+
+        Header path says which period, row-label path says which concept and that
+        it is a component rather than a total, units says which scale.
+        """
+        page = extract(producer, build_financial_table_pdf(ruled=True))[0]
+        table = next(
+            child
+            for child in page.children
+            if child.element_type is ElementType.TABLE
+        )
+        cell = next(
+            child for child in table.children if child.text.strip() == "1,234"
+        )
+
+        assert cell.semantics is not None
+        assert cell.semantics.header_path == ("Year ended March 31", "2025")
+        assert cell.semantics.row_label_path == ("Deposits",)
+        assert cell.semantics.units == "(Rs in crore)"
+
+    def test_a_cell_locator_addresses_its_grid_position_one_based(
+        self, producer: PyMuPdfProducer
+    ) -> None:
+        """One-based for a reader; the stored indices stay zero-based for a grid."""
+        page = extract(producer, build_financial_table_pdf(ruled=True))[0]
+        table = next(
+            child
+            for child in page.children
+            if child.element_type is ElementType.TABLE
+        )
+        cell = next(
+            child for child in table.children if child.text.strip() == "1,234"
+        )
+
+        assert cell.locator == "p. 1, table 1, R4C2"
+        assert (cell.location.row_index, cell.location.column_index) == (3, 1)
+
+    def test_a_page_without_a_table_yields_only_blocks(
+        self, producer: PyMuPdfProducer
+    ) -> None:
+        page = extract(producer, build_two_column_pdf())[0]
+
+        assert all(
+            child.element_type is ElementType.BLOCK for child in page.children
+        )
+
+    def test_the_table_strategy_is_reported(self, producer: PyMuPdfProducer) -> None:
+        """Provisional, so which one ran has to be visible rather than implied."""
+        assert producer.table_strategy == "lines"
