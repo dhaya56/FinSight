@@ -329,14 +329,92 @@ precision.
 
 The same work measured twice disagreed by up to **±50%**: Ola's `produce()` came
 in *below* its own `find_tables` on a separate run, which is impossible as a cost
-breakdown. ENV-001 records 4 physical cores, and these runs sustained full load
-for twenty-minute stretches; thermal throttling and background load dominate at
-this granularity.
+breakdown.
 
-**Any throughput figure from this host needs repeated runs with the machine
-otherwise idle, and should be reported as a spread.** That caveat applies
-retroactively to ENV-005's 184–220 pages/s and its 30.8 s corpus total, both
-single runs.
+**Refined by later measurement: the variance is mostly self-inflicted, not
+thermal.** A sequential baseline re-run while little else was happening gave
+24.3 / 25.6 / 25.9 / 25.9 s — a **6% spread**. The earlier ±50% swings came from
+measuring while other measurement passes were running. ENV-001 records 4 physical
+cores, so a second full-load process halves the one being timed.
+
+Two practical rules follow:
+
+- **Sequential timings are reliable when the machine is otherwise idle** — 6%, not
+  50%. The earlier caveat was too pessimistic and not actionable enough.
+- **Parallel timings remain noisy regardless.** A four-worker configuration
+  measured 1.53× in one session and 2.23× in another, because saturating every
+  core makes the result sensitive to anything else on the host. Parallel figures
+  should be reported as a range.
+
+This applies retroactively to ENV-005's 184–220 pages/s and its 30.8 s corpus
+total, both single runs.
+
+---
+
+## 10.1 Parallel detection: measured, and not adopted
+
+`find_tables` is effectively all of extraction cost and is per-page independent,
+which makes page-level parallelism the only remaining throughput lever that costs
+no fidelity. Measured on 300 pages, four repeats per configuration, pools created
+once and reused rather than per run.
+
+**Correctness first.** Sequential, threaded and process runs all returned
+identical table structure — same 23 tables, same row, column and cell counts.
+Parallelism here does not change what is extracted.
+
+| Primitive | Speedup | Finding |
+|---|---|---|
+| **Threads** | **0.57×** | *Slower.* PyMuPDF holds the GIL through `find_tables`, and four threads contending made it worse. This design is dead |
+| Processes, 1 worker | 0.81× | The pool machinery alone costs ~23% — IPC, result pickling, and Windows `spawn` re-importing per worker |
+| Processes, 2 workers | 1.42× | |
+| **Processes, 4 workers** | **1.53–2.23×** | Best configuration; the range is session variance on identical settings |
+| Processes, 8 workers | 2.11× | Hyperthreads add little over 4 |
+
+**A load-imbalance hypothesis was tested and falsified.** The 2→4 worker curve was
+nearly flat, which suggested one worker held most of the work and set the wall
+clock — plausible, since table density varies five-fold between documents. Tested
+with dynamically scheduled chunks of 75, 25, 10 and 5 pages:
+
+| Chunk size, 4 workers | Speedup | Measured task spread |
+|---|---|---|
+| 75 pages | **2.23×** | 1.4× |
+| 25 pages | 1.98× | 1.9× |
+| 10 pages | 1.97× | 3.0× |
+| 5 pages | 1.91× | 6.8× |
+
+Finer chunks were **monotonically worse**, and the task spread at coarse chunks was
+only 1.4× — the work was already balanced. Dynamic scheduling added IPC overhead
+for no balance benefit. The limiter is core count, not scheduling.
+
+An earlier probe reported interleaved assignment at 0.50×. **That was a defect in
+the probe**, which built interleaved page buckets and then returned each bucket's
+first and last page as a contiguous *range*, so every worker processed almost the
+whole document. Recorded because the number otherwise looks like a finding about
+page assignment, and it is not.
+
+### Decision: record the bound, do not build it
+
+Roughly **2×** is available, at no fidelity cost, from 4 processes with coarse
+contiguous chunks. It is not being implemented, for four reasons in order of
+weight:
+
+1. **The detector is not settled.** ADR-003 has not run. Optimising the throughput
+   of `lines` before the ground truth establishes whether `lines` is admitted
+   risks work that must be redone against different characteristics.
+2. **Asynchrony is the better answer to latency.** Nothing in the query path waits
+   on extraction. §11.8 processing jobs — already planned, and reopened by open
+   item 11 below — make ingestion latency invisible rather than halving it.
+3. **The memory cost lands in the wrong component.** Each worker opens its own
+   document, roughly 0.6–1 GB for four against ENV-001's 15.7 GB shared with
+   host-native Ollama, with §41.11 already flagging model memory contention. It
+   also lands inside the §11.7 restricted parser worker, whose purpose is bounded
+   resources, while §38.11 container limits remain deferred. A process pool before
+   the resource bounds exist is the wrong order.
+4. **2× is not a step change.** The largest filing goes from ~220 s to ~110 s.
+
+Revisit after ADR-003 settles the detector and after §11.8 makes ingestion
+asynchronous. The measurement stands either way, and it permanently closes two
+options: threads cannot work, and finer-grained scheduling does not help.
 
 Peak traced Python allocation was 79 MiB. That counts Python allocations only —
 not PyMuPDF's C-side or process RSS — so it is not a §30.10 resource bound.
