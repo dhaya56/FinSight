@@ -289,10 +289,17 @@ class SourceRepository:
     def elements_for_run(self, *, run_id: UUID) -> Sequence[SourceElement]:
         """Return a run's elements with roots first, then children by parent.
 
-        Enough to rebuild the two-level PDF hierarchy in memory. Full document
-        order across a deeper tree is a recursive query over
-        ``(extraction_run_id, parent_id, ordinal)``, which the covering index
-        supports; this method does not attempt it.
+        Enough to **rebuild** the hierarchy in memory, at any depth, because every
+        row carries its ``parent_id``. The PDF path is now three levels — page,
+        then blocks and tables, then cells — so the ordering here groups each
+        parent's children together rather than yielding document order.
+
+        **It does not yield document order, and that disclaimer now matters.**
+        Interleaving a table's cells back into their page's reading sequence is a
+        recursive query over ``(extraction_run_id, parent_id, ordinal)``, which the
+        covering index supports and this method does not attempt. Chunking needs
+        that order (§18.1), so the recursive read belongs with the chunker rather
+        than here, where no current caller needs it.
         """
         statement = (
             select(SourceElement)

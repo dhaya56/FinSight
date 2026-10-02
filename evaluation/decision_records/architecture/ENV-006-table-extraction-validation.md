@@ -70,9 +70,74 @@ manufactured a condition the corpus barely contains.
 
 **Consequence for ADR-003.** The decision was framed as recall — which strategy
 finds more tables. Recall is saturated and uninformative. **The binding constraint
-is precision**, and precision remains unmeasured because it requires the ground
-truth. A detector claiming a table on a narrative page produces a chunk that
-presents as structured financial data and is not.
+is precision**, measured in §2.1 below.
+
+---
+
+## 2.1 Detector precision: measured, and neither strategy is admissible
+
+Ten pages, human-annotated, blinded and shuffled with controls. Nine drawn from the
+stratum that decides this — `text` claims a table, `lines` finds none — and one
+control where both strategies agree. Each judged on the **region**, not the page:
+does the claimed outline bound a real table, bound something wrong, or bound no
+table at all?
+
+| Verdict | Count |
+|---|---|
+| **Correctly bounded table** | **0 of 10** |
+| Real table inside, **wrong boundary** — merges several tables, or swallows prose | 6 |
+| **No table at all** — prose, headings, a chart | 4 |
+
+**Zero usable regions in ten trials.** By the rule of three the 95% upper bound on
+the usable-region rate is ~26%, with 0% observed. That is disqualifying for a
+production detector wherever in that interval the truth lies, which is why the
+sample was stopped at ten rather than extended to thirty: a tighter interval around
+an already decisive result buys nothing.
+
+**The control failed too.** On the one page where *both* strategies agreed a table
+exists, `text`'s region was still wrong. The failure is not confined to pages
+`lines` rejects.
+
+### Both strategies fail, in opposite directions
+
+**`lines` has a serious recall problem.** Five of the nine stratum-A pages contained
+real financial tables on which `lines` found **nothing**. One page carries four
+separate tables and `lines` returned zero.
+
+**The mechanism, identified during annotation: horizontal rules only, no vertical
+column separators.** These tables are ruled under their headers and between
+sections, with columns separated by alignment alone. `lines` requires a grid to
+infer a table, and Schedule III financial statements routinely do not provide one.
+
+This is the partially-ruled case §11 listed as unmeasured. It is **not an edge
+case — it is the dominant case** in this corpus, which also explains §2's finding
+that `lines` fires on only 31% of pages.
+
+**`text` finds those tables and cannot bound them.** Observed failures: a single
+outline covering an entire page of two-column prose plus one table; one outline
+merging four separate tables with their footnotes; and on a landscape page, an
+outline beginning mid-page horizontally that bisects both tables on it.
+
+### What this settles
+
+**Neither PyMuPDF strategy is admissible as a production table detector.** ADR-003
+cannot be a selection between them. The missing capability is **boundary
+segmentation of horizontally-ruled tables**, and ENV-007 establishes that Docling
+reports exactly that — explicit spans, explicit header flags, and correct bounds on
+a ruled fixture.
+
+**Immediate consequence for the retrieval path:** table cells must **not** enter
+retrieval until a detector can bound them. Indexing the current regions would embed
+chunks that swallow paragraphs or bisect tables. Tables remain stored and citable
+under §17.1; they stay out of the retrieval path. Narrative-first retrieval (§15)
+is therefore the evidence-backed sequence, not merely the convenient one.
+
+### Limitations
+
+Ten pages, one annotator, drawn from three documents (Infosys 5, Ola 3, HDFC 2).
+Sufficient to reject — a 0/10 result rejects regardless of interval — and **not**
+sufficient to quantify how often either strategy succeeds, nor to rank any
+replacement. Admitting a detector still requires its own evidence.
 
 This is the second time in this project that a synthetic fixture overstated real
 behaviour: ENV-004 overstated producer throughput by ~3.5×. The pattern is
