@@ -300,7 +300,44 @@ and carrying signals forward for a calibration that has not happened.
 
 ---
 
-## 8. Not implemented, and recorded so absence is not read as a finding
+## 8. Region support from ruling lines
+
+**Rule.** `src/finsight/extraction/tables/regions.py`. A page's horizontal ruling
+lines are grouped into bands separated by more than 40pt. A proposed region
+containing none of the page's rules, **on a page that draws rules**, is refused —
+`verdict=rejected`, reason `region_has_no_ruling_lines`, and a coverage gap so the
+run becomes `partial`. A band of three or more rules that no surviving region
+covers is reported as a missed table.
+
+**Why 40pt.** Measured on five real pages carrying 103 rule gaps: within-table row
+spacing is **13.9pt at both the median and the 75th percentile**, while gaps
+separating two tables measured 44.5pt and up. 40pt sits in the empty space between
+the two populations. It is used only to count distinct ruled areas, never to decide
+a table's extent.
+
+**What it fixed, measured on the six judged pages (ENV-008 §2.5).** One region
+refused — Infosys p.300's 18×8 grid over two-column prose — and three missed ruled
+areas reported, including the part of Infosys p.234's second table that the
+annotator independently observed was enclosed by nothing. **No change and no false
+alarm on either page judged correctly bounded**, and none on the unruled page.
+
+**Known misfires.**
+
+| Misfire | Consequence |
+|---|---|
+| A region grazing a single rule is supported | HDFC p.279's spurious region clips one rule and survives, while the page's real table goes undetected. A density threshold would catch it and no measurement supports one, so the region stays and the missed band is reported alongside it |
+| An unruled page disables every check | Infosys p.140 carries real tables and draws no rules. Correct — the dominant presentation in this corpus is partially ruled — but it means borderless pages get no protection at all |
+| A band is not a table's extent | **Deliberate.** An earlier design snapped region edges to contained rules. Measurement killed it: these filings rule under headers and between sections, so Infosys p.234 has a region spanning y 501-587 whose rules occupy only y 562-576. Snapping would have cut the table to a third while looking like a fix |
+| Three rules is a floor, not a finding | A reported miss is a prompt to look, not a count of lost tables |
+
+**Measured?** On six pages, against human-verified boundary judgement. Enough to
+show it removes a real false positive without disturbing correct regions; far too
+small for a rate. It does **not** address the row-level clipping that affects every
+region on every page judged, which remains the dominant defect.
+
+---
+
+## 9. Not implemented, and recorded so absence is not read as a finding
 
 | Gap | Consequence if forgotten |
 |---|---|

@@ -53,9 +53,10 @@ from finsight.domain.representations.source import (
     ElementType,
     ExtractedElement,
     PageLocation,
+    Verdict,
 )
 from finsight.extraction.contracts import DocumentUnreadableError
-from finsight.extraction.pdf.geometry import displayed_bbox
+from finsight.extraction.pdf.geometry import displayed_bbox, horizontal_rules
 from finsight.extraction.pdf.pymupdf_tables import (
     STRATEGY_LINES,
     PyMuPdfTableDetector,
@@ -63,11 +64,13 @@ from finsight.extraction.pdf.pymupdf_tables import (
 from finsight.extraction.pdf.quality_signals import (
     NO_TEXT_EXTRACTED,
     TABLE_CELLS_DROPPED,
+    TABLE_REGION_UNSUPPORTED,
     PageSignals,
 )
 from finsight.extraction.pdf.reading_order import reading_order_key
 from finsight.extraction.tables.contracts import DetectedTable, TableDetector
 from finsight.extraction.tables.elements import to_element
+from finsight.extraction.tables.regions import UNSUPPORTED, review
 from finsight.extraction.tables.structure import DerivedTable, derive
 from finsight.extraction.tables.validation import TableQuality, assess
 
@@ -168,11 +171,22 @@ class PyMuPdfProducer:
         ]
         placed.sort(key=lambda item: reading_order_key(item[0]))
 
+        reviewed = review(
+            [candidate.bbox for candidate in detected], horizontal_rules(page)
+        )
+
         tables = [derive(candidate) for candidate in detected]
-        gaps = [_coverage_gap(candidate) for candidate in detected]
+        gaps = [
+            _coverage_gap(candidate, missed=index in reviewed.unsupported)
+            for index, candidate in enumerate(detected)
+        ]
         quality = [
-            assess(candidate, derived)
-            for candidate, derived in zip(detected, tables, strict=True)
+            _assess_region(
+                candidate, derived, unsupported=index in reviewed.unsupported
+            )
+            for index, (candidate, derived) in enumerate(
+                zip(detected, tables, strict=True)
+            )
         ]
 
         children = self._ordered_children(
@@ -281,8 +295,34 @@ def _displayed_bbox(
     return displayed_bbox(entry[0], entry[1], entry[2], entry[3], rotation_matrix)
 
 
-def _coverage_gap(detected: DetectedTable) -> str | None:
+def _assess_region(
+    detected: DetectedTable, derived: DerivedTable, *, unsupported: bool
+) -> TableQuality:
+    """Judge a table, refusing one the page's typography does not support.
+
+    The quality gate reads a region's contents; this adds the one thing its
+    contents cannot show, which is whether the page draws any rules where the
+    region claims a table. ENV-008 §2.5 measured why that matters: a paragraph
+    segmented into an 18x8 grid has short cells, trips no prose rule, and was
+    accepted while the page's real table went undetected.
+    """
+    quality = assess(detected, derived)
+    if not unsupported:
+        return quality
+    return replace(
+        quality,
+        verdict=Verdict.REJECTED,
+        reasons=(*quality.reasons, UNSUPPORTED),
+    )
+
+
+def _coverage_gap(detected: DetectedTable, *, missed: bool = False) -> str | None:
     """Why a table should be treated as incomplete, or None when it is whole.
+
+    ``missed`` marks a region the page's ruling lines do not support. It is a gap
+    rather than a silent drop because §11.11 turns a run containing one into
+    ``partial``: the region is refused as evidence while the fact that extraction
+    went wrong here stays visible.
 
     A detector that discards cells it cannot place reports that loss nowhere in its
     return value — measured at 4 of 35 cells on one real table, 11% of a financial
@@ -294,6 +334,8 @@ def _coverage_gap(detected: DetectedTable) -> str | None:
     threw away, and presenting an 11%-incomplete balance sheet as whole is the
     failure this guards against.
     """
+    if missed:
+        return str(TABLE_REGION_UNSUPPORTED)
     if detected.dropped_cells >= 1.0:
         return str(TABLE_CELLS_DROPPED)
     return None

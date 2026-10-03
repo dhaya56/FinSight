@@ -275,16 +275,62 @@ one-page synthetic timing underestimates dense filing pages.
 | # | Item | Owner |
 |---|---|---|
 | 1 | ~~Boundary confirmation~~ | **closed by §2.5** — Docling 2 of 6 |
-| 2 | Whether the row-offset defect is the region deriving from cell content rather than ruled extent. If so it may be correctable above the detector, which would change the picture materially | Phase 6 |
+| 2 | ~~Whether the row-offset defect is correctable from ruled extent~~ | **closed, negative** — see below |
 | 3 | Corpus-wide false-positive rate on narrative pages | ADR-003 admission |
 | 4 | Cell-content fidelity inside a correctly bounded region | Phase 6 |
 | 5 | Peak RSS under the layout model against §41.11 | ADR-004 |
 | 6 | Whether the detector contract should accept reported spans and header flags rather than deriving them | Phase 6 design |
 | 7 | Throughput on a full document, where 1.6–7.6 s/page compounds | Phase 7 |
 
-Item 2 is the one worth pursuing before any other detector is sought. A detector
-that finds roughly the right region and misplaces its edge by a row is a different
-problem from one that cannot find the region, and potentially a tractable one.
+### Item 2, pursued and answered: the edge is not recoverable from the rules
+
+The hypothesis was that a region's edge could be snapped to the table's ruled
+extent, fixing the clipping. **Measurement refuted it.**
+
+Rule gaps across five real pages, 103 gaps: within-table row spacing is **13.9pt
+at both the median and the 75th percentile**; gaps between tables start at 44.5pt.
+Two clean populations — so bands are easy to form, and that is where the good news
+ends.
+
+**No gap threshold recovers the table count.** At 40pt, Infosys p.234 yields 4
+bands for 4 tables and Infosys p.246 yields 3 for 4. At 30pt, p.246 is right and
+p.300 and HDFC p.279 split a single table into three and four.
+
+**The reason is in the typography.** These filings rule *under headers and between
+sections*, not row by row. Infosys p.234 carries a region spanning y 501-587 whose
+rules occupy only y 562-576. Snapping that region to its rules would have cut the
+table to a third of itself while presenting as a correctness fix — the exact shape
+of silent failure this project is built to avoid.
+
+**Rules bound *whether*, not *where*.** So the signal was kept for the question it
+answers and refused for the one it does not.
+
+### What was built instead
+
+`src/finsight/extraction/tables/regions.py`: a region containing none of a ruled
+page's rules is refused, and a band of three or more rules that no surviving region
+covers is reported as a missed table.
+
+Measured on the same six pages:
+
+| Page | Verdict | Effect |
+|---|---|---|
+| Infosys 300 | 3 | **region refused**; the real table reported as missed |
+| HDFC 279 | 3 | real table reported as missed; the spurious region grazes one rule and survives |
+| Infosys 234 | 2 | the uncovered portion of table 2 reported as missed |
+| Infosys 325 | 1 | no change, no false alarm |
+| Infosys 246 | 1 | no change, no false alarm |
+| Infosys 140 | 2 | unruled page, all checks disabled |
+
+15 regions before, 14 after; one refused, three missed areas recorded.
+
+The Infosys 234 result is the independent check worth noting: the annotator wrote
+that "the remaining of second table is not enclosed by any red outline", and the
+rule review located an uncovered band at y 264-335 without being told.
+
+**This removes one false positive out of two and surfaces three silent losses. It
+does not touch the row-level clipping**, which affects every region on every page
+judged and remains the dominant defect and the reason admission stays refused.
 
 ---
 
