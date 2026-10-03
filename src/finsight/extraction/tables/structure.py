@@ -183,10 +183,14 @@ def derive(table: DetectedTable) -> DerivedTable:
     """Resolve spans, header rows, units rows, footnotes and paths for a grid."""
     spans = _column_spans(table)
     row_spans = _row_spans(table)
-    header_rows, units_row_indices, units_rows = _classify_leading_rows(table)
+    roles = _classify_rows(table)
+    header_rows = roles.headers
+    units_rows = roles.units_texts
     header_texts = _header_texts(table, header_rows, spans)
-    labels = _row_label_paths(table, header_rows | units_row_indices)
-    table_units, column_units = _units_scopes(table, units_row_indices, spans)
+    labels = _row_label_paths(
+        table, header_rows | roles.units_rows, roles.sections
+    )
+    table_units, column_units = _units_scopes(table, roles.units_rows, spans)
 
     cells = tuple(
         DerivedCell(
@@ -205,7 +209,7 @@ def derive(table: DetectedTable) -> DerivedTable:
             else labels.get(cell.row_index, ()),
             footnote_refs=split_footnote_marker(cell.text)[1],
             units=None
-            if cell.row_index in header_rows or cell.row_index in units_row_indices
+            if cell.row_index in header_rows or cell.row_index in roles.units_rows
             else column_units.get(cell.column_index, table_units),
         )
         for cell in sorted(table.cells, key=lambda c: (c.row_index, c.column_index))
@@ -225,11 +229,15 @@ def derive(table: DetectedTable) -> DerivedTable:
 def _column_spans(table: DetectedTable) -> dict[tuple[int, int], int]:
     """How many columns each populated cell covers.
 
-    The only available signal is an absent neighbour: a detector reports a merged
-    cell as one cell followed by nothing, never as a span count. Which means a
-    genuine merge and a detector that simply failed to find a cell are
-    indistinguishable here — a limitation the ground truth has to measure, not one
-    this function can resolve.
+    **A reported span always wins.** When a detector states ``col_span`` there is
+    nothing to infer, and inferring anyway would discard the one piece of evidence
+    that resolves the ambiguity below.
+
+    Where nothing is reported the only signal is an absent neighbour: a merged
+    cell arrives as one cell followed by nothing. That makes a genuine merge and a
+    cell the detector simply failed to find **indistinguishable** — measured across
+    51% of real tables, and unresolvable at this layer by any refinement of this
+    rule. It is the single strongest argument for a detector that reports spans.
     """
     spans: dict[tuple[int, int], int] = {}
     for row_index in range(table.row_count):
@@ -237,12 +245,16 @@ def _column_spans(table: DetectedTable) -> dict[tuple[int, int], int]:
         for position, cell in enumerate(row):
             if cell.is_absent:
                 continue
+            key = (cell.row_index, cell.column_index)
+            if cell.reported_column_span is not None:
+                spans[key] = cell.reported_column_span
+                continue
             width = 1
             for following in row[position + 1 :]:
                 if not following.is_absent:
                     break
                 width += 1
-            spans[(cell.row_index, cell.column_index)] = width
+            spans[key] = width
     return spans
 
 
@@ -263,73 +275,99 @@ def _row_spans(table: DetectedTable) -> dict[tuple[int, int], int]:
     return spans
 
 
-def looks_like_year(text: str) -> bool:
-    """True when the text is a bare four-digit year rather than a magnitude.
+@dataclass(frozen=True, slots=True)
+class RowRoles:
+    """Which rows are headers, units declarations and section labels."""
 
-    The distinction carries real weight. ``Particulars | 2025 | 2024`` is one of
-    the commonest header shapes in an Indian filing, and without separating a year
-    from a value it reads as a data row — a label plus numbers — which would put
-    the header boundary in the wrong place and leave every column unlabelled.
-
-    Bare is the operative word: ``2025`` is a year, ``2,025`` is a figure. A filing
-    that grouped its years would defeat this, and none in the corpus does.
-    """
-    stripped = text.strip()
-    return (
-        len(stripped) == 4
-        and stripped.isdigit()
-        and 1900 <= int(stripped) <= 2199
-    )
+    headers: frozenset[int]
+    units_rows: frozenset[int]
+    units_texts: tuple[str, ...]
+    sections: frozenset[int]
 
 
-def _is_data_row(row: tuple[DetectedCell, ...]) -> bool:
-    """A data row carries a label in its first column and a *magnitude* beyond it.
-
-    All three qualifications matter. Requiring a value excludes a caption and a
-    units row. Requiring a label excludes a period header whose cells are bare
-    years. Requiring the value to be a magnitude rather than any numeral excludes
-    ``Particulars | 2025 | 2024``, where both halves are otherwise satisfied.
-
-    The known misfire: a genuine data row whose values are all bare four-digit
-    numbers — a headcount of ``2,025`` written without its separator — would read
-    as a header. It can only misfire above the first real data row, since this
-    stops there, and it is one of the things the ground truth measures rather than
-    something this rule can settle.
-    """
-    if not row or not row[0].text.strip():
-        return False
-    return any(
-        looks_numeric(cell.text) and not looks_like_year(cell.text) for cell in row[1:]
-    )
+def _filled(row: tuple[DetectedCell, ...], index: int) -> bool:
+    return index < len(row) and bool(row[index].text.strip())
 
 
-def _classify_leading_rows(
-    table: DetectedTable,
-) -> tuple[frozenset[int], frozenset[int], tuple[str, ...]]:
-    """Split the rows above the first data row into header rows and units rows.
+def _any_filled_beyond_first(row: tuple[DetectedCell, ...]) -> bool:
+    return any(cell.text.strip() for cell in row[1:])
 
-    Returns the header rows, the units rows, and the units text. The units *rows*
-    are returned as well as their text because they have to be excluded from
-    row-label paths: a scale note drawn to the left of the line items would
-    otherwise be read as an indentation parent and appear as the outermost label
-    on every row in the table.
+
+def _classify_rows(table: DetectedTable) -> RowRoles:
+    """Assign each row a role from its *shape*, not from whether it holds numbers.
+
+    The rule this replaces required a data row to contain a magnitude, which came
+    from a fixture that was a numeric financial statement. Checked against the
+    corpus, that assumption fails in three ways, all of them common:
+
+    * **A section label row** — "Assets" above the asset line items — holds no
+      figures, so it read as a header. The section grouping that organises every
+      balance sheet was discarded.
+    * **A wholly non-numeric table** — a governance table of policies and owning
+      committees, a list of directors — contains no magnitudes anywhere, so
+      *every* row read as a header and the table carried no meaning at all.
+    * **A compliance table** of Yes/No or tick marks fails the same way.
+
+    Shape separates these cleanly, because the first column is the row-label
+    column and a header has no row label:
+
+    ======================================  ====================
+    Shape                                   Role
+    ======================================  ====================
+    first column empty, something beyond    header continuation
+    first column filled, rest empty         section label
+    first column filled, something beyond   data — stop
+    matches the units vocabulary            units declaration
+    ======================================  ====================
+
+    Row 0 is taken as a header unless it is the only row. **Known limitation:** a
+    table continued from a previous page (§12.8) opens with data and no header,
+    and nothing in a grid distinguishes that from a header. Joining continued
+    tables is already out of scope, so this is recorded rather than guessed at.
+
+    Section rows are found across the whole table, not only above the first data
+    row, because a balance sheet alternates sections and line items the whole way
+    down.
     """
     headers: list[int] = []
     units_rows: list[int] = []
     units: list[str] = []
+    sections: list[int] = []
+    in_header_block = True
 
     for row_index in range(table.row_count):
         row = table.row(row_index)
-        if _is_data_row(row):
-            break
         stated = [cell.text.strip() for cell in row if states_units(cell.text)]
         if stated:
             units_rows.append(row_index)
             units.extend(stated)
-        else:
-            headers.append(row_index)
+            continue
 
-    return frozenset(headers), frozenset(units_rows), tuple(units)
+        label_only = _filled(row, 0) and not _any_filled_beyond_first(row)
+        if label_only:
+            sections.append(row_index)
+            in_header_block = False
+            continue
+
+        if not in_header_block:
+            continue
+
+        if row_index == 0 and table.row_count > 1:
+            headers.append(row_index)
+            continue
+
+        if not _filled(row, 0) and _any_filled_beyond_first(row):
+            headers.append(row_index)
+            continue
+
+        in_header_block = False
+
+    return RowRoles(
+        headers=frozenset(headers),
+        units_rows=frozenset(units_rows),
+        units_texts=tuple(units),
+        sections=frozenset(sections),
+    )
 
 
 def _units_scopes(
@@ -395,7 +433,9 @@ def _header_texts(
 
 
 def _row_label_paths(
-    table: DetectedTable, header_rows: frozenset[int]
+    table: DetectedTable,
+    header_rows: frozenset[int],
+    sections: frozenset[int] = frozenset(),
 ) -> dict[int, tuple[str, ...]]:
     """The row-label path for each data row, outermost first.
 
@@ -411,6 +451,7 @@ def _row_label_paths(
     """
     paths: dict[int, tuple[str, ...]] = {}
     stack: list[tuple[float, str]] = []
+    section: str | None = None
 
     for row_index in range(table.row_count):
         if row_index in header_rows:
@@ -418,6 +459,17 @@ def _row_label_paths(
         label_cell = table.cell_at(row_index, 0)
         label = split_footnote_marker(label_cell.text)[0]
         if not label:
+            continue
+
+        if row_index in sections:
+            # A section label governs the rows beneath it until the next one.
+            # "Assets" is the outermost label of every line item under it, and
+            # discarding it — which the previous rule did, by reading it as a
+            # header — left a balance sheet's line items with no statement
+            # section at all.
+            section = label
+            stack = []
+            paths[row_index] = (label,)
             continue
 
         if label_cell.text_left is None:
@@ -428,7 +480,8 @@ def _row_label_paths(
                 stack.pop()
             stack.append((indent, label))
 
-        paths[row_index] = tuple(text for _, text in stack)
+        nested = tuple(text for _, text in stack)
+        paths[row_index] = (section, *nested) if section else nested
 
     return paths
 

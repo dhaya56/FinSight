@@ -30,23 +30,49 @@ because its tests are green.
 
 ---
 
-## 1. Header-row boundary
+## 1. Row roles — header, section, units, data
 
-**Rule.** Rows above the first *data* row form the preamble. A data row has a
-non-empty first column **and** at least one cell beyond it that reads as a
-magnitude — a numeral that is not a bare four-digit year.
+**Rule.** Each row takes a role from its *shape*, because the first column is the
+row-label column and a header has no row label:
 
-**Why the year exclusion exists.** `Particulars | 2025 | 2024` is one of the
-commonest header shapes in an Indian filing and satisfies the naive test on both
-counts. Without separating a bare year from a magnitude the header boundary lands
-one row early and every column loses its heading.
+| Shape | Role |
+|---|---|
+| first column empty, something beyond it | header continuation |
+| first column filled, everything else empty | **section label** |
+| first column filled, something beyond it | data — the header block ends |
+| matches the units vocabulary | units declaration |
 
-**Known misfire.** A genuine data row whose values are all bare four-digit numbers
-— a headcount written `2025` rather than `2,025` — reads as a header. Bounded by
-the rule stopping at the first real data row, so it can only misfire in a table's
-opening rows.
+Row 0 is a header unless it is the only row. Section rows are found across the
+whole table, not just above the first data row, because a balance sheet alternates
+sections and line items all the way down.
 
-**Measured?** No. Rate unknown. Owner: Phase 6 ground truth.
+**This replaced a numeric rule, and the replacement was forced by the corpus.**
+The previous rule required a data row to contain a *magnitude*. That assumption
+came from a fixture that happened to be a numeric financial statement, and manual
+review of real pages broke it three ways, all common and all silent:
+
+- **A section label row** — "Assets" above the asset line items — holds no figures,
+  so it read as a header and was discarded. Every line item beneath it lost the
+  statement section it belongs to, which in a balance sheet is the asset/liability
+  distinction itself.
+- **A wholly non-numeric table** — governance policies and owning committees, lists
+  of directors — contains no magnitude anywhere, so **every row** read as a header.
+  The table carried no header paths and no row labels at all. Financial filings are
+  full of these.
+- **A Yes/No or tick-mark compliance table** failed identically.
+
+The shape rule also removes the need for the bare-year test the old rule depended
+on: `Particulars | 2025 | 2024` now resolves because row 0 is a header and the row
+beneath carries a label *and* values, whatever those values are.
+
+**Known limitation.** A table continued from a previous page (§12.8) opens with
+data and no header, and nothing in a grid distinguishes that from a header row.
+Joining continued tables is already out of scope, so this is recorded rather than
+guessed at.
+
+**Measured?** The three failure shapes are now pinned by tests taken from real
+pages. The *rate* at which the continuation limitation bites is unmeasured. Owner:
+Phase 6 ground truth.
 
 ---
 
@@ -110,9 +136,21 @@ region, or a page-level note — or this rule misses the forms they use. Both
 readings are bad: a cell whose `units` is NULL is a figure whose scale is unknown,
 and §16 must refuse to normalise it. 88% of tables currently produce such cells.
 
-Distinguishing "declared elsewhere" from "declaration missed" needs the ground
-truth. Owner: Phase 6 ground truth, and this is now one of its highest-value
-questions.
+**Answered by manual review: the declaration usually sits *outside* the detected
+table region.** On the pages inspected, `(In ₹ crore)` appears as a small
+right-aligned note *above* the table's first row, as a separate text block, not as
+a row of the table. The rule only inspects rows **inside** the detected region, so
+it cannot see it — which explains the 12% directly, and means the rule is not at
+fault and should not be tuned further.
+
+**Consequence.** Units detection has to look above the table region, not only
+within it. That is the same "text adjacent to a table" machinery that caption
+derivation and footnote binding need — above, above, and below respectively — so
+all three should land together rather than being solved three times.
+
+Until then a cell's `units` is NULL for most tables, and §16 must refuse to
+normalise a figure whose scale it cannot establish. Owner: the caption and footnote
+commit.
 
 ---
 

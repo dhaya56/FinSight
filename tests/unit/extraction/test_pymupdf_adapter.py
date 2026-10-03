@@ -668,6 +668,13 @@ class TestTablesOnAPage:
             child.element_type is ElementType.BLOCK for child in page.children
         )
 
-    def test_the_table_strategy_is_reported(self, producer: PyMuPdfProducer) -> None:
-        """Provisional, so which one ran has to be visible rather than implied."""
-        assert producer.table_strategy == "lines"
+    def test_the_detector_and_strategy_are_reported(
+        self, producer: PyMuPdfProducer
+    ) -> None:
+        """Which detector ran must be visible, not implied.
+
+        The producer takes tables from an injected detector and blocks from
+        PyMuPDF, so a run can legitimately mix producers. Recording only a strategy
+        name would leave no way to tell which engine produced a given table.
+        """
+        assert producer.table_strategy == "pymupdf:lines"

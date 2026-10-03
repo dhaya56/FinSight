@@ -58,6 +58,19 @@ class DetectedCell:
     mean opposite things — an empty cell is a blank the document contains, and an
     absent cell is a position the document does not have. Conflating them is how
     a value ends up attributed to the wrong period.
+
+    **The ``reported_*`` fields carry structure a detector states outright**, as
+    opposed to structure derived from the grid. That is the difference between a
+    parser that hands over a picture of a table and one that hands over the table.
+    PyMuPDF reports neither spans nor headers, so both must be inferred — and span
+    inference cannot distinguish a merged cell from a cell the detector failed to
+    find, an ambiguity measured across **51% of real tables**. Docling reports
+    ``col_span``, ``row_span`` and ``column_header`` explicitly, removing that
+    error class rather than shrinking it.
+
+    ``None`` on a reported field means *not reported*, and the derivation falls
+    back to inference. It never means "no span" — that is ``1``. Conflating the
+    two would turn silence into a claim.
     """
 
     row_index: int
@@ -65,6 +78,9 @@ class DetectedCell:
     text: str
     bbox: tuple[float, float, float, float] | None
     text_left: float | None = None
+    reported_row_span: int | None = None
+    reported_column_span: int | None = None
+    reported_is_header: bool | None = None
     """Where the cell's text actually begins, in displayed space.
 
     Reported separately from ``bbox`` because in a ruled table they are different
@@ -80,9 +96,14 @@ class DetectedCell:
     derivation treats that as top level rather than guessing.
     """
 
+
     def __post_init__(self) -> None:
         if self.row_index < 0 or self.column_index < 0:
             raise TableDetectionError("cell indices must not be negative")
+        for name in ("reported_row_span", "reported_column_span"):
+            value = getattr(self, name)
+            if value is not None and value < 1:
+                raise TableDetectionError(f"{name} must be at least 1")
 
     @property
     def is_absent(self) -> bool:
@@ -104,6 +125,32 @@ class DetectedTable:
     row_count: int
     column_count: int
     cells: tuple[DetectedCell, ...]
+    dropped_cells: float = 0.0
+    """Cells the detector discarded rather than placed, where it admits to it.
+
+    Docling drops cells matching neither a row nor a column band and reports the
+    loss only through a log warning — measured at 4 of 35 on one real table, 11%
+    of a financial table gone with nothing in the return value to show it. Carried
+    here so such a table can be recorded as a coverage gap (§11.11) instead of
+    being presented as complete.
+
+    Fractional because the warning does not name its table, so a document's loss is
+    shared across its tables. Over-reporting a gap is safe; under-reporting it is
+    the failure this exists to prevent.
+    """
+
+    unassigned_words: int = 0
+    """Words inside the table's region that reached no cell.
+
+    Text conservation, measured per word rather than by comparing a clipped region
+    against joined cell text — that cruder form scores a *generous* bounding box as
+    data loss, which produced alarming and wrong figures when first tried.
+
+    A handful is normal: a caption or a units note sits inside a table's box
+    without belonging to any cell, which is correct behaviour. A large count means
+    the grid failed to cover its own content, and is the signal the validation gate
+    uses to refuse a table.
+    """
 
     def __post_init__(self) -> None:
         if self.page_number < 1:

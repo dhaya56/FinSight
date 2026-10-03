@@ -417,3 +417,114 @@ class TestGridValidation:
                 column_count=1,
                 cells=(DetectedCell(row_index=0, column_index=0, text="", bbox=None),),
             )
+
+
+class TestRowRolesFromRealCorpusShapes:
+    """Row classification against table shapes found during ground-truth review.
+
+    Every case here is a page that was looked at, not an invented one. The rule
+    these replace required a data row to contain a *magnitude*, an assumption
+    inherited from a fixture that happened to be a numeric financial statement.
+    Three common real shapes broke it, and the damage was silent: a table whose
+    every row is a header carries no header paths and no row labels at all.
+    """
+
+    def test_a_section_label_row_is_not_a_header(self) -> None:
+        """"Assets" above the asset line items is a section, not a column header.
+
+        Read as a header it was discarded, and every line item beneath it lost the
+        statement section it belongs to.
+        """
+        grid = (
+            ("Particulars", "Amortized cost", "Total fair value"),
+            ("", "2025", "2024"),
+            ("Assets", "", ""),
+            ("Cash and cash equivalents", "24,455", "24,455"),
+        )
+        derived = derive(table(grid))
+
+        assert derived.header_row_indices == (0, 1)
+        assert derived.cell_at(2, 0).is_header is False
+
+    def test_a_section_label_becomes_the_outermost_row_label(self) -> None:
+        """In a balance sheet this is the asset/liability distinction itself."""
+        grid = (
+            ("Particulars", "2025", "2024"),
+            ("Assets", "", ""),
+            ("Cash and cash equivalents", "24,455", "24,455"),
+            ("Liabilities", "", ""),
+            ("Trade payables", "1,100", "900"),
+        )
+        derived = derive(table(grid))
+
+        assert derived.cell_at(2, 1).row_label_path == (
+            "Assets",
+            "Cash and cash equivalents",
+        )
+        assert derived.cell_at(4, 1).row_label_path == ("Liabilities", "Trade payables")
+
+    def test_a_table_with_no_numbers_anywhere_still_has_one_header_row(self) -> None:
+        """Governance, policy and director tables carry no figures at all.
+
+        Requiring a magnitude made *every* row a header, which left the table
+        semantically empty — no header path, no row label, nothing citable beyond
+        the raw text.
+        """
+        grid = (
+            ("Policy", "Implementation authority", "Oversight authority"),
+            ("Whistleblower Policy", "Chief Legal Officer", "Audit Committee"),
+            ("CSR Policy", "Global Head Accounting", "CSR Committee"),
+        )
+        derived = derive(table(grid))
+
+        assert derived.header_row_indices == (0,)
+        assert derived.cell_at(1, 1).header_path == ("Implementation authority",)
+        assert derived.cell_at(1, 1).row_label_path == ("Whistleblower Policy",)
+
+    def test_a_yes_no_compliance_table_is_read_as_data(self) -> None:
+        grid = (
+            ("Requirement", "FY2025", "FY2024"),
+            ("Board approval obtained", "Yes", "Yes"),
+            ("Independent review", "Yes", ""),
+        )
+        derived = derive(table(grid))
+
+        assert derived.header_row_indices == (0,)
+        assert derived.cell_at(1, 1).header_path == ("FY2025",)
+
+    def test_a_multi_row_header_still_resolves(self) -> None:
+        """The original fixture shape must survive the rewrite."""
+        derived = derive(table())
+
+        assert derived.header_row_indices == (0, 1)
+        assert derived.cell_at(3, 1).header_path == ("Year ended March 31", "2025")
+
+    def test_a_period_header_of_bare_years_needs_no_year_rule(self) -> None:
+        """``Particulars | 2025 | 2024`` resolves on shape alone.
+
+        The replaced rule needed a bare-year test to avoid reading this as data.
+        Shape makes that unnecessary: row 0 is a header, and the row beneath it
+        carries a label *and* values, so it is data whatever it contains.
+        """
+        grid = (
+            ("Particulars", "2025", "2024"),
+            ("Deposits", "1,234", "1,100"),
+        )
+        derived = derive(table(grid))
+
+        assert derived.header_row_indices == (0,)
+        assert derived.cell_at(1, 1).header_path == ("2025",)
+
+    def test_a_units_row_is_still_distinguished_from_a_section_row(self) -> None:
+        """Both have content only in the first column; only one is a scale note."""
+        grid = (
+            ("Particulars", "2025", "2024"),
+            ("(Rs in crore)", "", ""),
+            ("Assets", "", ""),
+            ("Deposits", "1,234", "1,100"),
+        )
+        derived = derive(table(grid))
+
+        assert derived.units_rows == ("(Rs in crore)",)
+        assert derived.cell_at(3, 1).units == "(Rs in crore)"
+        assert derived.cell_at(3, 1).row_label_path == ("Assets", "Deposits")

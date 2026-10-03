@@ -54,11 +54,18 @@ def to_element(
     ordinal: int,
     method: str,
     method_version: str,
+    failure_reason: str | None = None,
 ) -> ExtractedElement:
     """Build the table element and its cells.
 
     ``ordinal`` positions the table among its page's children, so it participates
     in the same reading order as the blocks around it.
+
+    ``failure_reason`` marks a table whose content is known to be incomplete — a
+    detector that dropped cells it could not place. Carried on the table rather
+    than on a cell because the loss is of positions, not of one value, and because
+    §11.11 coverage gaps are what turn a run into ``partial`` instead of letting an
+    incomplete statement pass as whole.
     """
     cells = tuple(
         _cell(
@@ -81,6 +88,7 @@ def to_element(
         location=TableLocation(bbox=derived.bbox),
         extraction_method=method,
         extraction_method_version=method_version,
+        failure_reason=failure_reason,
         children=cells,
         semantics=None,
     )

@@ -44,8 +44,42 @@ table, a phantom empty row between every real one — and of clipping the table'
 region, which loses a column from the *area* even when the text still arrives.
 """
 
-STRATEGIES: Final[tuple[str, ...]] = (STRATEGY_LINES, STRATEGY_TEXT)
-"""Every strategy registered for comparison. Neither is selected (§12.12)."""
+STRATEGY_HYBRID: Final = "hybrid"
+"""Rows from ruling lines, columns from text alignment.
+
+The configuration this document class actually calls for, and the one never tried
+until the defaults had already been judged. Financial statements here are ruled
+*horizontally only* — row separators with columns set by alignment — so asking for
+rows from lines and columns from text matches how they are typeset.
+
+Measured against ten hand-reviewed pages it beat both defaults: 6 of 10 exact
+table counts against 5 for ``lines`` and 2 for ``text``, count error 7 against 12
+and 11, and zero false positives on the four pages holding no table. It also
+bounds a single-table page correctly, excluding the prose above it, where ``text``
+swallowed the whole page.
+
+Two costs keep it from being the default. It still merges several tables on one
+page into a single grid. And on a **fully ruled** table — horizontal *and* vertical
+rules — it is worse than ``lines``: on this project's fixture it returned 15 cells
+against 20 and lost the spanning period header, resolving a value to ``('2025',)``
+where ``lines`` gives ``('Year ended March 31', '2025')``.
+
+So neither dominates: ``lines`` is better where a complete grid is drawn, the
+hybrid is better where only row separators are. That is a routing decision with no
+free answer, which is part of why the production detector is neither of them.
+"""
+
+STRATEGIES: Final[tuple[str, ...]] = (STRATEGY_LINES, STRATEGY_TEXT, STRATEGY_HYBRID)
+"""Every strategy registered. Selection is ADR-003's, not this module's."""
+
+_STRATEGY_ARGUMENTS: Final[dict[str, dict[str, str]]] = {
+    STRATEGY_LINES: {"strategy": STRATEGY_LINES},
+    STRATEGY_TEXT: {"strategy": STRATEGY_TEXT},
+    STRATEGY_HYBRID: {
+        "horizontal_strategy": "lines_strict",
+        "vertical_strategy": "text",
+    },
+}
 
 
 class PyMuPdfTableDetector:
@@ -103,7 +137,7 @@ class PyMuPdfTableDetector:
         detector implement; this one takes a PyMuPDF page and therefore stays
         inside the PDF package.
         """
-        tables = page.find_tables(strategy=self._strategy).tables
+        tables = page.find_tables(**_STRATEGY_ARGUMENTS[self._strategy]).tables
         if not tables:
             return ()
         matrix = page.rotation_matrix

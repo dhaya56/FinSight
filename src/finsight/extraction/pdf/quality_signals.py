@@ -18,6 +18,14 @@ from dataclasses import dataclass
 from typing import Final
 
 NO_TEXT_EXTRACTED: Final = "no_text_extracted"
+
+TABLE_CELLS_DROPPED: Final = "table_cells_dropped"
+"""A detector discarded cells it could not place into the table's grid.
+
+Recorded on the table element so the run becomes ``partial`` rather than
+``succeeded``. The loss is real and unrecoverable at this layer — the point is that
+an incomplete table must not present as a complete one.
+"""
 """Recorded as a page's ``failure_reason`` when it yielded no blocks at all.
 
 A short stable code, never a message: later phases count and surface these, and
