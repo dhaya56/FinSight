@@ -1,0 +1,11 @@
+n	doc	page	stratum	text_regions	lines_regions	verdict	real_tables	note
+1	Infosys	300	A	1	0	2	1	outline covers the whole page on all four sides and clips content at every edge; the single real table sits in the lower half, ruled horizontally with no vertical column separators
+2	Infosys	246	A	1	0	2	many	as 1, but the page carries many small tables throughout; one outline covers them all
+3	Ola	152	A	1	0	3	0	full-page outline; no table on the page at all, only text and a small bar chart in the lower half
+4	Infosys	140	A	1	0	2	unknown	render showed only half the page; outline is misaligned, beginning mid-page horizontally and running to the right edge; tables present in the visible half
+5	HDFC	225	A	1	0	3	0	full-page outline, no table
+6	Infosys	325	A	1	0	2	2	outline covers the first half of the page only; contains 2 tables but also paragraphs and running text
+7	Ola	58	A	1	0	3	0	full-page outline, no table
+8	Infosys	234	A	1	0	2	4	full-page outline enclosing 4 separate tables together with paragraphs and text
+9	Ola	176	A	1	0	3	0	upper half is an image with no outline; the outline over the lower half encloses only paragraphs and text
+10	HDFC	279	control	1		2	1	full-page outline; upper half is an image with no table; lower half holds one large table whose entries are tick marks or blank, again with no vertical column separation

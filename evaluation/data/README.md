@@ -79,3 +79,77 @@ truth is outstanding and is ADR-003's prerequisite.
 
 So this file supports the *routing* conclusion, which is about relative cost at
 fixed detector behaviour. It does not support any claim about detection quality.
+
+---
+
+## `detector-precision-annotation.tsv`
+
+The human-verified table-presence truth behind ENV-006 §2.1 and ADR-003 — **the
+only human-verified detection truth this project has.**
+
+| | |
+|---|---|
+| **Rows** | 10 — one per annotated page, plus a header line |
+| **Bytes** | 1,341 |
+| **SHA-256** | `ad392cea240448014743d7af5c2d33bf37905eea4852dbee72b9465665e6cdf1` |
+| **Annotated** | 2026-10-03, one annotator, from rendered page images with the detector's claimed region outlined |
+| **Corpus** | `development` split |
+| **Detector under test** | PyMuPDF 1.28.2, `find_tables(strategy="text")`, with `strategy="lines"` as the paired comparison |
+
+### Why it exists separately from the record that cites it
+
+ENV-006 §2.1 published the tallies but not the page identities, so the conclusion
+could be read and not re-tested. Thirty pages were rendered and ten annotated; the
+blind key lived only in gitignored `artifacts/`, which means the asset was one
+cleanup away from being unreproducible. §8 requires experiments to use shared
+evaluation data, and tallies alone do not meet it.
+
+Recovering it was possible here. It would not have been later, and re-annotating
+costs the annotator's time rather than compute.
+
+### Columns
+
+| Column | Meaning |
+|---|---|
+| `n` | Position in the blinded, shuffled rendering the annotator saw |
+| `doc` | Document short name, matching ENV-005 and ENV-006 |
+| `page` | One-based page number |
+| `stratum` | `A` = `text` claims a table and `lines` finds none, the stratum that decides ADR-003. `control` = both strategies agree a table exists |
+| `text_regions` | Regions the `text` strategy claimed on that page |
+| `lines_regions` | Regions `lines` claimed — `0` throughout stratum A by construction; empty for the control, which was not separately recorded |
+| `verdict` | **1** the outline bounds one real table, roughly right. **2** a real table is inside but the outline merges several tables and/or swallows prose. **3** no table in the region at all |
+| `real_tables` | Real tables the annotator counted on the page: a number, `many`, or `unknown` where the render showed only part of the page |
+| `note` | The annotator's structural description of the page and the outline |
+
+### What it reproduces
+
+| Figure | From this file | ENV-006 §2.1 |
+|---|---|---|
+| Correctly bounded (`1`) | 0 of 10 | 0 of 10 |
+| Wrong boundary (`2`) | 6 | 6 |
+| No table at all (`3`) | 4 | 4 |
+| Document spread | Infosys 5 / Ola 3 / HDFC 2 | same |
+| Strata | 9 stratum A, 1 control | same |
+| Control outcome | verdict `2` — failed | "the control failed too" |
+
+### The `real_tables` column is the reusable part
+
+`verdict` scores one detector's regions and is spent once. `real_tables` is truth
+about the **document**, so any later detector is scorable against it without new
+annotation: four pages carry no table and a correct detector must return nothing
+there, and four more have an exact count. That is a necessary condition, not a
+sufficient one — a detector can return the right number of regions with the wrong
+boundaries — so count agreement screens candidates and `verdict`-style annotation
+still decides.
+
+### Limitations
+
+Ten pages, one annotator, three documents, and **drawn almost entirely from one
+stratum** chosen because it was maximally informative about `lines` versus `text`.
+It is sufficient to reject a detector — 0 of 10 rejects at any plausible rate — and
+**not** sufficient to rank candidates, estimate corpus-wide precision, or
+generalise to a fourth issuer. Two pages rendered incompletely, so their
+`real_tables` is unknown rather than zero.
+
+Contains no filing text, financial values or quoted document content: the `note`
+column describes page structure only (CLAUDE.md §10).

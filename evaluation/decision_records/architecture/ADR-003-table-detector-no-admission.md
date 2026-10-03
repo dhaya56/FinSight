@@ -103,6 +103,38 @@ written down and then ignored.
 | Throughput | **≈0.35 pages/s against ≈7.9 — roughly 23× slower.** The 1,403-page split extrapolates to ~68 minutes against ~3 |
 | Provisioning | Five obstacles, none resolved by weakening a control. Docling is categorically not a drop-in: `do_ocr=False` and a pre-staged, verified model cache are prerequisites under §12.11, §20.6 and §11.7 |
 | Auditability | torch and torchvision cannot be meaningfully audited at this project's level. Stated rather than glossed |
+| **Reproducibility** | **The staged artifacts were lost, and there is no procedure to restore them.** Measured 2026-10-04 — see below |
+
+### The provisioning cost is larger than ENV-007 recorded
+
+An attempt to run Docling on the ten annotated pages failed before parsing
+anything. `C:\Users\T9949\.cache\docling` no longer exists, and
+`huggingface_hub` raised `LocalEntryNotFoundError` after a certificate
+verification failure when it tried to fetch a model at parse time.
+
+Three things this establishes, none of which ENV-007 captured:
+
+1. **ENV-007's artifact manifest is a record, not a procedure.** It names two
+   repositories and their resolved commits. Nothing in the repository re-stages
+   them, so the five-obstacle provisioning sequence survives only as prose in a
+   decision record. It has now been paid once and lost once.
+2. **The model set moved between versions.** The failing fetch was for a
+   vision-language model under `docling/models/inference_engines/vlm/`, not the
+   layout-heron and TableFormer pair ENV-007 staged against docling 2.132.0. The
+   pinned version is now 2.133.0. A patch-level bump changed which artifacts the
+   default pipeline requires, which is what ENV-007 open item 8 anticipated for
+   the layout model's branch pin — and the exposure is wider than one pin.
+3. **§20.6 held again, for the second time on this library.** Verification was
+   never disabled, so a parse-time download failed loudly instead of silently
+   succeeding. ENV-007 recorded the same mechanism catching a different defect.
+
+**Therefore an admission prerequisite is added:** a committed, re-runnable
+staging script that fetches every required artifact at a pinned commit, verifies
+it, and populates a read-only cache — with the host's own trust anchors supplied
+and TLS verification left enabled. Until that exists, Docling cannot satisfy
+§20.6 on this host, independently of how well it detects tables. A parser whose
+artifacts cannot be restored from the repository is not a parser this project can
+deploy.
 
 Two findings came out of building the adapter and are recorded here because
 neither appears in ENV-007:
@@ -177,7 +209,15 @@ intuition §8 forbids. ENV-006 open item 1 and ENV-007 open item 1 own the
 measurement.
 
 Admission would also need the §20.6 artifact manifest pinned to commits rather than
-a branch, and peak memory measured against §41.11's shared 15.7 GB envelope.
+a branch, the committed staging script described above, and peak memory measured
+against §41.11's shared 15.7 GB envelope.
+
+The measurement is cheaper than it looks and should be done on the **ten pages
+already annotated**, not a fresh sample. `evaluation/data/detector-precision-annotation.tsv`
+records how many real tables sit on each of those pages, so a candidate is
+screened automatically: four pages hold no table and must yield no region, and
+four more have an exact count. PyMuPDF scores 0 of 8 on that screen. It costs no
+new annotation time and roughly a minute of compute once the artifacts are staged.
 
 ## Relationship to ADR-002
 
