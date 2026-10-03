@@ -130,6 +130,17 @@ class DerivedCell:
     row_span: int = 1
     column_span: int = 1
     is_header: bool = False
+    is_total: bool = False
+    """Whether this cell's row announces itself as an aggregate of other rows.
+
+    Carried on every cell of the row, not only its label, because the consumer
+    that must not double-count is the one holding a *value*. A total's figure
+    looks exactly like a line item's, and the distinction is the row it sits in.
+
+    Set from the label's vocabulary alone. See :func:`states_total` for what that
+    does not catch.
+    """
+
     header_path: tuple[str, ...] = ()
     row_label_path: tuple[str, ...] = ()
     footnote_refs: tuple[str, ...] = ()
@@ -164,6 +175,13 @@ class DerivedTable:
     column_count: int
     cells: tuple[DerivedCell, ...]
     header_row_indices: tuple[int, ...] = ()
+    total_row_indices: tuple[int, ...] = ()
+    """Rows whose label announces an aggregate, ascending.
+
+    Under-reads by design: a vocabulary cannot see that "Profit before tax" is a
+    subtotal. Absence is not evidence that a row is a line item.
+    """
+
     units_rows: tuple[str, ...] = ()
     """Verbatim text of any row that announces a scale or currency.
 
@@ -187,8 +205,9 @@ def derive(table: DetectedTable) -> DerivedTable:
     header_rows = roles.headers
     units_rows = roles.units_texts
     header_texts = _header_texts(table, header_rows, spans)
+    spanned = _spanned_rows(table, row_spans)
     labels = _row_label_paths(
-        table, header_rows | roles.units_rows, roles.sections
+        table, header_rows | roles.units_rows, roles.sections, spanned
     )
     table_units, column_units = _units_scopes(table, roles.units_rows, spans)
 
@@ -207,6 +226,7 @@ def derive(table: DetectedTable) -> DerivedTable:
             row_label_path=()
             if cell.row_index in header_rows or cell.column_index == 0
             else labels.get(cell.row_index, ()),
+            is_total=cell.row_index in roles.totals,
             footnote_refs=split_footnote_marker(cell.text)[1],
             units=None
             if cell.row_index in header_rows or cell.row_index in roles.units_rows
@@ -223,6 +243,7 @@ def derive(table: DetectedTable) -> DerivedTable:
         cells=cells,
         header_row_indices=tuple(sorted(header_rows)),
         units_rows=units_rows,
+        total_row_indices=tuple(sorted(roles.totals)),
     )
 
 
@@ -259,30 +280,108 @@ def _column_spans(table: DetectedTable) -> dict[tuple[int, int], int]:
 
 
 def _row_spans(table: DetectedTable) -> dict[tuple[int, int], int]:
-    """How many rows each populated cell covers, by the same absent-neighbour rule."""
+    """How many rows each populated cell covers.
+
+    **A reported span always wins**, exactly as in :func:`_column_spans`. This
+    branch was missing while the column one was present, so a detector that states
+    ``row_span`` had it discarded and replaced by the absent-neighbour guess —
+    which is the same guess that cannot tell a merge from a detection miss. The
+    asymmetry was invisible wherever the two agreed, and they agree on most
+    tables.
+    """
     spans: dict[tuple[int, int], int] = {}
     for column_index in range(table.column_count):
         for row_index in range(table.row_count):
             cell = table.cell_at(row_index, column_index)
             if cell.is_absent:
                 continue
+            key = (row_index, column_index)
+            if cell.reported_row_span is not None:
+                spans[key] = cell.reported_row_span
+                continue
             height = 1
             for below in range(row_index + 1, table.row_count):
                 if not table.cell_at(below, column_index).is_absent:
                     break
                 height += 1
-            spans[(row_index, column_index)] = height
+            spans[key] = height
     return spans
+
+
+def _spanned_rows(
+    table: DetectedTable, row_spans: dict[tuple[int, int], int]
+) -> dict[int, int]:
+    """Map each row covered by a vertical label span to the row that owns it.
+
+    A label spanning three rows is reported once, and the rows beneath it hold an
+    absent first column. Without this they take no row label at all — measured on
+    a two-row span, where the covered row's figures came back with an empty path.
+    A figure with no row label cannot be attributed to a line item, which makes it
+    unusable as evidence rather than merely untidy.
+    """
+    owners: dict[int, int] = {}
+    for row_index in range(table.row_count):
+        if table.cell_at(row_index, 0).is_absent:
+            continue
+        span = row_spans.get((row_index, 0), 1)
+        for offset in range(1, span):
+            covered = row_index + offset
+            if covered >= table.row_count:
+                # A span reaching past the last row is a detector error, not a
+                # reason to raise: clamp rather than fabricate rows.
+                break
+            if table.cell_at(covered, 0).is_absent:
+                owners[covered] = row_index
+    return owners
+
+
+_TOTAL_WORDS: Final[tuple[str, ...]] = (
+    "grand total",
+    "sub-total",
+    "sub total",
+    "subtotal",
+    "total",
+    "aggregate",
+)
+"""Label vocabulary that marks a row as an aggregate of other rows.
+
+Longest first, so "sub-total" is recognised as itself rather than as "total".
+
+**This is a vocabulary, not a definition, and it under-reads badly.** A great many
+real aggregates carry no such word: "Profit before tax", "Gross profit", "EBITDA"
+and "Net cash from operating activities" are all sums of the rows above them. What
+is tagged here is reliable; what is untagged is not thereby a line item, and no
+consumer may read a false ``is_total`` as evidence that a row is not an aggregate.
+
+Matched on word boundaries so a label is never caught by a substring.
+"""
+
+_TOTAL_PATTERN: Final = re.compile(
+    r"\b(" + "|".join(re.escape(word) for word in _TOTAL_WORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def states_total(text: str) -> tuple[bool, str | None]:
+    """Whether a row label announces an aggregate, and which word said so.
+
+    The matched word is returned rather than discarded so a tag can be audited
+    against the label that produced it — the rule is a vocabulary and will be
+    wrong, and a flag with no trace of its reason cannot be re-examined.
+    """
+    match = _TOTAL_PATTERN.search(split_footnote_marker(text)[0])
+    return (True, match.group(1).lower()) if match else (False, None)
 
 
 @dataclass(frozen=True, slots=True)
 class RowRoles:
-    """Which rows are headers, units declarations and section labels."""
+    """Which rows are headers, units declarations, section labels and totals."""
 
     headers: frozenset[int]
     units_rows: frozenset[int]
     units_texts: tuple[str, ...]
     sections: frozenset[int]
+    totals: frozenset[int] = frozenset()
 
 
 def _filled(row: tuple[DetectedCell, ...], index: int) -> bool:
@@ -362,11 +461,24 @@ def _classify_rows(table: DetectedTable) -> RowRoles:
 
         in_header_block = False
 
+    header_set = frozenset(headers)
+    units_set = frozenset(units_rows)
+    totals = frozenset(
+        row_index
+        for row_index in range(table.row_count)
+        # A header naming a "Total" column, and a units row, are not aggregates.
+        # Excluding them is what stops a column heading from tagging its whole row.
+        if row_index not in header_set
+        and row_index not in units_set
+        and states_total(table.cell_at(row_index, 0).text)[0]
+    )
+
     return RowRoles(
-        headers=frozenset(headers),
-        units_rows=frozenset(units_rows),
+        headers=header_set,
+        units_rows=units_set,
         units_texts=tuple(units),
         sections=frozenset(sections),
+        totals=totals,
     )
 
 
@@ -436,6 +548,7 @@ def _row_label_paths(
     table: DetectedTable,
     header_rows: frozenset[int],
     sections: frozenset[int] = frozenset(),
+    spanned: dict[int, int] | None = None,
 ) -> dict[int, tuple[str, ...]]:
     """The row-label path for each data row, outermost first.
 
@@ -459,6 +572,11 @@ def _row_label_paths(
         label_cell = table.cell_at(row_index, 0)
         label = split_footnote_marker(label_cell.text)[0]
         if not label:
+            # Covered by a label spanning down from above: inherit it verbatim,
+            # including its nesting, rather than leaving the row unattributed.
+            owner = (spanned or {}).get(row_index)
+            if owner is not None and owner in paths:
+                paths[row_index] = paths[owner]
             continue
 
         if row_index in sections:

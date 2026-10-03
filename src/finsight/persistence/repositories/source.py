@@ -380,6 +380,7 @@ def _extension_row(
         "row_label_path": list(semantics.row_label_path),
         "footnote_refs": list(semantics.footnote_refs),
         "is_header": semantics.is_header,
+        "is_total": semantics.is_total,
         "units": semantics.units,
     }
 

@@ -396,6 +396,14 @@ class CellSemantics:
     row_label_path: tuple[str, ...] = ()
     footnote_refs: tuple[str, ...] = ()
     is_header: bool = False
+    is_total: bool = False
+    """Whether this cell's row announces itself as an aggregate of other rows.
+
+    Retrieval and any future aggregation need it: a total's figure is
+    indistinguishable from a line item's, and summing a column that contains one
+    double-counts everything beneath it.
+    """
+
     units: str | None = None
     """The units declaration governing this cell, verbatim, or None.
 

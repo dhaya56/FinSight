@@ -150,6 +150,7 @@ def _cell(
             row_label_path=cell.row_label_path,
             footnote_refs=cell.footnote_refs,
             is_header=cell.is_header,
+            is_total=cell.is_total,
             units=cell.units,
         ),
     )

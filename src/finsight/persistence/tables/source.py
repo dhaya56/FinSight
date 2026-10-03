@@ -376,6 +376,22 @@ class SourceTableCell(Base):
     not identify a header.
     """
 
+    is_total: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("false")
+    )
+    """Whether this cell's row announces itself as an aggregate of other rows.
+
+    A column rather than a derivation, because the only way to recover it later is
+    to re-read the row's label with the same vocabulary — and the vocabulary will
+    change as it is measured, so a stored flag records what *this* extraction
+    believed rather than what today's rule would say.
+
+    **False is not evidence of a line item.** The rule reads the label only, and
+    "Profit before tax" is an aggregate carrying no such word. A consumer summing a
+    column must treat this as a partial safeguard against double counting, never a
+    complete one.
+    """
+
     units: Mapped[str | None] = mapped_column(Text, nullable=True)
     """The units declaration governing this cell, verbatim (§17.3).
 

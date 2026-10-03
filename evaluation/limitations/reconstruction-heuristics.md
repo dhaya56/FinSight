@@ -337,7 +337,43 @@ region on every page judged, which remains the dominant defect.
 
 ---
 
-## 9. Not implemented, and recorded so absence is not read as a finding
+## 9. Aggregate-row tagging
+
+**Rule.** A row whose first-column label contains `total`, `sub-total`,
+`sub total`, `subtotal`, `grand total` or `aggregate` — matched case-insensitively
+on word boundaries, longest form first — is tagged `is_total` on **every cell of
+the row**, not only its label. Header rows and units rows are excluded, so a
+"Total" *column* heading cannot tag its whole row.
+
+**Why every cell.** The consumer that must not double-count holds a *value*. A
+total's figure is indistinguishable from a line item's; the distinction is the row.
+
+**Known misfires.**
+
+| Misfire | Consequence |
+|---|---|
+| **It under-reads badly.** "Profit before tax", "Gross profit", "EBITDA", "Net cash from operating activities" are all aggregates carrying none of the vocabulary | `is_total=False` is **not** evidence that a row is a line item. Any consumer summing a column is only partly protected |
+| A ratio row such as "Total debt to equity" is tagged | Tagged as an aggregate when it is a derived ratio. Over-tagging costs a row's exclusion from a sum; under-tagging double-counts, so the asymmetry is deliberate |
+| No distinction between a total and a subtotal | A statement with nested aggregates marks them all alike. Separating them needs the arithmetic below |
+| English only | A filing in another language is untagged entirely |
+
+**Measured?** No. Prevalence of the vocabulary across the corpus is uncollected,
+and the rate at which untagged rows are nonetheless aggregates — the dangerous
+direction — is unknown.
+
+**Arithmetic verification is deliberately not implemented.** Checking that a
+tagged row equals the sum of the rows above it would resolve both the under-reading
+and the total-versus-subtotal distinction, and would do so deterministically with
+`Decimal`. It is not done because CLAUDE.md §7 permits a non-ledger number to be
+reproduced only when precisely source-bound and forbids normalising, comparing or
+calculating it **without an approved structured path**. Summing extracted figures
+to classify a row is such a calculation. The capability is worth having and needs
+the developer's approval and an approved path, not an implementer's judgement that
+it is probably fine.
+
+---
+
+## 10. Not implemented, and recorded so absence is not read as a finding
 
 | Gap | Consequence if forgotten |
 |---|---|
