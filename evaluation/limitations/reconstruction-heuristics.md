@@ -245,7 +245,39 @@ a misplaced header boundary rather than a wrong number.
 
 ---
 
-## 7. Not implemented, and recorded so absence is not read as a finding
+## 7. The quality verdict
+
+**Rule.** Every assessed table receives `accepted`, `review_required` or
+`rejected`, in `src/finsight/extraction/tables/validation.py`. Rejection is
+reserved for conditions that are unambiguous whatever one's threshold: no cell
+holds text; fewer than two rows or columns; every character sits in a
+sentence-shaped cell. `dropped_cells >= 1.0` is review, not rejection. Four
+graded signals — `prose_ratio`, `numeric_ratio`, `filled_ratio`,
+`unassigned_words` — are measured and stored and **gate nothing**, because
+CLAUDE.md §9 keeps threshold gates informational until an approved baseline sets
+them.
+
+**Why it is here and not in an ADR.** The verdict is the mitigation that makes
+ADR-003's non-admission survivable, but the rules themselves are heuristics with
+exactly the status of the five above.
+
+**Known misfires.**
+
+| Misfire | Consequence |
+|---|---|
+| A region merging several real tables, or one swallowing prose beside a table, is **accepted** — it has text, a grid and numerals | The dominant observed failure (6 of 10 annotated regions) is the one the gate does *not* catch. It catches degenerate and empty regions, which were 4 of 10 |
+| `prose_ratio >= 1.0` requires *every* character to sit in a sentence-shaped cell | A region that is 90% prose with one figure in it is accepted. Deliberate: a note disclosure looks the same, and refusing it on an uncalibrated ratio would discard real financial content |
+| `numeric_ratio` counts row-label cells in its denominator | It moves with column count as well as numeric density, so a well-formed two-period statement caps near 0.67. Pinned by a test; a calibration must account for it |
+| A 12-word prose cutoff is a description of financial row labels, not a measured boundary | A genuinely long row label reads as prose |
+
+**Measured?** No. The signals' distribution across the corpus has not been
+collected, and no cutoff on any of them is calibrated. The gate's *recall against
+human-verified bad regions* is the measurement that matters and it is owned by the
+Phase 6 ground truth, alongside ADR-003's admission question.
+
+---
+
+## 8. Not implemented, and recorded so absence is not read as a finding
 
 | Gap | Consequence if forgotten |
 |---|---|
