@@ -1,6 +1,6 @@
 # ENV-007 — Docling Feasibility Spike
 
-- **Status:** complete
+- **Status:** complete; superseded on provisioning and region quality by **ENV-008**
 - **Date:** 2026-10-02
 - **Phase:** 6 — table detection and the source representation
 - **Scope:** feasibility and reconstruction burden. **Not a parser selection.**
@@ -242,7 +242,13 @@ Stated plainly, because several figures here are weaker than they look.
 | 5 | Citation-offset consequences of two independent PDF engines producing text for the same bytes | ADR-004 |
 | 6 | Footnote resolution — unsolved by either parser; markers resolve to nothing in both | footnote commit |
 | 7 | Row-label hierarchy — unsolved by either parser | limitation register |
-| 8 | Pin the layout model to a commit rather than a branch | ADR-004, if admitted |
+| 8 | Pin the layout model to a commit rather than a branch | **closed by ENV-008** — `scripts/stage_docling_models.py` |
+
+> **Annotation, 2026-10-04.** The model cache this spike measured against was
+> later found gone, and the provisioning sequence in §5 existed only as prose
+> here — so obstacles 2 and 3 had to be rediscovered. ENV-008 turns it into a
+> committed script. The lesson generalises: **a manifest records what was staged,
+> a script restores it**, and this record had only the first.
 
 ---
 

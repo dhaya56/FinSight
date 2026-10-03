@@ -11,6 +11,18 @@
   recorded evidence disqualifies both, so a choice between them would be a choice
   between two inadmissible options.
 
+> **Amendment, 2026-10-04 — the blocking prerequisite is met and the evidence has
+> moved.** ENV-008 staged Docling's artifacts reproducibly and scored its regions
+> against the annotated pages: **8 of 8 on count agreement where PyMuPDF `text`
+> scores 2 of 8**, with four of those eight fully decided as true negatives, and
+> four separate regions on the page where `text` merged four tables into one.
+>
+> **The decision below stands for now**, because four of the eight remain
+> count-correct with boundaries unverified and corpus-wide precision is still
+> unmeasured. But the reason for non-admission has changed: it was "no evidence
+> and no way to get it", and it is now "one short confirmation short". See
+> §"Where admission now stands" at the end.
+
 ## Context
 
 PROJECT_BLUEPRINT.md §12.12 reserves parser and detector admission for a recorded
@@ -112,21 +124,28 @@ anything. `C:\Users\T9949\.cache\docling` no longer exists, and
 `huggingface_hub` raised `LocalEntryNotFoundError` after a certificate
 verification failure when it tried to fetch a model at parse time.
 
-Three things this establishes, none of which ENV-007 captured:
+Two things this establishes, neither of which ENV-007 captured:
 
 1. **ENV-007's artifact manifest is a record, not a procedure.** It names two
    repositories and their resolved commits. Nothing in the repository re-stages
    them, so the five-obstacle provisioning sequence survives only as prose in a
    decision record. It has now been paid once and lost once.
-2. **The model set moved between versions.** The failing fetch was for a
-   vision-language model under `docling/models/inference_engines/vlm/`, not the
-   layout-heron and TableFormer pair ENV-007 staged against docling 2.132.0. The
-   pinned version is now 2.133.0. A patch-level bump changed which artifacts the
-   default pipeline requires, which is what ENV-007 open item 8 anticipated for
-   the layout model's branch pin — and the exposure is wider than one pin.
-3. **§20.6 held again, for the second time on this library.** Verification was
+2. **§20.6 held again, for the second time on this library.** Verification was
    never disabled, so a parse-time download failed loudly instead of silently
    succeeding. ENV-007 recorded the same mechanism catching a different defect.
+
+The required artifact set is **unchanged** from ENV-007 and was confirmed by
+introspecting the pinned pipeline offline: `docling-project/docling-layout-heron`
+at `main` for layout, and TableFormer in `ACCURATE` mode, with OCR disabled.
+
+*A first reading of the traceback said otherwise* — that the fetch was for a
+vision-language model, because it passed through
+`docling/models/inference_engines/vlm/_utils.py`. That was wrong.
+`resolve_model_artifacts_path` is a shared helper that happens to live under that
+path, and `hf_vision_base` is the common base for HuggingFace *vision* models, so
+the layout model — an object detector — resolves through both. Recorded because the
+alarming reading was the first one available, which is the same way ENV-007 §3's
+`row_header` result went.
 
 **Therefore an admission prerequisite is added:** a committed, re-runnable
 staging script that fetches every required artifact at a pinned commit, verifies
@@ -135,6 +154,13 @@ and TLS verification left enabled. Until that exists, Docling cannot satisfy
 §20.6 on this host, independently of how well it detects tables. A parser whose
 artifacts cannot be restored from the repository is not a parser this project can
 deploy.
+
+**Met, 2026-10-04.** `scripts/stage_docling_models.py` stages both artifacts at
+pinned commits (530 MB) over TLS with the host's own trust store via
+`truststore`, nothing disabled. `Settings.docling_artifacts_path` and
+`build_docling_table_detector()` make a missing model raise instead of download.
+ENV-008 records it. The cost that remains is the one inherent to the category:
+~530 MB of weights that are not in the wheel.
 
 Two findings came out of building the adapter and are recorded here because
 neither appears in ENV-007:
@@ -218,6 +244,38 @@ records how many real tables sit on each of those pages, so a candidate is
 screened automatically: four pages hold no table and must yield no region, and
 four more have an exact count. PyMuPDF scores 0 of 8 on that screen. It costs no
 new annotation time and roughly a minute of compute once the artifacts are staged.
+
+## Where admission now stands
+
+ENV-008 closed the two things that made admission impossible rather than merely
+unproven. What is left is small and specific.
+
+| Prerequisite | State |
+|---|---|
+| Reproducible artifact staging under §20.6 | **met** — ENV-008 §1 |
+| Model revisions pinned to commits, not branches | **met** — ENV-007 open item 8 closed |
+| Precision against human-verified truth | **partly met** — 8 of 8 count agreement, 4 of those fully decided |
+| Boundary correctness on the count-correct pages | **outstanding** — ENV-008 open item 1, about four pages to judge |
+| Corpus-wide false-positive rate on narrative pages | **outstanding** — ENV-008 open item 2 |
+| Peak memory against §41.11's shared envelope | outstanding — ADR-004 |
+| Cell-content fidelity inside a bounded region | outstanding — a separate question from bounding |
+
+**What has not changed.** The operative constraints still hold: table cells stay
+out of the retrieval path, and PyMuPDF `lines` remains the provisional detector
+for storage. Nothing in the extraction service constructs a Docling detector.
+
+**What a reader should take from this record.** Its conclusion is not "Docling is
+unproven". It is that the one measurement ADR-003 asked for has now run on the
+hardest ten pages in the corpus and Docling passed it, and that admission is a
+developer decision under §4 which the evidence now supports rather than blocks.
+
+**Recommended next step**, stated so it is on the record rather than in a chat
+message: render Docling's regions on the four count-correct pages and judge them
+on the same three-category scale the PyMuPDF regions were judged on. If they bound
+their tables, admission has the evidence §4 and §8 require and ADR-003 should be
+superseded by a selection record. If they do not, this record's conclusion holds
+unchanged and the search widens — which is the outcome the pre-committed rule was
+written to keep available.
 
 ## Relationship to ADR-002
 

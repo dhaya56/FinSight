@@ -493,6 +493,25 @@ period beside it or the one after.
 """
 
 
+def build_docling_table_detector() -> DoclingTableDetector:
+    """Build the detector against the configured, pre-staged artifact cache.
+
+    The reason to construct it this way rather than directly: with
+    ``artifacts_path`` set, Docling raises for a missing model instead of fetching
+    one mid-parse. Without it, the only thing preventing a parse-time download is
+    the network being unreachable, which is not a control (§20.6, §11.7).
+
+    This does **not** select Docling for production. ADR-003 admits no detector,
+    and nothing in the extraction service calls this; it is how the evaluation
+    harness constructs the detector, and how an admitted one would be built.
+    """
+    from finsight.config.settings import get_settings
+
+    return DoclingTableDetector(
+        artifacts_path=get_settings().docling_artifacts_path
+    )
+
+
 def _bbox_of(table: Any) -> tuple[float, float, float, float]:
     prov = getattr(table, "prov", None)
     if prov:

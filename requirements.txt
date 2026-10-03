@@ -150,6 +150,11 @@ tree-sitter-c==0.24.2
 tree-sitter-javascript==0.25.0
 tree-sitter-python==0.25.0
 tree-sitter-typescript==0.23.2
+# Lets Python trust the host's own certificate store, so model artifacts can be
+# staged on a network whose issuer is absent from the bundled CA list without
+# ever disabling verification. Staging-time only: once artifacts are staged and
+# artifacts_path is set, no parse reaches the network.
+truststore==0.10.4
 typer==0.26.8
 typing-inspection==0.4.4
 typing_extensions==4.16.0
