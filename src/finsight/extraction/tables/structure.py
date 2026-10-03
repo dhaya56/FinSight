@@ -60,6 +60,14 @@ The "text before it" requirement is load-bearing. ``(45)`` and ``(1,234)`` are
 requiring a body would read the parentheses as a marker and quietly destroy the
 sign — the single worst defect available in a financial table.
 
+**A parenthesised token is not automatically a marker.** Financial tables are full
+of parenthesised abbreviations — ``(RSU)``, ``(ADS)``, ``(PAT)``, ``(EPS)`` — and
+accepting any one-to-three alphanumerics read every one of them as a footnote
+reference. That cost twice over: a reference to a footnote that does not exist, and
+the abbreviation *stripped out of the header or row-label path*, so the column
+"Equity shares (RSU)" became "Equity shares" and lost the distinction it existed to
+make. :func:`is_marker_token` decides what qualifies.
+
 **The symbol set is measured, not assumed.** A first version of this pattern was
 written from guesswork and missed ``#`` entirely. Counting marker forms across the
 1,403-page development split found, as trailing markers: parenthesised digits 937,
@@ -100,6 +108,37 @@ def states_units(text: str) -> bool:
     return bool(words & _SCALE_WORDS) or bool(words & _CURRENCY_TOKENS)
 
 
+_ROMAN_MARKERS: Final[frozenset[str]] = frozenset(
+    {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
+)
+"""Roman numerals that may appear as a footnote marker.
+
+An explicit list rather than a roman-numeral pattern, because a pattern over
+``[ivxlcdm]`` also matches abbreviations built from those letters — ``(MI)``,
+``(CL)``, ``(DI)`` — which is the very confusion this guards against. Filings
+number footnotes in small quantities, so stopping at ten loses nothing real and
+keeps the set unambiguous.
+"""
+
+
+def is_marker_token(token: str) -> bool:
+    """Whether a parenthesised token is a footnote reference or an abbreviation.
+
+    Digits, a single letter, and small roman numerals are references. Two or three
+    letters are an abbreviation — ``(RSU)``, ``(PAT)``, ``(ADS)`` — and a filing
+    that genuinely used ``(ab)`` as a footnote marker would be the first.
+
+    The asymmetry is deliberate. Mistaking a marker for text leaves a reference
+    unresolved, which is visible. Mistaking text for a marker deletes characters
+    from a label, which is not.
+    """
+    if token.isdigit():
+        return True
+    if len(token) == 1 and token.isalpha():
+        return True
+    return token.lower() in _ROMAN_MARKERS
+
+
 def split_footnote_marker(text: str) -> tuple[str, tuple[str, ...]]:
     """Return the cell's body and any trailing footnote markers.
 
@@ -111,6 +150,10 @@ def split_footnote_marker(text: str) -> tuple[str, tuple[str, ...]]:
     if match is None:
         return text.strip(), ()
     paren = match.group("paren")
+    if paren is not None and not is_marker_token(paren):
+        # A parenthesised abbreviation, not a reference. Leave it in the body:
+        # removing it would silently shorten a label that needs it.
+        return text.strip(), ()
     marker = paren if paren is not None else match.group("marker")
     return match.group("body").strip(), (marker,)
 

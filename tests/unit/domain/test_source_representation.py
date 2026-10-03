@@ -468,12 +468,20 @@ class TestSemantics:
 
 
 class TestElementType:
-    def test_the_types_are_the_four_the_schema_allows(self) -> None:
+    def test_the_types_are_the_five_the_schema_allows(self) -> None:
+        """Widening this set means widening the CHECK constraint in the same change.
+
+        The schema uses a CHECK rather than a native enum precisely so it can be
+        widened, and this test is what stops the enum and the constraint drifting:
+        a value the application can emit and the database rejects fails every
+        insert on a page that happens to contain one.
+        """
         assert {kind.value for kind in ElementType} == {
             "page",
             "block",
             "table",
             "cell",
+            "footnote",
         }
 
     def test_there_is_no_row_element(self) -> None:

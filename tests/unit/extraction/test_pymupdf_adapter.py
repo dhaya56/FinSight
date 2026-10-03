@@ -7,6 +7,7 @@ would just be in the wrong place.
 """
 
 import io
+from collections.abc import Mapping, Sequence
 
 import pytest
 
@@ -24,6 +25,7 @@ from finsight.extraction.contracts import (
 )
 from finsight.extraction.pdf.pymupdf_adapter import PyMuPdfProducer
 from finsight.extraction.pdf.quality_signals import NO_TEXT_EXTRACTED
+from finsight.extraction.tables.contracts import DetectedCell, DetectedTable
 from pdf_fixtures import (
     PAGE_HEIGHT,
     PAGE_WIDTH,
@@ -678,3 +680,114 @@ class TestTablesOnAPage:
         name would leave no way to tell which engine produced a given table.
         """
         assert producer.table_strategy == "pymupdf:lines"
+
+
+class TestCitationAddresses:
+    """Two tables on one page must not share a citation address.
+
+    §14.9 resolves a citation to one source region, and §27.6's Evidence Gate
+    checks that the cited element is one the query was permitted to see. Both
+    require the address to identify a single region.
+
+    The defect this pins: every table was built with ``ordinal=0`` and had its
+    page ordinal applied afterwards, while the locator was built from the ordinal
+    passed in. So every table on a page read "table 1", and so did every one of
+    its cells. Nothing failed — the elements were correct, only unaddressable.
+    """
+
+    def test_tables_on_a_page_have_distinct_locators(self) -> None:
+        detector = _TwoTableDetector()
+        page = extract(
+            PyMuPdfProducer(table_detector=detector), _blank_page()
+        )[0]
+
+        locators = [
+            child.locator
+            for child in page.children
+            if child.element_type is ElementType.TABLE
+        ]
+
+        assert locators == ["p. 1, table 1", "p. 1, table 2"]
+
+    def test_cells_inherit_their_own_table_address(self) -> None:
+        detector = _TwoTableDetector()
+        page = extract(
+            PyMuPdfProducer(table_detector=detector), _blank_page()
+        )[0]
+
+        tables = [
+            child
+            for child in page.children
+            if child.element_type is ElementType.TABLE
+        ]
+        addresses = {
+            cell.locator for table in tables for cell in table.children
+        }
+
+        assert len(addresses) == sum(len(table.children) for table in tables)
+
+    def test_tables_are_numbered_down_the_page(self) -> None:
+        """A reader counts tables top to bottom, whatever order the detector used."""
+        detector = _TwoTableDetector(reversed_order=True)
+        page = extract(
+            PyMuPdfProducer(table_detector=detector), _blank_page()
+        )[0]
+
+        tables = [
+            child
+            for child in page.children
+            if child.element_type is ElementType.TABLE
+        ]
+        tops = [table.location.bbox[1] for table in tables]
+
+        assert tables[0].locator == "p. 1, table 1"
+        assert tops == sorted(tops)
+
+
+def _blank_page() -> bytes:
+    """A page whose only real content comes from the injected detector."""
+    return build_pdf([[PlacedText("Revenue", x=72, y_from_bottom=700)]])
+
+
+class _TwoTableDetector:
+    """Reports two small tables at known, separated positions on page 1."""
+
+    method = "fake"
+    method_version = "0"
+    strategy = "fake"
+
+    def __init__(self, *, reversed_order: bool = False) -> None:
+        self._reversed = reversed_order
+
+    def detect(
+        self, source: object
+    ) -> Mapping[int, Sequence[DetectedTable]]:
+        boxes = [(60.0, 100.0, 400.0, 160.0), (60.0, 300.0, 400.0, 360.0)]
+        if self._reversed:
+            boxes.reverse()
+        return {1: tuple(_grid(box) for box in boxes)}
+
+
+def _grid(bbox: tuple[float, float, float, float]) -> DetectedTable:
+    x0, y0, _, _ = bbox
+    cells: list[DetectedCell] = []
+    for row in range(2):
+        for column in range(2):
+            left = x0 + 150.0 * column
+            top = y0 + 20.0 * row
+            cells.append(
+                DetectedCell(
+                    row_index=row,
+                    column_index=column,
+                    text=f"r{row}c{column}",
+                    bbox=(left, top, left + 140.0, top + 18.0),
+                    text_left=left + 2.0,
+                )
+            )
+    return DetectedTable(
+        page_number=1,
+        bbox=bbox,
+        row_count=2,
+        column_count=2,
+        cells=tuple(cells),
+    )

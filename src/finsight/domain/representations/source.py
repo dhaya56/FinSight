@@ -53,6 +53,12 @@ class ElementType(StrEnum):
     line each; nothing downstream changes, because consumers reference an element
     by id, not by shape.
 
+    ``FOOTNOTE`` is a child of the table whose markers refer to it, even though it
+    is drawn on the page beneath that table. The containment that matters for
+    citation is the semantic one: a cell's ``footnote_refs`` resolve among its own
+    table's footnotes, and a qualifier that changes what a number means belongs
+    with the number rather than with the page it happened to be printed on.
+
     There is deliberately **no** ``row``. §14.5 enumerates page, section, block,
     table, cell and span, and a row is recoverable from a cell's ``row_index``
     without spending an element on it — a 20-by-8 table costs 161 rows this way
@@ -64,6 +70,7 @@ class ElementType(StrEnum):
     BLOCK = "block"
     TABLE = "table"
     CELL = "cell"
+    FOOTNOTE = "footnote"
 
 
 class ExtractionState(StrEnum):
@@ -325,6 +332,10 @@ _LOCATION_FOR_TYPE: Final[dict[ElementType, type[SourceLocation]]] = {
     ElementType.BLOCK: BlockLocation,
     ElementType.TABLE: TableLocation,
     ElementType.CELL: CellLocation,
+    # A footnote is a text region like any block: a box and nothing more. Its
+    # relationship to a table is containment, which the tree carries, not an
+    # address — so it needs no location shape of its own.
+    ElementType.FOOTNOTE: BlockLocation,
 }
 
 

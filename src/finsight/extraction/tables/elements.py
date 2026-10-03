@@ -21,7 +21,10 @@ binding, since text above a table and text below it are the same geometric
 problem. Both arrive together.
 """
 
+from collections.abc import Sequence
+
 from finsight.domain.representations.source import (
+    BlockLocation,
     CellLocation,
     CellSemantics,
     ElementType,
@@ -29,6 +32,7 @@ from finsight.domain.representations.source import (
     TableLocation,
     TableSemantics,
 )
+from finsight.extraction.tables.adjacency import Footnote
 from finsight.extraction.tables.structure import DerivedCell, DerivedTable
 from finsight.extraction.tables.validation import TableQuality
 
@@ -59,6 +63,7 @@ def to_element(
     method_version: str,
     failure_reason: str | None = None,
     quality: TableQuality | None = None,
+    footnotes: Sequence[Footnote] = (),
 ) -> ExtractedElement:
     """Build the table element and its cells.
 
@@ -85,6 +90,18 @@ def to_element(
         )
     )
 
+    notes = tuple(
+        _footnote(
+            note,
+            page_number=derived.page_number,
+            table_ordinal=ordinal,
+            note_ordinal=len(cells) + index,
+            method=method,
+            method_version=method_version,
+        )
+        for index, note in enumerate(footnotes)
+    )
+
     return ExtractedElement(
         element_type=ElementType.TABLE,
         ordinal=ordinal,
@@ -93,7 +110,7 @@ def to_element(
         extraction_method=method,
         extraction_method_version=method_version,
         failure_reason=failure_reason,
-        children=cells,
+        children=(*cells, *notes),
         semantics=_semantics(quality),
     )
 
@@ -118,6 +135,35 @@ def _semantics(quality: TableQuality | None) -> TableSemantics | None:
             "unassigned_words": float(quality.unassigned_words),
             "dropped_cells": quality.dropped_cells,
         },
+    )
+
+
+def _footnote(
+    note: Footnote,
+    *,
+    page_number: int,
+    table_ordinal: int,
+    note_ordinal: int,
+    method: str,
+    method_version: str,
+) -> ExtractedElement:
+    """A footnote the table's own cells refer to.
+
+    A child of the table rather than of the page, although it is printed beneath
+    the table: a cell's ``footnote_refs`` resolve among its table's footnotes, and
+    a qualification that changes what a figure means belongs with the figure.
+
+    Ordinals continue the cell sequence so a footnote never collides with a cell
+    at the same position, which would make the pair unorderable.
+    """
+    return ExtractedElement(
+        element_type=ElementType.FOOTNOTE,
+        ordinal=note_ordinal,
+        locator=f"{table_locator(page_number, table_ordinal)}, footnote {note.marker}",
+        location=BlockLocation(bbox=note.bbox),
+        extraction_method=method,
+        extraction_method_version=method_version,
+        text=note.text,
     )
 
 

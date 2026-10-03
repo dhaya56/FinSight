@@ -68,6 +68,7 @@ from finsight.extraction.pdf.quality_signals import (
     PageSignals,
 )
 from finsight.extraction.pdf.reading_order import reading_order_key
+from finsight.extraction.tables.adjacency import bind_footnotes
 from finsight.extraction.tables.contracts import DetectedTable, TableDetector
 from finsight.extraction.tables.elements import to_element
 from finsight.extraction.tables.regions import UNSUPPORTED, review
@@ -246,19 +247,36 @@ class PyMuPdfProducer:
             (bbox, self._block(0, bbox, text, locator=locator))
             for bbox, text in placed
         ]
+        others = [derived.bbox for derived in tables]
+        # Numbered in reading order, because the locator says "table 2" and a
+        # reader counts tables down the page. Built here rather than from the
+        # page ordinal applied below: that one counts blocks too, so it would
+        # address the second table on a page as "table 9".
+        ordered = sorted(
+            zip(tables, gaps, quality, strict=True),
+            key=lambda item: reading_order_key(item[0].bbox),
+        )
         table_elements = [
             (
                 derived.bbox,
                 to_element(
                     derived,
-                    ordinal=0,
+                    ordinal=index,
                     method=self._tables.method,
                     method_version=self._tables.method_version,
                     failure_reason=gap,
                     quality=verdict,
+                    footnotes=bind_footnotes(
+                        derived.bbox,
+                        sorted(
+                            {ref for cell in derived.cells for ref in cell.footnote_refs}
+                        ),
+                        placed,
+                        [box for box in others if box != derived.bbox],
+                    ),
                 ),
             )
-            for derived, gap, verdict in zip(tables, gaps, quality, strict=True)
+            for index, (derived, gap, verdict) in enumerate(ordered)
         ]
 
         combined = blocks + table_elements

@@ -373,7 +373,66 @@ it is probably fine.
 
 ---
 
-## 10. Not implemented, and recorded so absence is not read as a finding
+## 10. Footnote binding
+
+**Rule.** `src/finsight/extraction/tables/adjacency.py`. For each marker a table's
+cells carry, scan text blocks below the table — stopping at the next table, bounded
+to eight blocks, requiring 30% horizontal overlap — and bind the first line that
+*opens* with that marker. The footnote becomes a `footnote` element, a child of the
+table, with its text stored verbatim including the marker.
+
+**Binding is by marker, not by distance.** Taking the nearest line below would be
+unsafe: ENV-008 §2.5 measured regions mis-bounded by a row or more, so "just below"
+is routinely another table's content. Matching the marker means both ends supply
+evidence.
+
+**Measured on the twelve judged regions.** Four leading-marker lines sat below a
+table; two matched a marker their table used and bound correctly; two did not and
+were left alone — both belonged to a table two regions away whose boundary was
+wrong. **Under-binding is the designed failure:** an unattached footnote is a
+visible gap, a misattached one silently changes what a figure means.
+
+**Known misfires.**
+
+| Misfire | Consequence |
+|---|---|
+| A footnote separated from its table by another table is never found | The measured case: two real footnotes unbound. Recovering them needs correct boundaries, not a longer scan |
+| A footnote printed at the page foot rather than under its table is out of range | Unmeasured frequency. ENV-006 counted ~1,000 leading markers corpus-wide against the handful reachable here |
+| Only the first line of a multi-line footnote binds | PyMuPDF blocks usually hold the whole note, but a note split across blocks keeps only its opening |
+| The marker vocabulary is the cell-side one | A footnote using a form no cell uses is unreachable by construction, which is the point |
+
+**Measured?** On twelve regions: 2 bound, 2 correctly refused, 0 misbound. Far too
+small for a rate, and the denominator — how many footnotes exist on those pages —
+was not counted.
+
+---
+
+## 11. Units and captions from adjacent text — measured and not built
+
+**The 88% units gap is not explained by text above the table.** Scanning the three
+nearest blocks above each of the twelve judged regions found **zero** units
+declarations. Not one. A rule reading units from the line above would never fire on
+this evidence, so it was not written.
+
+What sits above a region instead is, repeatedly, **the table's own clipped
+content**: `'Particulars Gratuity Pension'` 0.2pt above one region, a header row
+41.9pt above another, a data row `'Balance as of March 31, 2025 600 3,348 …'`
+34.4pt above a third.
+
+That also rules out caption adjacency for now. In these filings a caption is a
+lead-in sentence rather than a labelled title, and the nearest block above is as
+likely to be a header the detector clipped off. Attaching it as `caption` would
+produce a confident, plausible, wrong value — so `source_tables.caption` stays NULL
+and still means "not looked for".
+
+**Both become tractable if region boundaries are fixed, and not before.** The
+remaining explanations for the 88% — declared in a distant section heading,
+declared inside the table in a form the rule misses, or genuinely absent — need
+ground truth to separate, and that is ADR-003's measurement, not a rule to tune.
+
+---
+
+## 12. Not implemented, and recorded so absence is not read as a finding
 
 | Gap | Consequence if forgotten |
 |---|---|
