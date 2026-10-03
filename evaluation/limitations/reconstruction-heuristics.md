@@ -270,10 +270,33 @@ exactly the status of the five above.
 | `numeric_ratio` counts row-label cells in its denominator | It moves with column count as well as numeric density, so a well-formed two-period statement caps near 0.67. Pinned by a test; a calibration must account for it |
 | A 12-word prose cutoff is a description of financial row labels, not a measured boundary | A genuinely long row label reads as prose |
 
-**Measured?** No. The signals' distribution across the corpus has not been
-collected, and no cutoff on any of them is calibrated. The gate's *recall against
-human-verified bad regions* is the measurement that matters and it is owned by the
-Phase 6 ground truth, alongside ADR-003's admission question.
+**Measured?** Partly, and the result is bad. ENV-008 §2.5 compared the gate's
+verdict against human boundary judgement on six real pages:
+
+| Boundary verdict | Gate said |
+|---|---|
+| **1** — best page of the six | all four regions `review_required` |
+| **1** | `accepted` |
+| **2** — every outline straddles a table boundary | all four `accepted` |
+| **3** — region holds no table, an 18×8 grid over two-column prose | `accepted` |
+| **3** — region holds no table, a 14×14 grid over an image | `accepted` |
+
+**On this sample the gate's signal runs against boundary quality.** It accepted
+both regions containing no table and flagged only the page judged best.
+
+Why, mechanically: a prose region segmented into an 18×8 grid has short cells, so
+no cell reaches the twelve-word prose threshold and `prose_ratio` stays low. The
+rule was written for a region that is *one paragraph in one cell*, and a detector
+that shreds a paragraph into a grid defeats it completely. The `review_required`
+on the best page came from dropped cells, which is honest reporting by a detector
+doing hard segmentation well — so the one page where a detector worked hardest
+looked worst.
+
+Six pages cannot establish a rate. They are enough to establish direction, and to
+retire the hope the gate compensates for a weak detector. **No consumer may read
+`accepted` as evidence that a region bounds a table.** The gate's useful scope is
+what ADR-003 claims for it and no more: refusing structurally impossible tables,
+and carrying signals forward for a calibration that has not happened.
 
 ---
 

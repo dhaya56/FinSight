@@ -1,0 +1,13 @@
+image	detector	doc	page	real_tables	regions	verdict	note
+01	pymupdf-text	HDFC	279	1	1	2	full-page outline; encloses the big table in the lower half but also the image and paragraph above it, and clips the table at both left and right edges
+02	docling	Infosys	234	4	4	2	four outlines for four tables, every one straddling a boundary: the first encloses table 1 plus a line belonging to table 2 and table 2's first row; the rest of table 2 is enclosed by nothing; the second covers only table 3's last two rows plus the paragraph below; the third covers a paragraph plus table 4's first row; the fourth covers table 4's rows 2-5 only
+03	docling	HDFC	279	1	1	3	the single outline encloses only the image in the upper half; the real table in the lower half is enclosed by nothing
+04	pymupdf-text	Infosys	246	many	1	2	one outline over the entire page, which carries four small tables
+05	pymupdf-text	Infosys	140	unknown	1	2	one outline over the entire page; the page carries four small tables interleaved with text above and below each
+06	pymupdf-text	Infosys	300	1	1	2	full-page outline; upper half is two-column prose, lower half the real table, no separate region for it
+07	pymupdf-text	Infosys	325	2	1	2	full-page outline; the page carries two tables with text above and below each
+08	pymupdf-text	Infosys	234	4	1	2	full-page outline over a page carrying four tables
+09	docling	Infosys	325	2	2	1	both tables enclosed by their own outline and the large paragraph above the first is correctly excluded; each outline stops short of its table's last row and of a one-line footnote beneath
+10	docling	Infosys	140	unknown	3	2	three outlines, each offset: the first misses a single continuation row at the top and encloses the text beneath it instead; the second bounds its table but cuts the last row; the third misses the table's first three rows and includes the text below
+11	docling	Infosys	300	1	1	3	the single outline covers only the two-column prose in the upper half; the real table in the lower half is untouched
+12	docling	Infosys	246	many	4	1	four tables each enclosed by their own outline; the same clipping, with some rows at the top and bottom of each falling outside

@@ -142,6 +142,11 @@ sufficient one — a detector can return the right number of regions with the wr
 boundaries — so count agreement screens candidates and `verdict`-style annotation
 still decides.
 
+### Round two lives in `region-boundary-review.tsv`
+
+This file's `verdict` scores PyMuPDF's regions. The follow-up scores *both*
+detectors on the six table-bearing pages, blind and paired.
+
 ### Limitations
 
 Ten pages, one annotator, three documents, and **drawn almost entirely from one
@@ -153,3 +158,64 @@ generalise to a fourth issuer. Two pages rendered incompletely, so their
 
 Contains no filing text, financial values or quoted document content: the `note`
 column describes page structure only (CLAUDE.md §10).
+
+---
+
+## `region-boundary-review.tsv`
+
+Blind paired judgement of **two** detectors' table regions on the same pages —
+the measurement ADR-003 named as its admission prerequisite, recorded in ENV-008
+§2.5.
+
+| | |
+|---|---|
+| **Rows** | 12 — six pages, each rendered once per detector |
+| **Bytes** | 2,175 |
+| **SHA-256** | `a2ac6f255237919e8cc461857f9aa811741a5c9f504d48d0a920ccfc7935feb5` |
+| **Annotated** | 2026-10-04, same annotator as `detector-precision-annotation.tsv` |
+| **Shuffle seed** | 20261004, as `scripts/render_table_regions.py` records |
+| **Detectors** | docling 2.133.0 (TableFormer ACCURATE, layout-heron) and PyMuPDF 1.28.2 `find_tables(strategy="text")` |
+
+### Why blinded and paired
+
+Every page appears twice, once per detector, shuffled into one unlabelled set.
+The candidate under test was the one the project would have preferred to succeed,
+and an unblinded check in that situation is worth very little. It also re-tests
+the annotator against their own earlier verdicts on the same pages: all six
+PyMuPDF judgements came back identical to round one.
+
+Pages holding no table are excluded. A detector returning nothing there has no
+boundary to get wrong, and one returning a region is wrong by construction — both
+already settled by the count screen.
+
+### Columns
+
+Same `verdict` scale as `detector-precision-annotation.tsv`. `regions` is how many
+outlines that image carried; `real_tables` is carried over from round one.
+
+### Result
+
+| Detector | Correctly bounded (1) | Wrong boundary (2) | No table in region (3) |
+|---|---|---|---|
+| docling | **2 of 6** | 2 | 2 |
+| pymupdf-text | **0 of 6** | 6 | 0 |
+
+### What it overturned
+
+A count-based screen scored Docling 8 of 8 against PyMuPDF's 2 of 8. **Three of
+the four positive pages it passed had wrong regions**, including two where a
+single region matched a single real table and yet contained no table at all —
+prose in one case, an image in the other — while the real table went undetected.
+
+Region count is a cheap filter for obviously-wrong candidates and **not evidence
+about a plausible one**. Any later screen built on counts inherits that caveat.
+
+### Limitations
+
+Six pages, one annotator, two documents, one stratum. The verdicts are a
+categorisation of the annotator's written descriptions rather than codes they
+entered directly. Enough to decide against admission, not enough to rank
+candidates or estimate any rate.
+
+Contains no filing text or financial values: the notes describe page structure
+and where outlines fall (CLAUDE.md §10).

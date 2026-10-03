@@ -1,6 +1,6 @@
 # ENV-008 — Docling Artifact Staging and Region Measurement
 
-- **Status:** complete for the measurements it covers; boundary confirmation outstanding
+- **Status:** complete, boundary confirmation included
 - **Date:** 2026-10-04
 - **Phase:** 6 — table detection and the source representation
 - **Scope:** making Docling reproducible on this host, and scoring its table
@@ -155,29 +155,90 @@ Of Docling's eight, **four are fully decided**: a page holding no table has no
 boundary to get wrong, so returning nothing is correct outright. `text` claimed a
 table on all four. The other four are count-correct with boundaries unverified.
 
-### The decisive page
+### A page that looked decisive, and was not
 
 Infosys 234 carries four separate financial tables. `text` returned **one** outline
 enclosing all four plus prose and footnotes; `lines` returned nothing. Docling
 returned **four regions**, 3×5, 4×7, 4×7 and 9×5, all accepted by the quality gate.
 
-ENV-006 identified the missing capability as *boundary segmentation of
-horizontally-ruled tables*. This is that capability, on a real page, on the
-hardest stratum in the corpus.
+**On the counts alone this was read here as the boundary segmentation ENV-006
+asked for. §2.5 shows it is not.** The four regions each straddle a table
+boundary. The claim is retracted below rather than edited out, because the
+sequence — a count-based screen producing a conclusion the eyes then reversed — is
+the finding.
 
-### The quality gate behaved
+---
 
-Not designed into this measurement, but it ran on every region:
+## 2.5 Boundary confirmation: the screen was misleading
 
-- Infosys 140's spurious 1×2 region was **rejected** as degenerate.
-- Infosys 246's four regions came back **review_required** on dropped cells —
-  Docling segmented a page of many small tables and reported honestly that it had
-  lost content doing so.
-- Every other region was accepted.
+The six table-bearing pages were re-rendered with **both** detectors' regions
+outlined, shuffled and blinded, and judged on ENV-006 §2.1's three-category scale.
+Same annotator, seed 20261004, recorded in
+`evaluation/data/region-boundary-review.tsv`.
 
-ADR-003's limitation register entry says the gate does not catch merged or
-prose-swallowing regions. That remains true. What this shows is that it does not
-*fire spuriously* on a detector whose regions are well-formed.
+| Detector | Correctly bounded (1) | Wrong boundary (2) | No table in region (3) |
+|---|---|---|---|
+| **Docling** | **2 of 6** | 2 | 2 |
+| PyMuPDF `text` | **0 of 6** | 6 | 0 |
+
+**Count agreement was wrong on three of the four positive pages it passed.**
+
+| Page | Truth | Regions | Screen | Boundary verdict |
+|---|---|---|---|---|
+| Infosys 325 | 2 | 2 | OK | **1** — both tables bounded, prose above correctly excluded |
+| Infosys 246 | many | 4 | not scored | **1** — four tables each bounded |
+| Infosys 234 | 4 | 4 | OK | **2** — every outline straddles a table boundary |
+| Infosys 300 | 1 | 1 | OK | **3** — bounds the two-column prose; the table is untouched |
+| HDFC 279 | 1 | 1 | OK | **3** — bounds the image; the table is untouched |
+| Infosys 140 | unknown | 3 | not scored | **2** — three offset regions |
+
+The two single-region pages are the sharpest case. Docling returned exactly one
+region where exactly one table exists, scoring a clean match — and in both the
+region contains **no table at all**, while the real table is enclosed by nothing.
+An 18×8 grid over two-column prose and a 14×14 grid over an image.
+
+This is the pre-committed caveat realised. It was stated as a theoretical
+limitation of the screen; it is now a measured one, and it inverted the reading on
+half the pages it was applied to. **A count-based screen is a cheap filter for
+obviously-wrong candidates, not evidence about a plausible one.**
+
+### The error has a shape
+
+Across all six pages the annotator describes the same defect: regions offset by
+one or more rows. Outlines stop before a table's last row, begin after its first
+few, pick up the paragraph beneath, or absorb the leading line of the table below.
+Even the two pages judged correct carry it — their outlines clip the final row and
+a one-line footnote.
+
+This is systematic, not random, and it is a different failure from PyMuPDF's.
+PyMuPDF cannot find a boundary; Docling finds approximately the right one and
+places it wrongly by a row or two. **Hypothesis, not a finding:** the region
+derives from detected cell content rather than from the table's ruled extent, so
+rows the model does not place fall outside. Untested, and it matters because a
+clipped row is silent content loss — the cell simply is not in the table.
+
+### The quality gate is anti-correlated here
+
+| Page | Boundary verdict | Gate |
+|---|---|---|
+| Infosys 246 | **1** best page | all four `review_required` |
+| Infosys 325 | **1** | both `accepted` |
+| Infosys 234 | **2** | all four `accepted` |
+| Infosys 300 | **3** no table | `accepted` |
+| HDFC 279 | **3** no table | `accepted` |
+
+The gate accepted both regions that contain no table, accepted all four
+badly-offset regions, and was the only page it flagged the one the annotator rated
+best. On this sample its signal runs **against** boundary quality.
+
+That is consistent with how it was built — ADR-003 records that it rejects only
+structurally unambiguous conditions and cannot catch a prose-swallowing region —
+but it closes off the hope that the gate compensates for a weak detector. A
+prose region read as an 18×8 grid has short cells, so no prose rule fires. Six
+pages is far too small to call this a rate; it is enough to say the gate must not
+be relied on for this, and the limitation register now says so.
+
+---
 
 ### Cost
 
@@ -213,12 +274,17 @@ one-page synthetic timing underestimates dense filing pages.
 
 | # | Item | Owner |
 |---|---|---|
-| 1 | Boundary confirmation on the four count-correct pages — render Docling's regions and judge them as the PyMuPDF regions were judged. ~4 pages, minutes | ADR-003 admission |
-| 2 | Corpus-wide false-positive rate on narrative pages | ADR-003 admission |
-| 3 | Cell-content fidelity inside a correctly bounded region | Phase 6 |
-| 4 | Peak RSS under the layout model against §41.11 | ADR-004 |
-| 5 | Whether the detector contract should accept reported spans and header flags rather than deriving them | Phase 6 design |
-| 6 | Throughput on a full document, where 1.6–7.6 s/page compounds | Phase 7 |
+| 1 | ~~Boundary confirmation~~ | **closed by §2.5** — Docling 2 of 6 |
+| 2 | Whether the row-offset defect is the region deriving from cell content rather than ruled extent. If so it may be correctable above the detector, which would change the picture materially | Phase 6 |
+| 3 | Corpus-wide false-positive rate on narrative pages | ADR-003 admission |
+| 4 | Cell-content fidelity inside a correctly bounded region | Phase 6 |
+| 5 | Peak RSS under the layout model against §41.11 | ADR-004 |
+| 6 | Whether the detector contract should accept reported spans and header flags rather than deriving them | Phase 6 design |
+| 7 | Throughput on a full document, where 1.6–7.6 s/page compounds | Phase 7 |
+
+Item 2 is the one worth pursuing before any other detector is sought. A detector
+that finds roughly the right region and misplaces its edge by a row is a different
+problem from one that cannot find the region, and potentially a tractable one.
 
 ---
 
@@ -229,11 +295,21 @@ both artifacts at pinned commits over verified TLS, and `artifacts_path` makes a
 parse-time download raise rather than happen. That was an ADR-003 admission
 prerequisite and it is now met.
 
-**Docling's regions agree with human-verified truth where PyMuPDF's do not**, 8 of
-8 against 2 of 8, including four true negatives on pages where `text` claimed a
-table and the one page where it merged four tables into one region.
+**Docling is better than PyMuPDF and still not admissible.** It is right where
+PyMuPDF is catastrophically wrong — four true negatives on pages where `text`
+claimed a table on every one — and on boundaries it scores **2 of 6 against 0 of
+6**. Two correctly bounded pages out of six is a real improvement and nowhere near
+a production detector.
 
-**This is not yet an admission.** Four of the eight remain count-correct with
-unverified boundaries, the sample is ten pages from one stratum, and corpus-wide
-precision is unmeasured. What it does establish is that the full measurement is
-worth running and that nothing structural blocks it any more.
+**Count agreement is not a proxy for boundary correctness**, now measured rather
+than assumed. It passed three pages whose regions were wrong, two of which
+contained no table at all. Any future screen built on region counts carries this
+result as its caveat.
+
+**The quality gate does not compensate for a weak detector**, and on this sample
+runs against it.
+
+**ADR-003's conclusion is unchanged and better supported.** No detector is
+admitted; table cells stay out of the retrieval path. The difference from before
+is that this is now the conclusion of a measurement rather than the absence of
+one.

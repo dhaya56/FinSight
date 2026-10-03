@@ -11,17 +11,18 @@
   recorded evidence disqualifies both, so a choice between them would be a choice
   between two inadmissible options.
 
-> **Amendment, 2026-10-04 — the blocking prerequisite is met and the evidence has
-> moved.** ENV-008 staged Docling's artifacts reproducibly and scored its regions
-> against the annotated pages: **8 of 8 on count agreement where PyMuPDF `text`
-> scores 2 of 8**, with four of those eight fully decided as true negatives, and
-> four separate regions on the page where `text` merged four tables into one.
+> **Amendment, 2026-10-04 — measured, and the decision is unchanged.** ENV-008
+> staged Docling's artifacts reproducibly and measured its regions against the
+> annotated pages.
 >
-> **The decision below stands for now**, because four of the eight remain
-> count-correct with boundaries unverified and corpus-wide precision is still
-> unmeasured. But the reason for non-admission has changed: it was "no evidence
-> and no way to get it", and it is now "one short confirmation short". See
-> §"Where admission now stands" at the end.
+> An initial count-based screen gave Docling **8 of 8** against PyMuPDF's 2 of 8,
+> and that was read here as near-admissible. **The blind boundary review reversed
+> it**: on the six table-bearing pages Docling bounds **2 of 6** against PyMuPDF's
+> **0 of 6**, and the screen had passed three pages whose regions were wrong —
+> including two where the single region contained no table at all while the real
+> table went undetected.
+>
+> Better than PyMuPDF, not admissible. See §"Where admission now stands".
 
 ## Context
 
@@ -254,9 +255,9 @@ unproven. What is left is small and specific.
 |---|---|
 | Reproducible artifact staging under §20.6 | **met** — ENV-008 §1 |
 | Model revisions pinned to commits, not branches | **met** — ENV-007 open item 8 closed |
-| Precision against human-verified truth | **partly met** — 8 of 8 count agreement, 4 of those fully decided |
-| Boundary correctness on the count-correct pages | **outstanding** — ENV-008 open item 1, about four pages to judge |
-| Corpus-wide false-positive rate on narrative pages | **outstanding** — ENV-008 open item 2 |
+| Precision against human-verified truth | **met, and it does not support admission** — 2 of 6 bounded |
+| Boundary correctness | **met** — ENV-008 §2.5, blind and paired |
+| Corpus-wide false-positive rate on narrative pages | outstanding — ENV-008 open item 3 |
 | Peak memory against §41.11's shared envelope | outstanding — ADR-004 |
 | Cell-content fidelity inside a bounded region | outstanding — a separate question from bounding |
 
@@ -264,18 +265,28 @@ unproven. What is left is small and specific.
 out of the retrieval path, and PyMuPDF `lines` remains the provisional detector
 for storage. Nothing in the extraction service constructs a Docling detector.
 
-**What a reader should take from this record.** Its conclusion is not "Docling is
-unproven". It is that the one measurement ADR-003 asked for has now run on the
-hardest ten pages in the corpus and Docling passed it, and that admission is a
-developer decision under §4 which the evidence now supports rather than blocks.
+**What a reader should take from this record.** The measurement ADR-003 asked for
+has run, blind and paired, on the hardest pages in the corpus. Docling bounds 2 of
+6 where PyMuPDF bounds 0 of 6. That is a real improvement over a catastrophic
+baseline and it is not a production detector, so **no detector is admitted and the
+operative constraints stand.**
 
-**Recommended next step**, stated so it is on the record rather than in a chat
-message: render Docling's regions on the four count-correct pages and judge them
-on the same three-category scale the PyMuPDF regions were judged on. If they bound
-their tables, admission has the evidence §4 and §8 require and ADR-003 should be
-superseded by a selection record. If they do not, this record's conclusion holds
-unchanged and the search widens — which is the outcome the pre-committed rule was
-written to keep available.
+**The most useful thing learned is the shape of Docling's error.** It is not that
+it cannot find tables — it finds approximately the right regions and places their
+edges wrongly, typically by a row: clipping a final row, starting after the first
+few, absorbing the line beneath. Even the two pages judged correct carry it.
+PyMuPDF's failure is an inability to segment at all; Docling's is a
+systematically misplaced edge, and those call for different responses.
+
+**Next step, stated here rather than in a chat message.** Test whether the offset
+is the region deriving from detected cell content rather than the table's ruled
+extent (ENV-008 open item 2). If it is, the edge may be correctable above the
+detector — the ruling lines PyMuPDF reports are exactly the signal Docling appears
+not to use — and that would be a cheaper path to an admissible detector than
+replacing the candidate. If it is not, the search widens.
+
+**Nothing in that work should hold up the retrieval path**, which is excluded from
+tables either way under the operative constraints above.
 
 ## Relationship to ADR-002
 
