@@ -230,8 +230,13 @@ INDENTED_LABEL: Final = "Of which: term deposits"
 """The row whose label is drawn further right, expressing hierarchy by position."""
 
 
-def build_financial_table_pdf(*, ruled: bool = True) -> bytes:
+def build_financial_table_pdf(*, ruled: bool = True, marker: str = "") -> bytes:
     """One financial table, optionally without ruling lines.
+
+    ``marker`` is drawn in the page footer and changes nothing about the table. It
+    exists because intake is content-addressed: two tests building the same bytes
+    receive the same document version, and the second would silently assert against
+    the first one's extraction.
 
     The two variants are the same table and the whole point of the pair: the
     ``lines`` strategy reads the ruled one correctly and finds *nothing at all* in
@@ -260,6 +265,9 @@ def build_financial_table_pdf(*, ruled: bool = True) -> bytes:
     for text, column, row in TABLE_CONTENT:
         indent = 12.0 if text == INDENTED_LABEL else 4.0
         pdf.drawString(TABLE_X[column] + indent, TABLE_Y[row + 1] + 6, text)
+
+    if marker:
+        pdf.drawString(TABLE_X[0], 60.0, marker)
 
     pdf.showPage()
     pdf.save()

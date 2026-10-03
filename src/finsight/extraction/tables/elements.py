@@ -10,14 +10,15 @@ statement available — and since a merge and a detection failure are
 indistinguishable from a grid, writing a row for "something might be missing here"
 would record a conclusion the evidence does not support. The span is the record.
 
-**A table carries no semantics yet, and so writes no extension row.** §12.6 wants
-captions; no detector in use reports one and nothing here looks for one. Attaching
-``TableSemantics(caption=None)`` would write a ``source_tables`` row per table
-saying nothing, and a table full of NULLs reads as evidence that filings have no
-captions rather than as evidence that we never looked. No row is the honest
-record. Caption derivation shares its machinery with footnote binding — text above
-a table and text below it are the same geometric problem — so both arrive
-together, and ``source_tables`` gets its writer then.
+**A table's extension row exists only when something is known to put in it.** A
+table carries its quality verdict, so an assessed table writes a ``source_tables``
+row; an unassessed one writes none. Attaching ``TableSemantics(caption=None)`` to
+every table regardless would fill the table with NULLs, and a column of NULLs
+reads as evidence that filings have no captions rather than as evidence that we
+never looked. ``caption`` stays NULL for that reason — §12.6 wants it, no detector
+in use reports one, and caption derivation shares its machinery with footnote
+binding, since text above a table and text below it are the same geometric
+problem. Both arrive together.
 """
 
 from finsight.domain.representations.source import (
@@ -26,8 +27,10 @@ from finsight.domain.representations.source import (
     ElementType,
     ExtractedElement,
     TableLocation,
+    TableSemantics,
 )
 from finsight.extraction.tables.structure import DerivedCell, DerivedTable
+from finsight.extraction.tables.validation import TableQuality
 
 
 def table_locator(page_number: int, ordinal: int) -> str:
@@ -55,6 +58,7 @@ def to_element(
     method: str,
     method_version: str,
     failure_reason: str | None = None,
+    quality: TableQuality | None = None,
 ) -> ExtractedElement:
     """Build the table element and its cells.
 
@@ -90,7 +94,30 @@ def to_element(
         extraction_method_version=method_version,
         failure_reason=failure_reason,
         children=cells,
-        semantics=None,
+        semantics=_semantics(quality),
+    )
+
+
+def _semantics(quality: TableQuality | None) -> TableSemantics | None:
+    """Attach the verdict, or nothing at all when none was formed.
+
+    None rather than an empty record: a table with no assessment is different from
+    one assessed and found clean, and writing a row either way would make the two
+    indistinguishable. Caption stays None until caption derivation exists.
+    """
+    if quality is None:
+        return None
+    return TableSemantics(
+        caption=None,
+        verdict=quality.verdict,
+        verdict_reasons=quality.reasons,
+        quality_signals={
+            "prose_ratio": quality.prose_ratio,
+            "numeric_ratio": quality.numeric_ratio,
+            "filled_ratio": quality.filled_ratio,
+            "unassigned_words": float(quality.unassigned_words),
+            "dropped_cells": quality.dropped_cells,
+        },
     )
 
 

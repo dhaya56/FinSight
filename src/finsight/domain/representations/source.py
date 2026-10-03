@@ -79,6 +79,23 @@ class ExtractionState(StrEnum):
     FAILED = "failed"
 
 
+class Verdict(StrEnum):
+    """What may be done with a table.
+
+    Here rather than beside the rules that produce it, because it is what retrieval
+    filters on and what the schema constrains: the enum, the CHECK constraint and
+    the stored value have to agree, and only one of those three lives in extraction.
+
+    ``REVIEW_REQUIRED`` is the important member. A system that only accepts or
+    rejects has to guess about the middle, and guessing in favour of acceptance is
+    how a partially extracted balance sheet becomes an answer.
+    """
+
+    ACCEPTED = "accepted"
+    REVIEW_REQUIRED = "review_required"
+    REJECTED = "rejected"
+
+
 _ROTATIONS: Final[frozenset[int]] = frozenset({0, 90, 180, 270})
 
 
@@ -322,13 +339,38 @@ def location_from_mapping(
 
 @dataclass(frozen=True, slots=True)
 class TableSemantics:
-    """What a table means, as opposed to where it is (§12.6).
+    """What a table means, and whether it may be trusted.
 
-    Only the caption, because that is the only table-level meaning §12.6 names
-    that is not derivable from the cells beneath it.
+    ``caption`` is the only table-level *meaning* §12.6 names that is not derivable
+    from the cells beneath it.
+
+    The rest is a quality verdict, kept on the table because that is the unit a
+    reader cites and the unit retrieval includes or excludes. A table that is
+    incomplete or that was never a table must be refusable, and refusing it is only
+    possible if the judgement travels with it.
     """
 
     caption: str | None = None
+    verdict: Verdict | None = None
+    """The quality verdict, or None when the table was never assessed.
+
+    Only an accepted table is evidence. None is not a fourth verdict and must not
+    be read as one: it says no judgement was formed, which is why
+    :class:`~finsight.extraction.tables.validation.TableQuality` has no such
+    member and an unassessed table writes no semantics row at all.
+    """
+
+    verdict_reasons: tuple[str, ...] = ()
+    """Why, in machine-readable terms, so a verdict can be re-examined."""
+
+    quality_signals: Mapping[str, float] | None = None
+    """The measurements behind the verdict.
+
+    Stored rather than discarded because none of the graded cutoffs is calibrated
+    yet — CLAUDE.md §9 keeps threshold gates informational until an approved
+    baseline defines them, and a verdict without its evidence cannot be revisited
+    when that baseline arrives.
+    """
 
 
 @dataclass(frozen=True, slots=True)

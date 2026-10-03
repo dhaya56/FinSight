@@ -69,6 +69,7 @@ from finsight.extraction.pdf.reading_order import reading_order_key
 from finsight.extraction.tables.contracts import DetectedTable, TableDetector
 from finsight.extraction.tables.elements import to_element
 from finsight.extraction.tables.structure import DerivedTable, derive
+from finsight.extraction.tables.validation import TableQuality, assess
 
 _TEXT_BLOCK: Final = 0
 """PyMuPDF's block-type marker for text. Image blocks carry 1."""
@@ -169,8 +170,14 @@ class PyMuPdfProducer:
 
         tables = [derive(candidate) for candidate in detected]
         gaps = [_coverage_gap(candidate) for candidate in detected]
+        quality = [
+            assess(candidate, derived)
+            for candidate, derived in zip(detected, tables, strict=True)
+        ]
 
-        children = self._ordered_children(placed, tables, gaps, locator=locator)
+        children = self._ordered_children(
+            placed, tables, gaps, quality, locator=locator
+        )
         blocks = [
             child for child in children if child.element_type is ElementType.BLOCK
         ]
@@ -201,6 +208,7 @@ class PyMuPdfProducer:
         placed: list[tuple[tuple[float, float, float, float], str]],
         tables: list[DerivedTable],
         gaps: list[str | None],
+        quality: list[TableQuality],
         *,
         locator: str,
     ) -> tuple[ExtractedElement, ...]:
@@ -233,9 +241,10 @@ class PyMuPdfProducer:
                     method=self._tables.method,
                     method_version=self._tables.method_version,
                     failure_reason=gap,
+                    quality=verdict,
                 ),
             )
-            for derived, gap in zip(tables, gaps, strict=True)
+            for derived, gap, verdict in zip(tables, gaps, quality, strict=True)
         ]
 
         combined = blocks + table_elements

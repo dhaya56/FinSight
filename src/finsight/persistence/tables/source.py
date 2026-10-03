@@ -51,7 +51,11 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from finsight.domain.representations.source import ElementType, ExtractionState
+from finsight.domain.representations.source import (
+    ElementType,
+    ExtractionState,
+    Verdict,
+)
 from finsight.persistence.tables.base import Base
 
 FORMAT_PDF: Final = "pdf"
@@ -71,6 +75,7 @@ def _quoted_list(values: tuple[str, ...]) -> str:
 _FORMAT_LIST: Final = _quoted_list(EXTRACTION_FORMATS)
 _STATE_LIST: Final = _quoted_list(tuple(state.value for state in ExtractionState))
 _ELEMENT_TYPE_LIST: Final = _quoted_list(tuple(kind.value for kind in ElementType))
+_VERDICT_LIST: Final = _quoted_list(tuple(verdict.value for verdict in Verdict))
 
 
 class ExtractionRun(Base):
@@ -236,6 +241,30 @@ class SourceTable(Base):
     """
 
     __tablename__ = "source_tables"
+    __table_args__ = (
+        CheckConstraint(
+            f"verdict IS NULL OR verdict IN ({_VERDICT_LIST})", name="verdict_known"
+        ),
+        CheckConstraint(
+            "array_position(verdict_reasons, NULL) IS NULL",
+            name="verdict_reasons_has_no_nulls",
+        ),
+        CheckConstraint(
+            "verdict IS NOT NULL OR cardinality(verdict_reasons) = 0",
+            name="verdict_reasons_need_a_verdict",
+        ),
+        CheckConstraint(
+            "quality_signals IS NULL OR jsonb_typeof(quality_signals) = 'object'",
+            name="quality_signals_is_object",
+        ),
+    )
+    """``verdict_reasons_need_a_verdict`` is the one worth reading twice.
+
+    Reasons without a verdict would be grounds for a judgement nobody made, and a
+    consumer filtering on ``verdict`` would skip the row while a consumer reading
+    the reasons would act on it. The database refuses the state rather than leaving
+    two answers available.
+    """
 
     source_element_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("source_elements.id"), primary_key=True
@@ -249,6 +278,29 @@ class SourceTable(Base):
     looked for" — the opposite of what a reader would reasonably assume. Caption
     derivation is tracked in the reconstruction limitation register; until it
     lands, no consumer may treat NULL as evidence that a table is uncaptioned.
+    """
+
+    verdict: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    """Whether this table may be used as evidence.
+
+    ``accepted``, ``review_required`` or ``rejected``. Retrieval filters on it:
+    only an accepted table is evidence, which is what stops an incomplete balance
+    sheet from answering a question about one.
+    """
+
+    verdict_reasons: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=sql_text("'{}'::text[]")
+    )
+    """Machine-readable grounds for the verdict, so it can be re-examined."""
+
+    quality_signals: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    """The measurements the verdict rested on.
+
+    JSONB rather than columns because the set will grow as the ground truth
+    calibrates it, and because nothing queries an individual signal yet. When one
+    becomes a filter it earns a column.
     """
 
 
