@@ -24,9 +24,11 @@ from finsight.observability.dependency_health import (
     probe_dependency,
 )
 from finsight.persistence.database import is_database_reachable, is_schema_current
+from finsight.vector_index.qdrant_index import is_vector_index_reachable
 
 POSTGRESQL_DEPENDENCY = "postgresql"
 SCHEMA_DEPENDENCY = "schema"
+VECTOR_INDEX_DEPENDENCY = "qdrant"
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -45,6 +47,11 @@ def get_schema_probe() -> DependencyProbe:
     return is_schema_current
 
 
+def get_vector_index_probe() -> DependencyProbe:
+    """Provide the vector-index probe, likewise uninvoked."""
+    return is_vector_index_reachable
+
+
 @router.get("/live", response_model=LivenessResponse, summary="Liveness")
 def read_liveness() -> LivenessResponse:
     """Report that the process is running. Checks no dependency."""
@@ -56,6 +63,9 @@ def read_readiness(
     response: Response,
     database_probe: Annotated[DependencyProbe, Depends(get_database_probe)],
     schema_probe: Annotated[DependencyProbe, Depends(get_schema_probe)],
+    vector_index_probe: Annotated[
+        DependencyProbe, Depends(get_vector_index_probe)
+    ],
 ) -> ReadinessResponse:
     """Report readiness, returning 503 when an essential dependency is unhealthy."""
     database = probe_dependency(
@@ -81,7 +91,17 @@ def read_readiness(
             state=HealthState.UNHEALTHY,
         )
 
-    report = evaluate_readiness([database, schema])
+    # Degradable, not essential (§10.9): losing the vector index costs dense
+    # retrieval, which §20.12 degrades to the lexical path with a flag. Reporting
+    # it as essential would take the whole service out of readiness over a
+    # capability that has a defined fallback.
+    vector_index = probe_dependency(
+        name=VECTOR_INDEX_DEPENDENCY,
+        classification=DependencyClass.DEGRADABLE,
+        probe=vector_index_probe,
+    )
+
+    report = evaluate_readiness([database, schema, vector_index])
     if not report.ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return ReadinessResponse(ready=report.ready)

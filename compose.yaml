@@ -38,10 +38,13 @@ services:
       retries: 5
       start_period: 30s
 
-    # Resource limits are intentionally absent. PROJECT_BLUEPRINT.md §38.11
-    # requires them, but usable memory under the complete stack is unmeasured
-    # (ENV-001 open item), so any value here would be invented. They are added
-    # in the phase where multiple services coexist and memory is measured.
+    # Resource limits remain absent, and the reason has narrowed rather than
+    # disappeared. PROJECT_BLUEPRINT.md §38.11 requires them; three services now
+    # coexist and idle memory is measured — postgres 77 MiB, objectstore 219 MiB,
+    # qdrant 49 MiB against the 7.6 GiB Docker Desktop allocates. But idle is not
+    # the figure a limit should be set from, and nothing is indexed yet, so a
+    # value chosen now would be invented headroom. They are set once the corpus
+    # is embedded and peak usage is measured (ENV-009).
 
   objectstore:
     # SeaweedFS speaks the S3 API; the application knows only S3 and treats this
@@ -81,6 +84,38 @@ services:
       retries: 5
       start_period: 30s
 
+  qdrant:
+    # Pinned by tag; the resolved digest is recorded in ENV-009. The tag tracks
+    # the pinned qdrant-client version, because the client and server negotiate
+    # API shapes and a silent drift between them surfaces as a schema error on a
+    # collection that worked yesterday.
+    image: qdrant/qdrant:v1.19.1
+    restart: unless-stopped
+    ports:
+      # Loopback only, and only the REST port. gRPC (6334) stays unpublished
+      # because nothing uses it; the client speaks REST by default.
+      - "127.0.0.1:${FINSIGHT_QDRANT_PORT:-6333}:6333"
+    volumes:
+      - finsight-qdrant-data:/qdrant/storage
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # The image carries bash but no curl, wget or nc, so the check speaks HTTP
+      # over bash's /dev/tcp. Verified against this image: /readyz returns 200.
+      # A plain port-open check would report healthy while the collection layer
+      # was still loading.
+      #
+      # CMD rather than CMD-SHELL, and bash named explicitly: CMD-SHELL runs
+      # /bin/sh, which here is dash, and /dev/tcp is a bash feature. Under
+      # CMD-SHELL this check fails with "cannot create /dev/tcp/..." on every
+      # probe and the service never reports healthy.
+      test: ["CMD", "bash", "-c", 'exec 3<>/dev/tcp/127.0.0.1/6333; printf "GET /readyz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" >&3; head -1 <&3 | grep -q "200 OK"']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
 volumes:
   finsight-postgres-data:
   finsight-objectstore-data:
+  finsight-qdrant-data:

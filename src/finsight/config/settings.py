@@ -263,6 +263,31 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --------------------------------------------------------------- Vector index
+
+    qdrant_url: str = Field(
+        default="http://127.0.0.1:6333",
+        description=(
+            "Qdrant REST endpoint. Loopback, matching how compose publishes it. "
+            "The index is derived and rebuildable from PostgreSQL (§29.2), so "
+            "losing it costs time rather than evidence."
+        ),
+    )
+    qdrant_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="Unmeasured initial default.",
+    )
+    embedding_config_version: str = Field(
+        default="1",
+        description=(
+            "Versions the embedding configuration as a whole (§14.10). It enters "
+            "the deterministic point identifier (§29.9), so bumping it re-indexes "
+            "to new points rather than overwriting ones an active generation may "
+            "still be serving."
+        ),
+    )
+
     # ----------------------------------------------------------------- Ingestion
 
     upload_max_bytes: int = Field(
