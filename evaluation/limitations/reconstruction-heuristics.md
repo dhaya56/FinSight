@@ -475,7 +475,79 @@ representation (§18.4), not a source one.
 
 ---
 
-## 13. Not implemented, and recorded so absence is not read as a finding
+## 13. Heading recovery during chunking
+
+**Rule.** `src/finsight/chunking/headings.py`. §18.2 attaches a heading path to
+every chunk, and nothing upstream supplies one — `extraction/contracts.py` states
+that a producer "makes no claim about document structure; a heading is a block that
+happens to be large, not a heading." So sections are recovered at chunking time
+from the numbering filings use. A block is a heading only if **all** of:
+
+1. it matches `N.`, `N.M`, `N.M.K`, or `Item|Note|Annexure|Schedule|Part|Section N`
+2. the number carries a **dot** — `3.` or `3.2`, never a bare `3`
+3. the title begins with a **capital letter**
+4. the collapsed text is **≤120 characters**
+5. it does not sit adjacent to another candidate **at the same level**
+
+**Every one of those came from a measured false positive**, in this order:
+
+| Added | Because the development filing produced | Detections |
+|---|---|---|
+| — | first attempt | 647 |
+| the dot | `3 Infosys`, `4 EdgeVerve`, `5 Infosys Public` — 20 consecutive rows of a **subsidiary table** read as sections | 341 |
+| run suppression | `1. …`, `2. …`, `3. …` in adjacent blocks — a **CSR projects table** | 264 |
+| capitalised title | `7.6 years`, `63.39 64.50`, `4.7 6.1` — **decimal measurements** | **246** |
+
+A separate defect was fixed alongside: the depth formula counted dots, so `7.` and
+`7.2` both resolved to level 2 and 280 of 341 candidates were misfiled as
+subsections. A trailing dot is punctuation, not depth.
+
+**The bias is deliberate and asymmetric.** Missing a heading merges two sections —
+a longer section, slightly less context. Inventing one attaches a *wrong* heading
+path to every chunk after it, and a chunk claiming to come from "Risk Factors" when
+it comes from the notes is worse than one claiming nothing.
+
+**Known misfires.**
+
+| Misfire | Consequence |
+|---|---|
+| **A heading merged into the preceding block is invisible.** PyMuPDF yields `3 Michael Gibbs Member 4 4 3. Web link(s) for composition of C…` — a table row and the next heading sharing one block | No rule on whole blocks can recover it; the block genuinely contains both. The section boundary is lost |
+| A heading written without a dot, or whose title opens with a digit or lowercase brand name | Not detected. Deliberate — see the bias above |
+| An isolated numbered footnote under a table, e.g. `1. Investments exclude investments in subsidiaries` | Still read as a heading. Run suppression needs a neighbour and this has none |
+| Table rows escape the `table_derived` guard whenever the detector missed the table | ADR-003 measures the detector at 2 of 6 regions, so this is the normal case, not the exception |
+
+**Measured?** Precision, no — the 246 detections have not been checked one by one
+against human judgement. What *is* measured is the removal of three specific
+false-positive classes, each against the text that produced it, each pinned by a
+test. Heading-path accuracy belongs with the Phase 7 retrieval ground truth.
+
+---
+
+## 14. Boilerplate demotion — measured and deliberately not implemented
+
+§18.8 permits excluding page furniture from ranking "when detection is reliable".
+On this corpus it is not, and the measurement is unambiguous. The most repeated
+block texts in a 369-page filing are:
+
+| Repeats | Text | What it actually is |
+|---|---|---|
+| **159** | `(In ₹ crore)` | **the units declaration** |
+| 152 | `2025 2024` | column headers |
+| 58 | `Particulars As at March 31,` | table header |
+| 30 | `Total` | a total row label |
+| 29 | `Accounting policy` | a heading |
+
+A repetition rule would demote the **units declaration** — the single value whose
+loss puts every figure in the document out by a factor of ten million (§17.3). A
+position rule fares no better: `taxation(1)` sits in the top margin and is content.
+
+So nothing is demoted, and §18.8's condition is simply not met. Revisit only with a
+signal that separates running headers from repeated financial labels; repetition
+and page position are both measured to be insufficient.
+
+---
+
+## 15. Not implemented, and recorded so absence is not read as a finding
 
 | Gap | Consequence if forgotten |
 |---|---|
