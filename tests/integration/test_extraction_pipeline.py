@@ -18,7 +18,11 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import text
 
-from finsight.domain.representations.source import ElementType, ExtractionState
+from finsight.domain.representations.source import (
+    ElementType,
+    ExtractionState,
+    Verdict,
+)
 from finsight.extraction.contracts import (
     DocumentUnreadableError,
     UnsupportedFormatError,
@@ -35,19 +39,31 @@ from finsight.object_store.s3_store import build_s3_object_store, dispose_s3_cli
 from finsight.persistence.database import dispose_engine, get_engine, session_scope
 from finsight.persistence.repositories.source import SourceRepository
 from finsight.persistence.tables.documents import DocumentVersion
-from pdf_fixtures import PlacedText, build_encrypted_pdf, build_pdf
+from pdf_fixtures import (
+    PlacedText,
+    build_encrypted_pdf,
+    build_financial_table_pdf,
+    build_pdf,
+)
 
 pytestmark = pytest.mark.integration
 
-CLEANUP = """
+_RUNS = """
+    SELECT id FROM extraction_runs WHERE document_version_id IN (
+        SELECT id FROM document_versions WHERE content_hash = ANY(:hashes)
+    )
+"""
+_ELEMENTS = f"SELECT id FROM source_elements WHERE extraction_run_id IN ({_RUNS})"
+
+CLEANUP = f"""
     UPDATE document_versions SET current_extraction_run_id = NULL
     WHERE content_hash = ANY(:hashes);
 
-    DELETE FROM source_elements WHERE extraction_run_id IN (
-        SELECT id FROM extraction_runs WHERE document_version_id IN (
-            SELECT id FROM document_versions WHERE content_hash = ANY(:hashes)
-        )
-    );
+    DELETE FROM source_tables WHERE source_element_id IN ({_ELEMENTS});
+
+    DELETE FROM source_table_cells WHERE source_element_id IN ({_ELEMENTS});
+
+    DELETE FROM source_elements WHERE extraction_run_id IN ({_RUNS});
 
     DELETE FROM extraction_runs WHERE document_version_id IN (
         SELECT id FROM document_versions WHERE content_hash = ANY(:hashes)
@@ -63,6 +79,11 @@ CLEANUP = """
 The pointer is cleared first: ``document_versions`` references
 ``extraction_runs`` and ``extraction_runs`` references ``document_versions``, so
 neither can be deleted while the pointer still stands.
+
+The semantics extensions go before ``source_elements`` they key to. Until a test
+extracted a table there was nothing in them and their absence here was invisible,
+which is the shape of cleanup bug that surfaces as an unrelated test failing on a
+foreign key much later.
 """
 
 
@@ -254,6 +275,74 @@ class TestIdempotence:
             survivors = SourceRepository(session).elements_for_run(run_id=first.run_id)
 
         assert len(survivors) == first.element_count
+
+
+class TestTableSemantics:
+    """A table's verdict and cell semantics have to survive the database.
+
+    The verdict is the only thing standing between an incompletely extracted
+    statement and an answer, and it is enforced in three places that have to agree:
+    a Python enum, a CHECK constraint, and the value actually written. A unit test
+    exercises the first, a migration the second. This is the only test that proves
+    all three line up.
+    """
+
+    @pytest.fixture
+    def extracted_table(
+        self,
+        extraction: ExtractionService,
+        stored: Callable[..., UUID],
+    ) -> Iterator[list[dict[str, object]]]:
+        version_id = stored(build_financial_table_pdf(marker=uuid4().hex))
+        result = extraction.extract(version_id)
+
+        with session_scope() as session:
+            rows = session.execute(
+                text(
+                    "SELECT t.verdict, t.verdict_reasons, t.quality_signals,"
+                    " t.caption FROM source_tables t"
+                    " JOIN source_elements e ON e.id = t.source_element_id"
+                    " WHERE e.extraction_run_id = :run"
+                ),
+                {"run": result.run_id},
+            )
+            yield [dict(row) for row in rows.mappings()]
+
+    def test_the_table_is_assessed_and_the_verdict_stored(
+        self, extracted_table: list[dict[str, object]]
+    ) -> None:
+        assert len(extracted_table) == 1
+        assert extracted_table[0]["verdict"] == Verdict.ACCEPTED.value
+
+    def test_an_accepted_table_stores_no_reasons(
+        self, extracted_table: list[dict[str, object]]
+    ) -> None:
+        """Which the CHECK permits only because the verdict itself is present."""
+        assert extracted_table[0]["verdict_reasons"] == []
+
+    def test_the_signals_behind_the_verdict_are_stored(
+        self, extracted_table: list[dict[str, object]]
+    ) -> None:
+        """Recorded so an approved baseline has something to calibrate against."""
+        signals = extracted_table[0]["quality_signals"]
+        assert isinstance(signals, dict)
+        assert set(signals) == {
+            "prose_ratio",
+            "numeric_ratio",
+            "filled_ratio",
+            "unassigned_words",
+            "dropped_cells",
+        }
+
+    def test_the_caption_is_still_null(
+        self, extracted_table: list[dict[str, object]]
+    ) -> None:
+        """NULL means "not looked for" here, and no consumer may read it otherwise.
+
+        Asserted rather than assumed, so that the day caption derivation lands this
+        test fails and the claim in the column's docstring gets revisited.
+        """
+        assert extracted_table[0]["caption"] is None
 
 
 class TestCoverageGaps:

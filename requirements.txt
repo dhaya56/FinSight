@@ -1,8 +1,25 @@
+# FinSight pinned dependencies.
+#
+# Generated from a verified environment: clean install, pip check, pip-audit,
+# and the full test suite green (CLAUDE.md §10).
+#
+# The index directive below is required, not optional. Docling runs a layout
+# model on torch, and this host has no accelerator (ENV-001) - so the CPU build
+# is both the correct artefact and the only one that installs here. pip's default
+# wheel is a CUDA build whose kernels cannot execute on integrated graphics, and
+# whose deepest header paths exceed the platform maximum path length, failing the
+# install outright. Without this line "torch==2.14.1+cpu" does not resolve.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+accelerate==1.15.0
 alembic==1.20.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
+antlr4-python3-runtime==4.9.3
 anyio==4.15.1
 ast_serialize==0.11.1
+attrs==26.1.0
+beautifulsoup4==4.15.0
 boolean.py==5.0
 boto3==1.43.96
 botocore==1.43.96
@@ -11,29 +28,62 @@ certifi==2026.7.22
 charset-normalizer==3.5.1
 click==8.5.0
 colorama==0.4.6
+colorlog==6.12.0
 coverage==7.16.0
 cyclonedx-python-lib==11.12.0
 defusedxml==0.7.1
+dill==0.4.1
+doclang==0.7.3
+docling==2.133.0
+docling-core==2.99.0
+docling-ibm-models==4.0.3
+docling-parse==7.22.1
+docling-slim==2.133.0
+et_xmlfile==2.0.0
+Faker==40.40.0
 fastapi==0.141.1
 filelock==3.32.6
+filetype==1.2.0
+fsspec==2026.7.0
 greenlet==3.5.5
 h11==0.16.0
+hf-xet==1.6.0
 httpcore==1.0.9
 httpx==0.28.1
+huggingface_hub==1.33.0
 idna==3.19
 iniconfig==2.3.0
+Jinja2==3.1.6
 jmespath==1.1.0
+jsonref==1.1.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+langcodes==3.5.1
+latex2mathml==3.81.1
 librt==0.15.0
 license-expression==30.4.4
+lxml==6.1.3
+mail-parser==4.8.0
 Mako==1.4.1
 markdown-it-py==4.2.0
+marko==2.2.4
 MarkupSafe==3.0.3
 mdurl==0.1.2
+mpire==2.10.2
+mpmath==1.3.0
 msgpack==1.2.2
+multiprocess==0.70.19
 mypy==2.3.1
 mypy_extensions==1.1.0
+networkx==3.6.1
+numpy==2.5.2
+olefile==0.47
+omegaconf==2.3.1
+opencv-python==5.0.0.93
+openpyxl==3.1.5
 packageurl-python==0.17.6
 packaging==26.3
+pandas==3.0.6
 pathspec==1.1.1
 pillow==12.3.0
 pip-requirements-parser==32.0.1
@@ -41,33 +91,80 @@ pip_api==0.0.35
 pip_audit==2.10.1
 platformdirs==4.11.8
 pluggy==1.6.0
+polyfactory==3.3.0
+psutil==7.2.2
 psycopg==3.3.5
 psycopg-binary==3.3.5
 puremagic==2.2.0
 py-serializable==2.1.0
+pyclipper==1.4.0
 pydantic==2.13.5
 pydantic-settings==2.15.0
 pydantic_core==2.46.5
 Pygments==2.21.0
+pylatexenc==2.11
 pymupdf==1.28.2
 pyparsing==3.3.2
+pypdfium2==5.13.0
 pytest==9.1.1
 pytest-cov==7.1.0
 python-dateutil==2.9.0.post0
+python-docx==1.2.0
 python-dotenv==1.2.3
+python-oxmsg==0.0.2
+python-pptx==1.0.2
+# Windows-only, and has no distribution on any other platform. docling-parse and
+# mpire both declare it under a sys_platform marker; freezing this file on Windows
+# flattened that condition away, so Linux CI failed to resolve it at install time.
+# The marker restores the condition rather than removing the pin, which would
+# leave the Windows build unpinned.
+pywin32==312 ; sys_platform == "win32"
+PyYAML==6.0.3
+rapidocr==3.9.2
+referencing==0.37.0
+regex==2026.9.29
 reportlab==5.0.1
 requests==2.34.2
 rich==15.0.0
+rpds-py==2026.6.3
+rtree==1.4.1
 ruff==0.16.7
 s3transfer==0.19.2
+safetensors==0.8.0
+scipy==1.18.1
+semchunk==3.2.5
+setuptools==84.0.0
+shapely==2.1.2
+shellingham==1.5.4
 six==1.17.0
 sortedcontainers==2.4.0
+soupsieve==2.10
 SQLAlchemy==2.0.52
 starlette==1.6.0
+sympy==1.14.0
+tabulate==0.10.0
+tokenizers==0.23.2
 tomli==2.4.1
 tomli_w==1.2.0
+torch==2.14.1+cpu
+torchvision==0.29.1+cpu
+tqdm==4.70.1
+transformers==5.18.0
+tree-sitter==0.26.0
+tree-sitter-c==0.24.2
+tree-sitter-javascript==0.25.0
+tree-sitter-python==0.25.0
+tree-sitter-typescript==0.23.2
+# Lets Python trust the host's own certificate store, so model artifacts can be
+# staged on a network whose issuer is absent from the bundled CA list without
+# ever disabling verification. Staging-time only: once artifacts are staged and
+# artifacts_path is set, no parse reaches the network.
+truststore==0.10.4
+typer==0.26.8
 typing-inspection==0.4.4
 typing_extensions==4.16.0
 tzdata==2026.4
-urllib3==2.7.0
+urllib3==2.8.0
 uvicorn==0.52.4
+websockets==16.1.1
+xlsxwriter==3.2.9

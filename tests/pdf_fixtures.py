@@ -202,6 +202,108 @@ def build_hyphenated_pdf() -> bytes:
     )
 
 
+# --- Table fixtures (§33.6, table half) -------------------------------------
+
+TABLE_X: Final[tuple[float, ...]] = (60.0, 240.0, 350.0, 460.0)
+TABLE_Y: Final[tuple[float, ...]] = (700.0, 680.0, 660.0, 640.0, 620.0, 600.0, 580.0, 560.0)
+
+TABLE_CONTENT: Final[tuple[tuple[str, int, int], ...]] = (
+    ("Year ended March 31", 1, 0),  # spans the two period columns
+    ("2025", 1, 1),
+    ("2024", 2, 1),
+    ("(Rs in crore)", 0, 2),  # units row, not a header and not data
+    ("Deposits", 0, 3),
+    ("1,234", 1, 3),
+    ("1,100", 2, 3),
+    ("Of which: term deposits", 0, 4),  # indented, so a child of Deposits
+    ("560", 1, 4),
+    # (2, 4) deliberately absent from the content: an empty cell the document has
+    ("Other income (a)", 0, 5),  # footnote marker beside a value
+    ("56", 1, 5),
+    ("40", 2, 5),
+    ("Loss on sale", 0, 6),
+    ("(45)", 1, 6),  # negatives in parentheses, which must not read as markers
+    ("(30)", 2, 6),
+)
+
+INDENTED_LABEL: Final = "Of which: term deposits"
+"""The row whose label is drawn further right, expressing hierarchy by position."""
+
+
+def build_financial_table_pdf(*, ruled: bool = True, marker: str = "") -> bytes:
+    """One financial table, optionally without ruling lines.
+
+    ``marker`` is drawn in the page footer and changes nothing about the table. It
+    exists because intake is content-addressed: two tests building the same bytes
+    receive the same document version, and the second would silently assert against
+    the first one's extraction.
+
+    The two variants are the same table and the whole point of the pair: the
+    ``lines`` strategy reads the ruled one correctly and finds *nothing at all* in
+    the borderless one, while ``text`` finds the borderless one and over-segments
+    it. A single fixture would have made one strategy look simply better than the
+    other rather than differently blind.
+
+    Every awkward case a financial table carries is here on purpose — a header
+    spanning two period columns, a units row that is neither header nor data, an
+    indented sub-item, a genuinely empty cell, a footnote marker next to a value,
+    and parenthesised negatives that must not be mistaken for markers.
+    """
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    pdf.setFont(FONT, 9)
+
+    if ruled:
+        for y in TABLE_Y:
+            pdf.line(TABLE_X[0], y, TABLE_X[-1], y)
+        pdf.line(TABLE_X[0], TABLE_Y[-1], TABLE_X[0], TABLE_Y[0])
+        pdf.line(TABLE_X[1], TABLE_Y[-1], TABLE_X[1], TABLE_Y[0])
+        # Stops below the first row, which is what makes that header span.
+        pdf.line(TABLE_X[2], TABLE_Y[-1], TABLE_X[2], TABLE_Y[1])
+        pdf.line(TABLE_X[3], TABLE_Y[-1], TABLE_X[3], TABLE_Y[0])
+
+    for text, column, row in TABLE_CONTENT:
+        indent = 12.0 if text == INDENTED_LABEL else 4.0
+        pdf.drawString(TABLE_X[column] + indent, TABLE_Y[row + 1] + 6, text)
+
+    if marker:
+        pdf.drawString(TABLE_X[0], 60.0, marker)
+
+    pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
+
+
+def build_rotated_table_pdf(rotation: int) -> bytes:
+    """A ruled table on a rotated page.
+
+    Cell coordinates inherit the trap that cost a real annual report the citation
+    boxes on 78 of its pages: ``find_tables`` reports regions in unrotated space
+    while the page rectangle has rotation applied. This fixture is what makes a
+    missing transform fail a test instead of surfacing as a wrong highlight.
+    """
+    buffer = io.BytesIO()
+    page_size = (PAGE_HEIGHT, PAGE_WIDTH) if rotation in {90, 270} else (PAGE_WIDTH, PAGE_HEIGHT)
+    pdf = canvas.Canvas(buffer, pagesize=page_size)
+    pdf.setPageRotation(rotation)
+    pdf.setFont(FONT, 9)
+
+    left, right = 60.0, 300.0
+    top, bottom = 400.0, 340.0
+    for y in (top, (top + bottom) / 2, bottom):
+        pdf.line(left, y, right, y)
+    for x in (left, (left + right) / 2, right):
+        pdf.line(x, bottom, x, top)
+    pdf.drawString(left + 4, top - 14, "Revenue")
+    pdf.drawString((left + right) / 2 + 4, top - 14, "1,234")
+    pdf.drawString(left + 4, bottom + 6, "Total")
+    pdf.drawString((left + right) / 2 + 4, bottom + 6, "1,234")
+
+    pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
+
+
 # --- Negative fixtures (§33.9) ----------------------------------------------
 
 

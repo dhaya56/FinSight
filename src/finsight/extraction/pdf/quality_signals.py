@@ -18,6 +18,28 @@ from dataclasses import dataclass
 from typing import Final
 
 NO_TEXT_EXTRACTED: Final = "no_text_extracted"
+
+TABLE_CELLS_DROPPED: Final = "table_cells_dropped"
+"""A detector discarded cells it could not place into the table's grid.
+
+Recorded on the table element so the run becomes ``partial`` rather than
+``succeeded``. The loss is real and unrecoverable at this layer — the point is that
+an incomplete table must not present as a complete one.
+"""
+
+TABLE_REGION_UNSUPPORTED: Final = "table_region_unsupported"
+"""A region claimed a table where the page draws no ruling lines, though it draws
+some elsewhere.
+
+Measured on two of six real pages: a detector proposed a grid over two-column
+prose and over an image, while each page's actual table was proposed by nothing
+(ENV-008 §2.5). Both passed the content-based quality gate, because a paragraph
+shredded into a grid has short cells.
+
+A gap rather than a deletion. The region is refused as evidence by its verdict,
+and this keeps the failure visible in the run state instead of letting a page that
+lost its table report success.
+"""
 """Recorded as a page's ``failure_reason`` when it yielded no blocks at all.
 
 A short stable code, never a message: later phases count and surface these, and

@@ -36,6 +36,7 @@ from typing import Final
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -47,10 +48,14 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy import text as sql_text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from finsight.domain.representations.source import ElementType, ExtractionState
+from finsight.domain.representations.source import (
+    ElementType,
+    ExtractionState,
+    Verdict,
+)
 from finsight.persistence.tables.base import Base
 
 FORMAT_PDF: Final = "pdf"
@@ -70,6 +75,7 @@ def _quoted_list(values: tuple[str, ...]) -> str:
 _FORMAT_LIST: Final = _quoted_list(EXTRACTION_FORMATS)
 _STATE_LIST: Final = _quoted_list(tuple(state.value for state in ExtractionState))
 _ELEMENT_TYPE_LIST: Final = _quoted_list(tuple(kind.value for kind in ElementType))
+_VERDICT_LIST: Final = _quoted_list(tuple(verdict.value for verdict in Verdict))
 
 
 class ExtractionRun(Base):
@@ -221,3 +227,190 @@ class SourceElement(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class SourceTable(Base):
+    """What a table means, keyed one-to-one to its ``table`` source element.
+
+    A separate table for one nullable column looks like overhead until you ask
+    where else the caption could go. On ``source_elements`` it would be a column
+    meaningful for one element type in four; inside ``location`` it would break
+    the addresses-only rule the whole schema rests on; repeated on each cell it
+    would be stored a hundred times per table. This is also where §12.8's
+    continuation link will attach when joining continued tables is in scope.
+    """
+
+    __tablename__ = "source_tables"
+    __table_args__ = (
+        CheckConstraint(
+            f"verdict IS NULL OR verdict IN ({_VERDICT_LIST})", name="verdict_known"
+        ),
+        CheckConstraint(
+            "array_position(verdict_reasons, NULL) IS NULL",
+            name="verdict_reasons_has_no_nulls",
+        ),
+        CheckConstraint(
+            "verdict IS NOT NULL OR cardinality(verdict_reasons) = 0",
+            name="verdict_reasons_need_a_verdict",
+        ),
+        CheckConstraint(
+            "quality_signals IS NULL OR jsonb_typeof(quality_signals) = 'object'",
+            name="quality_signals_is_object",
+        ),
+    )
+    """``verdict_reasons_need_a_verdict`` is the one worth reading twice.
+
+    Reasons without a verdict would be grounds for a judgement nobody made, and a
+    consumer filtering on ``verdict`` would skip the row while a consumer reading
+    the reasons would act on it. The database refuses the state rather than leaving
+    two answers available.
+    """
+
+    source_element_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("source_elements.id"), primary_key=True
+    )
+
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The table's caption as the producer read it, verbatim (§12.6).
+
+    **Currently always NULL, and that is a gap rather than a finding.** No detector
+    in use reports a caption and nothing yet looks for one, so NULL here means "not
+    looked for" — the opposite of what a reader would reasonably assume. Caption
+    derivation is tracked in the reconstruction limitation register; until it
+    lands, no consumer may treat NULL as evidence that a table is uncaptioned.
+    """
+
+    continuation_of: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """Title of the statement this table continues, verbatim (§12.8).
+
+    Set only from the document's own "(continued)" heading. NULL means no such
+    heading was found, **never** that the table stands alone: one development
+    filing declares continuations 91 times and another declares none, so absence
+    here is a property of the publisher's house style.
+
+    This is where §12.8's continuation link was always going to attach. It carries
+    a title rather than a foreign key because the join it would encode is an
+    inference, and this column is a quotation.
+    """
+
+    verdict: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    """Whether this table may be used as evidence.
+
+    ``accepted``, ``review_required`` or ``rejected``. Retrieval filters on it:
+    only an accepted table is evidence, which is what stops an incomplete balance
+    sheet from answering a question about one.
+    """
+
+    verdict_reasons: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=sql_text("'{}'::text[]")
+    )
+    """Machine-readable grounds for the verdict, so it can be re-examined."""
+
+    quality_signals: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    """The measurements the verdict rested on.
+
+    JSONB rather than columns because the set will grow as the ground truth
+    calibrates it, and because nothing queries an individual signal yet. When one
+    becomes a filter it earns a column.
+    """
+
+
+class SourceTableCell(Base):
+    """What a cell means: its header path, row-label path and footnotes (§17.2).
+
+    Arrays rather than JSONB, and rather than a delimited string. The blueprint's
+    reason for extension tables is that semantics land as "typed, constrained,
+    indexable columns"; ``text[]`` is all three, and a delimiter would become
+    ambiguous the first time a header contains it — which, for financial headings
+    like "Revenue / (loss)", is immediately.
+    """
+
+    __tablename__ = "source_table_cells"
+    __table_args__ = (
+        CheckConstraint(
+            "array_position(header_path, NULL) IS NULL",
+            name="header_path_has_no_nulls",
+        ),
+        CheckConstraint(
+            "array_position(row_label_path, NULL) IS NULL",
+            name="row_label_path_has_no_nulls",
+        ),
+        CheckConstraint(
+            "array_position(footnote_refs, NULL) IS NULL",
+            name="footnote_refs_has_no_nulls",
+        ),
+    )
+    """A NULL inside a path array would be a hole in a citation trail.
+
+    The column being NOT NULL says nothing about its elements, and
+    ``text[]{'Year ended', NULL}`` would render as a header path with a gap that
+    no consumer could distinguish from a genuine empty heading.
+    """
+
+    source_element_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("source_elements.id"), primary_key=True
+    )
+
+    header_path: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=sql_text("'{}'::text[]")
+    )
+    """The column headers above this cell, outermost first.
+
+    Empty rather than NULL when the cell has none, so a consumer never has to
+    distinguish the two. Phase 4 lost an afternoon to a CHECK constraint that
+    passed on NULL; not offering the NULL is cheaper than handling it.
+    """
+
+    row_label_path: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=sql_text("'{}'::text[]")
+    )
+    """The row labels to the left of this cell, outermost first — so an indented
+    "Of which: term deposits" keeps its parent line item."""
+
+    footnote_refs: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=sql_text("'{}'::text[]")
+    )
+    """Footnote markers attached to this cell, as read: ``("a",)``, ``("2",)``.
+
+    Kept apart from ``text`` so a marker cannot be mistaken for part of a value.
+    "1,234 (a)" parsed as a number is either a failure or, worse, 1234 with the
+    marker silently dropped.
+    """
+
+    is_header: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("false")
+    )
+    """Whether this cell labels other cells rather than carrying a value.
+
+    Stored rather than derived from ``row_index == 0``: financial tables open with
+    units rows, blank rows and two-level headers often enough that position does
+    not identify a header.
+    """
+
+    is_total: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("false")
+    )
+    """Whether this cell's row announces itself as an aggregate of other rows.
+
+    A column rather than a derivation, because the only way to recover it later is
+    to re-read the row's label with the same vocabulary — and the vocabulary will
+    change as it is measured, so a stored flag records what *this* extraction
+    believed rather than what today's rule would say.
+
+    **False is not evidence of a line item.** The rule reads the label only, and
+    "Profit before tax" is an aggregate carrying no such word. A consumer summing a
+    column must treat this as a partial safeguard against double counting, never a
+    complete one.
+    """
+
+    units: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The units declaration governing this cell, verbatim (§17.3).
+
+    Per cell, not per table, because §17.3 requires table-level *and column-level*
+    context and a table-wide column cannot express a scale note that governs one
+    column. NULL means no declaration was found — never that the figure is
+    unscaled, a distinction §16 depends on when it refuses to normalise a value it
+    cannot place.
+    """

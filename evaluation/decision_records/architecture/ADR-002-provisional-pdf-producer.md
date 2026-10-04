@@ -6,6 +6,19 @@
 - **Decision:** build Phase 4 on **PyMuPDF** as the PDF producer, behind a producer protocol that keeps the choice reversible.
 - **This is not a production parser selection.** CLAUDE.md §4 reserves parser selection for a recorded evaluation with developer approval, and §8 forbids choosing a winner by intuition. No evaluation has been run. Admission of a production parser remains deferred to PROJECT_BLUEPRINT.md §12.12.
 
+> **Annotation, 2026-10-03 (Phase 6).** Two things are now measured that this
+> record could only assume.
+>
+> As a **text producer** PyMuPDF is strengthened: 184–220 pages/s on real filings,
+> no replacement characters, all fonts embedded, geometry correct once the rotation
+> transform was fixed (ENV-005). Its **table detection** is disqualified —
+> **ADR-003**, on 0 of 10 correctly bounded regions. Those are separate
+> capabilities of the same library, and only the second is ruled out.
+>
+> This record's provisionality was always that the §12.2/§12.4/§12.9 routing did
+> not exist, not that PyMuPDF was suspect. Parser admission remains ADR-004's;
+> detection is settled for now by ADR-003.
+
 ## Context
 
 §10.6's third arrow needs *some* producer before extraction can exist at all, and a comparative evaluation needs real filings, a golden set, and development data that Phase 4 does not have. Waiting for the evaluation would mean building nothing; choosing permanently would mean deciding without evidence. The way out is to make the choice cheap to reverse and to say plainly that it is provisional.

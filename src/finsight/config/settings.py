@@ -175,6 +175,19 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ---------------------------------------------------------------- Extraction
+
+    docling_artifacts_path: str | None = Field(
+        default=None,
+        description=(
+            "Directory holding pre-staged Docling model artifacts, as "
+            "scripts/stage_docling_models.py populates. When set, a missing model "
+            "raises instead of being downloaded mid-parse, which is what §20.6 "
+            "requires and what the restricted parser worker (§11.7) depends on. "
+            "None keeps Docling's own default, which downloads on first use."
+        ),
+    )
+
     # ----------------------------------------------------------------- Ingestion
 
     upload_max_bytes: int = Field(

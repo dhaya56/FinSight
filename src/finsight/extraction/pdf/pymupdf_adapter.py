@@ -41,6 +41,9 @@ starts. A different producer may legitimately return different text for the same
 page, which is why the method is recorded per element.
 """
 
+import io
+from collections.abc import Sequence
+from dataclasses import replace
 from typing import IO, Final
 
 import pymupdf
@@ -50,30 +53,81 @@ from finsight.domain.representations.source import (
     ElementType,
     ExtractedElement,
     PageLocation,
+    Verdict,
 )
 from finsight.extraction.contracts import DocumentUnreadableError
-from finsight.extraction.pdf.quality_signals import NO_TEXT_EXTRACTED, PageSignals
+from finsight.extraction.pdf.geometry import displayed_bbox, horizontal_rules
+from finsight.extraction.pdf.pymupdf_tables import (
+    STRATEGY_LINES,
+    PyMuPdfTableDetector,
+)
+from finsight.extraction.pdf.quality_signals import (
+    NO_TEXT_EXTRACTED,
+    TABLE_CELLS_DROPPED,
+    TABLE_REGION_UNSUPPORTED,
+    PageSignals,
+)
 from finsight.extraction.pdf.reading_order import reading_order_key
+from finsight.extraction.tables.adjacency import bind_footnotes, continuation_title
+from finsight.extraction.tables.contracts import DetectedTable, TableDetector
+from finsight.extraction.tables.elements import to_element
+from finsight.extraction.tables.regions import UNSUPPORTED, review
+from finsight.extraction.tables.structure import DerivedTable, derive
+from finsight.extraction.tables.validation import TableQuality, assess
 
 _TEXT_BLOCK: Final = 0
 """PyMuPDF's block-type marker for text. Image blocks carry 1."""
 
 
 class PyMuPdfProducer:
-    """Produces page and block elements from PDF bytes using PyMuPDF."""
+    """Produces page, block, table and cell elements from PDF bytes.
+
+    **Two engines, each doing what it is best at.** Pages, blocks, narrative text
+    and geometry come from PyMuPDF, which is correct and roughly two orders of
+    magnitude faster. Tables come from an injected detector, because measurement
+    showed PyMuPDF cannot bound them: across ten hand-reviewed pages its best
+    configuration merged four tables on one page into a single grid with a
+    paragraph sliced across eleven columns, while Docling returned the four
+    separately and matched the human count on 8 of 10 pages against 6.
+
+    That is the per-page routing §12.9 describes, and the schema already carries
+    it: ``extraction_method`` sits on each element, so one run may legitimately
+    record blocks from one producer and cells from another.
+
+    The detector is injected rather than chosen here. Admission of a production
+    detector is ADR-003's, and a producer that hard-coded one would make that
+    decision by default.
+    """
 
     METHOD: Final = "pymupdf"
+
+    def __init__(self, table_detector: TableDetector | None = None) -> None:
+        self._tables: TableDetector = (
+            table_detector
+            if table_detector is not None
+            else PyMuPdfTableDetector(strategy=STRATEGY_LINES)
+        )
 
     @property
     def method(self) -> str:
         return self.METHOD
 
     @property
+    def table_strategy(self) -> str:
+        """Which table detector and strategy this producer is configured with."""
+        return f"{self._tables.method}:{self._tables.strategy}"
+
+    @property
     def method_version(self) -> str:
         return str(pymupdf.__version__)
 
     def produce(self, source: IO[bytes]) -> tuple[ExtractedElement, ...]:
-        """Read every page and return it with its blocks attached.
+        """Read every page and return it with its blocks and tables attached.
+
+        Table detection runs **once for the whole document** rather than per page.
+        A layout model loads its weights on first use and holds them, so calling it
+        per page would pay that repeatedly; and a detector may legitimately need
+        the document to resolve a table continued across a page break.
 
         Takes a stream to satisfy the producer protocol, but PyMuPDF parses from
         a buffer, so the document is read into memory here. That is a real limit
@@ -84,6 +138,8 @@ class PyMuPdfProducer:
             DocumentUnreadableError: the document is encrypted or unparsable.
         """
         data = source.read()
+        detected = self._tables.detect(io.BytesIO(data))
+
         try:
             document = pymupdf.open(stream=data, filetype="pdf")
         except (RuntimeError, ValueError) as error:
@@ -93,10 +149,16 @@ class PyMuPdfProducer:
             if document.needs_pass:
                 raise DocumentUnreadableError("the document is password protected")
             return tuple(
-                self._page(document, index) for index in range(document.page_count)
+                self._page(document, index, detected.get(index + 1, ()))
+                for index in range(document.page_count)
             )
 
-    def _page(self, document: pymupdf.Document, index: int) -> ExtractedElement:
+    def _page(
+        self,
+        document: pymupdf.Document,
+        index: int,
+        detected: Sequence[DetectedTable],
+    ) -> ExtractedElement:
         page = document[index]
         page_number = index + 1
         locator = f"p. {page_number}"
@@ -110,10 +172,30 @@ class PyMuPdfProducer:
         ]
         placed.sort(key=lambda item: reading_order_key(item[0]))
 
-        blocks = tuple(
-            self._block(ordinal, bbox, text, locator=locator)
-            for ordinal, (bbox, text) in enumerate(placed)
+        reviewed = review(
+            [candidate.bbox for candidate in detected], horizontal_rules(page)
         )
+
+        tables = [derive(candidate) for candidate in detected]
+        gaps = [
+            _coverage_gap(candidate, missed=index in reviewed.unsupported)
+            for index, candidate in enumerate(detected)
+        ]
+        quality = [
+            _assess_region(
+                candidate, derived, unsupported=index in reviewed.unsupported
+            )
+            for index, (candidate, derived) in enumerate(
+                zip(detected, tables, strict=True)
+            )
+        ]
+
+        children = self._ordered_children(
+            placed, tables, gaps, quality, locator=locator
+        )
+        blocks = [
+            child for child in children if child.element_type is ElementType.BLOCK
+        ]
         signals = PageSignals(
             text_block_count=len(text_entries),
             image_block_count=len(entries) - len(text_entries),
@@ -133,7 +215,76 @@ class PyMuPdfProducer:
             extraction_method=self.method,
             extraction_method_version=self.method_version,
             failure_reason=NO_TEXT_EXTRACTED if signals.yielded_nothing else None,
-            children=blocks,
+            children=children,
+        )
+
+    def _ordered_children(
+        self,
+        placed: list[tuple[tuple[float, float, float, float], str]],
+        tables: list[DerivedTable],
+        gaps: list[str | None],
+        quality: list[TableQuality],
+        *,
+        locator: str,
+    ) -> tuple[ExtractedElement, ...]:
+        """Order a page's blocks and tables together by position.
+
+        Blocks and tables share one ordinal sequence because they share a page,
+        and ``ordinal`` records reading order as the producer judged it. Appending
+        tables after the blocks would have been easier and would have asserted that
+        every table sits below every paragraph.
+
+        **Text inside a table is emitted twice**, once as the blocks PyMuPDF
+        reports for the page and once as cells. That is deliberate and it is not
+        free. Suppressing the overlapping blocks would mean a false-positive table
+        deletes narrative prose from the block stream — and §18 is explicit that
+        boilerplate-style exclusion is a reversible *ranking* decision, never a
+        destructive one. So both representations are stored, both are separately
+        citable, and §18.4's table-aware chunking is what must avoid retrieving the
+        same sentence twice. Recorded as a risk rather than resolved here.
+        """
+        blocks: list[tuple[tuple[float, float, float, float], ExtractedElement]] = [
+            (bbox, self._block(0, bbox, text, locator=locator))
+            for bbox, text in placed
+        ]
+        others = [derived.bbox for derived in tables]
+        # Numbered in reading order, because the locator says "table 2" and a
+        # reader counts tables down the page. Built here rather than from the
+        # page ordinal applied below: that one counts blocks too, so it would
+        # address the second table on a page as "table 9".
+        ordered = sorted(
+            zip(tables, gaps, quality, strict=True),
+            key=lambda item: reading_order_key(item[0].bbox),
+        )
+        table_elements = [
+            (
+                derived.bbox,
+                to_element(
+                    derived,
+                    ordinal=index,
+                    method=self._tables.method,
+                    method_version=self._tables.method_version,
+                    failure_reason=gap,
+                    quality=verdict,
+                    continuation_of=continuation_title(derived.bbox, placed),
+                    footnotes=bind_footnotes(
+                        derived.bbox,
+                        sorted(
+                            {ref for cell in derived.cells for ref in cell.footnote_refs}
+                        ),
+                        placed,
+                        [box for box in others if box != derived.bbox],
+                    ),
+                ),
+            )
+            for index, (derived, gap, verdict) in enumerate(ordered)
+        ]
+
+        combined = blocks + table_elements
+        combined.sort(key=lambda item: reading_order_key(item[0]))
+        return tuple(
+            _with_ordinal(element, ordinal)
+            for ordinal, (_, element) in enumerate(combined)
         )
 
     def _block(
@@ -159,12 +310,61 @@ def _displayed_bbox(
     entry: tuple[float, float, float, float, str, int, int],
     rotation_matrix: pymupdf.Matrix,
 ) -> tuple[float, float, float, float]:
-    """Move a block's box from unrotated page space into displayed space.
+    """Move a block's box from unrotated page space into displayed space."""
+    return displayed_bbox(entry[0], entry[1], entry[2], entry[3], rotation_matrix)
 
-    The identity matrix on an unrotated page, so this costs nothing and is
-    applied unconditionally rather than behind a rotation check — a conditional
-    would be one more place for the two coordinate spaces to drift apart.
+
+def _assess_region(
+    detected: DetectedTable, derived: DerivedTable, *, unsupported: bool
+) -> TableQuality:
+    """Judge a table, refusing one the page's typography does not support.
+
+    The quality gate reads a region's contents; this adds the one thing its
+    contents cannot show, which is whether the page draws any rules where the
+    region claims a table. ENV-008 §2.5 measured why that matters: a paragraph
+    segmented into an 18x8 grid has short cells, trips no prose rule, and was
+    accepted while the page's real table went undetected.
     """
-    box = pymupdf.Rect(entry[0], entry[1], entry[2], entry[3]) * rotation_matrix
-    box.normalize()
-    return (box.x0, box.y0, box.x1, box.y1)
+    quality = assess(detected, derived)
+    if not unsupported:
+        return quality
+    return replace(
+        quality,
+        verdict=Verdict.REJECTED,
+        reasons=(*quality.reasons, UNSUPPORTED),
+    )
+
+
+def _coverage_gap(detected: DetectedTable, *, missed: bool = False) -> str | None:
+    """Why a table should be treated as incomplete, or None when it is whole.
+
+    ``missed`` marks a region the page's ruling lines do not support. It is a gap
+    rather than a silent drop because §11.11 turns a run containing one into
+    ``partial``: the region is refused as evidence while the fact that extraction
+    went wrong here stays visible.
+
+    A detector that discards cells it cannot place reports that loss nowhere in its
+    return value — measured at 4 of 35 cells on one real table, 11% of a financial
+    table gone. §11.11 exists for exactly this: a region that failed to yield its
+    content is a recorded gap, not a missing row, and ``derive_state`` turns a run
+    containing one into ``partial`` rather than ``succeeded``.
+
+    Reported rather than repaired. Nothing here can recover a cell the detector
+    threw away, and presenting an 11%-incomplete balance sheet as whole is the
+    failure this guards against.
+    """
+    if missed:
+        return str(TABLE_REGION_UNSUPPORTED)
+    if detected.dropped_cells >= 1.0:
+        return str(TABLE_CELLS_DROPPED)
+    return None
+
+
+def _with_ordinal(element: ExtractedElement, ordinal: int) -> ExtractedElement:
+    """Return the element with its page ordinal set.
+
+    Elements are frozen, so position is applied once the full set of a page's
+    children is known and sorted. A table's own cells keep the ordinals they were
+    built with, since those index a grid rather than a page.
+    """
+    return replace(element, ordinal=ordinal)

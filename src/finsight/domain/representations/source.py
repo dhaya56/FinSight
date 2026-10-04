@@ -49,13 +49,28 @@ class InvalidSourceElementError(DomainError):
 class ElementType(StrEnum):
     """The kind of structural element a row represents.
 
-    Only the two the PDF path produces today exist. A new format widens this and
-    the matching CHECK constraint by one additive line each; nothing downstream
-    changes, because consumers reference an element by id, not by shape.
+    A new format widens this and the matching CHECK constraint by one additive
+    line each; nothing downstream changes, because consumers reference an element
+    by id, not by shape.
+
+    ``FOOTNOTE`` is a child of the table whose markers refer to it, even though it
+    is drawn on the page beneath that table. The containment that matters for
+    citation is the semantic one: a cell's ``footnote_refs`` resolve among its own
+    table's footnotes, and a qualifier that changes what a number means belongs
+    with the number rather than with the page it happened to be printed on.
+
+    There is deliberately **no** ``row``. §14.5 enumerates page, section, block,
+    table, cell and span, and a row is recoverable from a cell's ``row_index``
+    without spending an element on it — a 20-by-8 table costs 161 rows this way
+    against 181 with a row level. Row *grouping* for retrieval (§17.5) is a
+    retrieval representation and does not belong here at all.
     """
 
     PAGE = "page"
     BLOCK = "block"
+    TABLE = "table"
+    CELL = "cell"
+    FOOTNOTE = "footnote"
 
 
 class ExtractionState(StrEnum):
@@ -69,6 +84,23 @@ class ExtractionState(StrEnum):
     SUCCEEDED = "succeeded"
     PARTIAL = "partial"
     FAILED = "failed"
+
+
+class Verdict(StrEnum):
+    """What may be done with a table.
+
+    Here rather than beside the rules that produce it, because it is what retrieval
+    filters on and what the schema constrains: the enum, the CHECK constraint and
+    the stored value have to agree, and only one of those three lives in extraction.
+
+    ``REVIEW_REQUIRED`` is the important member. A system that only accepts or
+    rejects has to guess about the middle, and guessing in favour of acceptance is
+    how a partially extracted balance sheet becomes an answer.
+    """
+
+    ACCEPTED = "accepted"
+    REVIEW_REQUIRED = "review_required"
+    REJECTED = "rejected"
 
 
 _ROTATIONS: Final[frozenset[int]] = frozenset({0, 90, 180, 270})
@@ -93,6 +125,45 @@ def _require_exact_keys(
     raise InvalidSourceElementError(
         f"{kind} location keys are wrong: missing={missing} unknown={unknown}"
     )
+
+
+def _check_bbox(bbox: tuple[float, float, float, float]) -> None:
+    """Reject a box that is not top-left to bottom-right in displayed space.
+
+    Shared by every box-shaped location so the convention is enforced in exactly
+    one place. A block, a table and a cell are all rectangles on a page and all
+    inherit the same trap: a silently flipped axis leaves stored citations
+    pointing at the mirror image of their evidence.
+    """
+    if len(bbox) != 4:
+        raise InvalidSourceElementError("bbox must hold four coordinates")
+    x0, y0, x1, y1 = bbox
+    if x1 < x0 or y1 < y0:
+        raise InvalidSourceElementError(
+            "bbox must run top-left to bottom-right with y increasing downward"
+        )
+
+
+def _bbox_from(raw: Any) -> tuple[float, float, float, float]:
+    """Parse a stored bbox payload into four floats."""
+    if not isinstance(raw, Sequence) or isinstance(raw, str | bytes):
+        raise InvalidSourceElementError("bbox must be a sequence of four numbers")
+    if len(raw) != 4:
+        raise InvalidSourceElementError("bbox must hold four coordinates")
+    x0, y0, x1, y1 = (float(value) for value in raw)
+    return (x0, y0, x1, y1)
+
+
+def _non_negative(value: int, field: str) -> int:
+    if value < 0:
+        raise InvalidSourceElementError(f"{field} must not be negative")
+    return value
+
+
+def _at_least_one(value: int, field: str) -> int:
+    if value < 1:
+        raise InvalidSourceElementError(f"{field} must be at least 1")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,13 +232,7 @@ class BlockLocation:
     bbox: tuple[float, float, float, float]
 
     def __post_init__(self) -> None:
-        if len(self.bbox) != 4:
-            raise InvalidSourceElementError("bbox must hold four coordinates")
-        x0, y0, x1, y1 = self.bbox
-        if x1 < x0 or y1 < y0:
-            raise InvalidSourceElementError(
-                "bbox must run top-left to bottom-right with y increasing downward"
-            )
+        _check_bbox(self.bbox)
 
     def to_mapping(self) -> dict[str, Any]:
         return {"bbox": list(self.bbox)}
@@ -175,20 +240,102 @@ class BlockLocation:
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> "BlockLocation":
         _require_exact_keys(mapping, frozenset({"bbox"}), "block")
-        raw = mapping["bbox"]
-        if not isinstance(raw, Sequence) or isinstance(raw, str | bytes):
-            raise InvalidSourceElementError("bbox must be a sequence of four numbers")
-        if len(raw) != 4:
-            raise InvalidSourceElementError("bbox must hold four coordinates")
-        x0, y0, x1, y1 = (float(value) for value in raw)
-        return cls(bbox=(x0, y0, x1, y1))
+        return cls(bbox=_bbox_from(mapping["bbox"]))
 
 
-SourceLocation = PageLocation | BlockLocation
+@dataclass(frozen=True, slots=True)
+class TableLocation:
+    """Where a table's bounding region sits on its page (§12.6).
 
-_LOCATION_FOR_TYPE: Final[dict[ElementType, type[PageLocation] | type[BlockLocation]]] = {
+    A table belongs to exactly one page. A table continued across a page break
+    (§12.8) is therefore two table elements, which is what keeps §12.8's
+    requirement that "page-specific source cells remain addressable" true by
+    construction. Linking the halves is a later concern and deliberately has no
+    column here: an unpopulated continuation pointer would be a placeholder for a
+    phase that has not started (CLAUDE.md §11).
+    """
+
+    bbox: tuple[float, float, float, float]
+
+    def __post_init__(self) -> None:
+        _check_bbox(self.bbox)
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {"bbox": list(self.bbox)}
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "TableLocation":
+        _require_exact_keys(mapping, frozenset({"bbox"}), "table")
+        return cls(bbox=_bbox_from(mapping["bbox"]))
+
+
+@dataclass(frozen=True, slots=True)
+class CellLocation:
+    """Where a cell sits, both on the page and in its table's grid.
+
+    The grid position is here rather than in the semantics extension because it
+    is an *address*, in the same sense as ``Sheet1!B7``: it says where the cell
+    is, not what it means. ``row_span`` and ``column_span`` come with it because a
+    merged cell's address includes its extent, exactly as a bbox does.
+
+    Recording spans at all is what makes a flattened spanning header detectable.
+    A detector that collapses "Year ended March 31" spanning two columns into one
+    single-column cell is not obviously wrong from its text; it is obviously wrong
+    from its span, and §17.2's header path is what would silently mislabel every
+    number beneath it.
+    """
+
+    bbox: tuple[float, float, float, float]
+    row_index: int
+    column_index: int
+    row_span: int = 1
+    column_span: int = 1
+
+    def __post_init__(self) -> None:
+        _check_bbox(self.bbox)
+        _non_negative(self.row_index, "row_index")
+        _non_negative(self.column_index, "column_index")
+        _at_least_one(self.row_span, "row_span")
+        _at_least_one(self.column_span, "column_span")
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "bbox": list(self.bbox),
+            "row_index": self.row_index,
+            "column_index": self.column_index,
+            "row_span": self.row_span,
+            "column_span": self.column_span,
+        }
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "CellLocation":
+        _require_exact_keys(
+            mapping,
+            frozenset(
+                {"bbox", "row_index", "column_index", "row_span", "column_span"}
+            ),
+            "cell",
+        )
+        return cls(
+            bbox=_bbox_from(mapping["bbox"]),
+            row_index=int(mapping["row_index"]),
+            column_index=int(mapping["column_index"]),
+            row_span=int(mapping["row_span"]),
+            column_span=int(mapping["column_span"]),
+        )
+
+
+SourceLocation = PageLocation | BlockLocation | TableLocation | CellLocation
+
+_LOCATION_FOR_TYPE: Final[dict[ElementType, type[SourceLocation]]] = {
     ElementType.PAGE: PageLocation,
     ElementType.BLOCK: BlockLocation,
+    ElementType.TABLE: TableLocation,
+    ElementType.CELL: CellLocation,
+    # A footnote is a text region like any block: a box and nothing more. Its
+    # relationship to a table is containment, which the tree carries, not an
+    # address — so it needs no location shape of its own.
+    ElementType.FOOTNOTE: BlockLocation,
 }
 
 
@@ -199,6 +346,119 @@ def location_from_mapping(
     """Rebuild a location from a stored JSONB payload."""
     location_type = _LOCATION_FOR_TYPE[element_type]
     return location_type.from_mapping(mapping)
+
+
+@dataclass(frozen=True, slots=True)
+class TableSemantics:
+    """What a table means, and whether it may be trusted.
+
+    ``caption`` is the only table-level *meaning* §12.6 names that is not derivable
+    from the cells beneath it.
+
+    The rest is a quality verdict, kept on the table because that is the unit a
+    reader cites and the unit retrieval includes or excludes. A table that is
+    incomplete or that was never a table must be refusable, and refusing it is only
+    possible if the judgement travels with it.
+    """
+
+    caption: str | None = None
+    verdict: Verdict | None = None
+    """The quality verdict, or None when the table was never assessed.
+
+    Only an accepted table is evidence. None is not a fourth verdict and must not
+    be read as one: it says no judgement was formed, which is why
+    :class:`~finsight.extraction.tables.validation.TableQuality` has no such
+    member and an unassessed table writes no semantics row at all.
+    """
+
+    continuation_of: str | None = None
+    """Title of the statement this table continues, from the document's own
+    "(continued)" heading, or None when no such heading was found (§12.8).
+
+    **None is not evidence that a table is not a continuation.** One development
+    document declares continuations 91 times and another declares none at all, so
+    this records a declaration, never its absence.
+
+    A title rather than a link to the earlier table. The document states what is
+    continued; which stored region holds the earlier part is an inference across
+    regions measured as frequently mis-bounded, and asserting it would dress a
+    guess as provenance.
+    """
+
+    verdict_reasons: tuple[str, ...] = ()
+    """Why, in machine-readable terms, so a verdict can be re-examined."""
+
+    quality_signals: Mapping[str, float] | None = None
+    """The measurements behind the verdict.
+
+    Stored rather than discarded because none of the graded cutoffs is calibrated
+    yet — CLAUDE.md §9 keeps threshold gates informational until an approved
+    baseline defines them, and a verdict without its evidence cannot be revisited
+    when that baseline arrives.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class CellSemantics:
+    """What a cell means (§17.2): its header path, row-label path and footnotes.
+
+    Both paths are ordered outermost-first, so ``("Year ended March 31", "2025")``
+    reads as a spanning header narrowing to a column. They are tuples rather than
+    a joined string because a delimiter would be ambiguous the moment a header
+    contains it, and because the persistence side stores them as typed arrays.
+
+    ``is_header`` marks a cell that labels others rather than carrying a value.
+    It is stored rather than inferred from ``row_index == 0``: financial tables
+    routinely open with a units row, a blank row, or two header rows, so position
+    does not identify a header.
+
+    Nothing here is interpreted. A header path records the text a header cell
+    held; deciding that "FY2024" denotes a period is §16 work, and this module
+    preserves and interprets nothing.
+    """
+
+    header_path: tuple[str, ...] = ()
+    row_label_path: tuple[str, ...] = ()
+    footnote_refs: tuple[str, ...] = ()
+    is_header: bool = False
+    is_total: bool = False
+    """Whether this cell's row announces itself as an aggregate of other rows.
+
+    Retrieval and any future aggregation need it: a total's figure is
+    indistinguishable from a line item's, and summing a column that contains one
+    double-counts everything beneath it.
+    """
+
+    units: str | None = None
+    """The units declaration governing this cell, verbatim, or None.
+
+    Per cell rather than per table because §17.3 requires "table-level **and
+    column-level**" unit context: a scale note above one column governs that
+    column, and applying it table-wide would misscale every other column. A table
+    mixing crore figures with percentages is the ordinary case, not the exotic one.
+
+    Verbatim and uninterpreted. Turning "Rs in crore" into a factor of 10^7 is
+    §16's work; None means no declaration was found, never that the figures are
+    unscaled.
+    """
+
+
+ElementSemantics = TableSemantics | CellSemantics
+
+_SEMANTICS_FOR_TYPE: Final[dict[ElementType, type[ElementSemantics]]] = {
+    ElementType.TABLE: TableSemantics,
+    ElementType.CELL: CellSemantics,
+}
+
+_TYPES_WITH_CHILDREN: Final[frozenset[ElementType]] = frozenset(
+    {ElementType.PAGE, ElementType.TABLE}
+)
+"""Which element types may contain others.
+
+Stated as the containers rather than the leaves. The rule it replaces named only
+``block``, which would have silently permitted a cell to hold children the moment
+cells existed.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +481,14 @@ class ExtractedElement:
     text: str | None = None
     failure_reason: str | None = None
     children: tuple["ExtractedElement", ...] = ()
+    semantics: ElementSemantics | None = None
+    """Typed meaning for the element types that have any, None for the rest.
+
+    Mirrors the persistence split: ``location`` and this field are separate for
+    the same reason ``source_elements`` and its extension tables are, so that a
+    new format can introduce an address shape without touching semantics and
+    vice versa.
+    """
 
     def __post_init__(self) -> None:
         if self.ordinal < 0:
@@ -240,8 +508,32 @@ class ExtractedElement:
             raise InvalidSourceElementError(
                 f"{self.element_type.value} requires a {expected.__name__}"
             )
-        if self.element_type is ElementType.BLOCK and self.children:
-            raise InvalidSourceElementError("a block has no child elements")
+        if self.children and self.element_type not in _TYPES_WITH_CHILDREN:
+            raise InvalidSourceElementError(
+                f"a {self.element_type.value} has no child elements"
+            )
+        self._check_semantics()
+
+    def _check_semantics(self) -> None:
+        """Refuse semantics of the wrong shape, or on a type that has none.
+
+        Refused rather than ignored, for the reason unknown location keys are:
+        silently dropping a producer's header path would lose §17.2 evidence with
+        nothing to show that it happened.
+        """
+        expected_semantics = _SEMANTICS_FOR_TYPE.get(self.element_type)
+        if expected_semantics is None:
+            if self.semantics is not None:
+                raise InvalidSourceElementError(
+                    f"a {self.element_type.value} carries no semantics"
+                )
+            return
+        if self.semantics is not None and not isinstance(
+            self.semantics, expected_semantics
+        ):
+            raise InvalidSourceElementError(
+                f"{self.element_type.value} requires a {expected_semantics.__name__}"
+            )
 
     @property
     def char_count(self) -> int | None:

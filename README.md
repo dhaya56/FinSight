@@ -11,13 +11,14 @@ implemented.
 
 ## Status
 
-Phase 5 — the development corpus and real-document validation.
+Phase 6 — table detection and the completion of the source representation.
 
 Implemented: packaging and tooling, application settings, PostgreSQL with Alembic migrations, an
 S3-compatible object store behind a backend-neutral port, health and readiness endpoints, document
 intake — validation, content-addressed preservation of originals, and identity recording — PDF
-extraction into a citable source representation of pages and blocks with exact coordinates, and a
-governed development corpus of real filings that the extraction path has been measured against.
+extraction into a citable source representation of pages, blocks, tables, cells and footnotes with
+exact coordinates, and a governed development corpus of real filings that the extraction path has
+been measured against.
 
 Intake has no HTTP route yet. PROJECT_BLUEPRINT.md §28.2 requires authentication on every
 non-health route, so upload is exposed in the authentication phase. Extraction is driven from the
@@ -25,8 +26,34 @@ command line in the meantime.
 
 The PDF producer is **provisional**, not selected. No evaluation has compared it against
 alternatives on real filings; see [ADR-002](evaluation/decision_records/architecture/ADR-002-provisional-pdf-producer.md).
-Tables are not yet extracted, and pages that yield no text record a coverage gap rather than being
-read by other means.
+Pages that yield no text record a coverage gap rather than being read by other means.
+
+### No table detector is admitted
+
+Tables are extracted, stored and citable. They are **excluded from the retrieval path**, and that
+exclusion is a measured decision rather than a sequencing convenience —
+[ADR-003](evaluation/decision_records/architecture/ADR-003-table-detector-no-admission.md).
+
+Two detectors were measured against human-verified judgement of real filing pages. On the six pages
+carrying tables, PyMuPDF's `text` strategy bounded **0 of 6** correctly and Docling bounded **2 of
+6**. Docling is right where PyMuPDF is catastrophically wrong — it returns nothing on the four pages
+that hold no table, where `text` claimed a table on every one — and two of six is not a production
+detector. Its characteristic failure is a region offset by a row or two: clipping a final row,
+starting after the first few, absorbing the line beneath.
+
+Every table therefore carries a quality verdict — `accepted`, `review_required` or `rejected` — and
+only an accepted table is evidence. A region the page's ruling lines do not support is refused
+outright, and a run of rules no region covers is recorded as a coverage gap rather than lost.
+
+**The verdict does not compensate for the detector.** Measured on the same six pages, its signal ran
+*against* boundary quality: it accepted both regions that contained no table at all. No consumer may
+read `accepted` as evidence that a region bounds a table. The reconstruction heuristics and their
+known misfires are catalogued in
+[evaluation/limitations/reconstruction-heuristics.md](evaluation/limitations/reconstruction-heuristics.md).
+
+Docling needs ~530 MB of model weights that are not in its wheel. `scripts/stage_docling_models.py`
+fetches them at pinned commits over verified TLS; with `FINSIGHT_DOCLING_ARTIFACTS_PATH` set, a
+missing model raises instead of being downloaded mid-parse (§20.6).
 
 Reading order is **positional** — top to bottom, then left to right — which is not column-aware.
 Measured across the 1,403 pages of the development corpus, a column-aware ordering would differ on
@@ -37,6 +64,21 @@ is measured and asserted by test rather than assumed away.
 Not yet implemented: authentication, processing jobs, chunking, the Fact Ledger, retrieval,
 generation, the Evidence Gate, the user interface, and the evaluation harness. The repository grows
 one phase at a time; a directory exists only once its capability is implemented.
+
+### The extraction architecture
+
+Three layers, deliberately separate, with a fourth that does not exist yet.
+
+| Layer | Owns | Must never |
+|---|---|---|
+| **Parser** | Opening the document, verbatim text, geometry, page properties, failure signals | Interpret. A heading is a large block, not a heading |
+| **Detector** | Proposing table regions and grids, preserving the empty/absent distinction | Decide what a row *means*, or normalise away its own uncertainty |
+| **Reconstruction** | Spans, header rows, header and row-label paths, units, aggregate rows, footnote binding | Import a PDF library, or rewrite verbatim text |
+| **Adjudication** *(missing)* | Choosing between competing proposals per page and recording why | Discard the losing proposal without trace |
+
+Only `pymupdf_adapter.py` and `docling_tables.py` import a PDF library, mirroring the rule that
+confines the object-store SDK to one adapter. That boundary is what let one detector be swapped for
+another without touching the schema, the citations, or anything downstream.
 
 ## Prerequisites
 
@@ -143,13 +185,25 @@ it is unauthenticated.
 
 ## Extracting a document
 
-Extraction turns a stored document version into source elements — pages and blocks with exact
-coordinates — that later phases cite. It runs from the command line until there is an authenticated
-route to trigger it.
+Extraction turns a stored document version into source elements — pages, blocks, tables, cells and
+footnotes with exact coordinates — that later phases cite. It runs from the command line until there
+is an authenticated route to trigger it.
 
 ```cmd
 python -m finsight.cli.main extract <document-version-id>
 ```
+
+Table detection uses PyMuPDF by default. To use Docling instead, stage its model artifacts once and
+point the setting at them:
+
+```cmd
+python scripts\stage_docling_models.py
+set FINSIGHT_DOCLING_ARTIFACTS_PATH=model_cache\docling
+```
+
+Staging downloads roughly 530 MB over TLS with the host's own trust store; verification is never
+disabled. Once staged, no parse reaches the network — a missing artifact raises instead of being
+fetched.
 
 The identifier is the version recorded by intake. Both containers must be running: the original is
 read from object storage, and the elements are written to PostgreSQL.
@@ -252,7 +306,8 @@ service, install nothing, and download nothing.
 | `docker/` | Service configuration for the local stack |
 | `data/` | Corpus manifest, reference seed data, fixtures, golden sets |
 | `evaluation/` | Experiment configurations and decision records |
-| `scripts/` | Environment and dependency verification helpers |
+| `scripts/` | Environment and dependency verification, model staging, evaluation harnesses |
+| `model_cache/` | Staged model artifacts (not committed) |
 | `artifacts/` | Generated evaluation outputs (not committed) |
 
 Paths appear as their capabilities are implemented.

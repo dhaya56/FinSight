@@ -200,7 +200,9 @@ class TestCorpusIngestion:
         assert counts is not None
         assert counts.pages == 2
         assert counts.blocks > 0
-        assert counts.total == counts.pages + counts.blocks
+        assert counts.total == (
+            counts.pages + counts.blocks + counts.tables + counts.cells
+        )
         assert counts.coverage_gaps == 0
 
     def test_several_documents_are_ingested_in_one_run(

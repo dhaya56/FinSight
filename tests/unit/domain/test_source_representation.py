@@ -10,11 +10,15 @@ import pytest
 
 from finsight.domain.representations.source import (
     BlockLocation,
+    CellLocation,
+    CellSemantics,
     ElementType,
     ExtractedElement,
     ExtractionState,
     InvalidSourceElementError,
     PageLocation,
+    TableLocation,
+    TableSemantics,
     location_from_mapping,
 )
 
@@ -32,6 +36,37 @@ def block(text: str | None = "text", **overrides: object) -> ExtractedElement:
         "extraction_method": METHOD,
         "extraction_method_version": METHOD_VERSION,
         "text": text,
+    }
+    fields.update(overrides)
+    return ExtractedElement(**fields)  # type: ignore[arg-type]
+
+
+def cell(text: str | None = "1,234", **overrides: object) -> ExtractedElement:
+    """A minimal valid cell."""
+    fields: dict[str, object] = {
+        "element_type": ElementType.CELL,
+        "ordinal": 0,
+        "locator": "p. 1, table 1, R1C1",
+        "location": CellLocation(
+            bbox=(0.0, 0.0, 10.0, 10.0), row_index=0, column_index=0
+        ),
+        "extraction_method": METHOD,
+        "extraction_method_version": METHOD_VERSION,
+        "text": text,
+    }
+    fields.update(overrides)
+    return ExtractedElement(**fields)  # type: ignore[arg-type]
+
+
+def table(**overrides: object) -> ExtractedElement:
+    """A minimal valid table, which holds no text of its own."""
+    fields: dict[str, object] = {
+        "element_type": ElementType.TABLE,
+        "ordinal": 0,
+        "locator": "p. 1, table 1",
+        "location": TableLocation(bbox=(0.0, 0.0, 100.0, 100.0)),
+        "extraction_method": METHOD,
+        "extraction_method_version": METHOD_VERSION,
     }
     fields.update(overrides)
     return ExtractedElement(**fields)  # type: ignore[arg-type]
@@ -148,6 +183,89 @@ class TestBlockLocation:
             BlockLocation.from_mapping({"bbox": "0,0,10,10"})
 
 
+class TestTableLocation:
+    def test_round_trips_through_a_mapping(self) -> None:
+        location = TableLocation(bbox=(10.0, 20.0, 400.0, 300.0))
+
+        assert TableLocation.from_mapping(location.to_mapping()) == location
+
+    def test_an_inverted_box_is_refused(self) -> None:
+        """Every box-shaped location shares one convention and one check."""
+        with pytest.raises(InvalidSourceElementError, match="top-left"):
+            TableLocation(bbox=(100.0, 0.0, 10.0, 10.0))
+
+    def test_unknown_keys_are_refused(self) -> None:
+        """A caption is meaning, and meaning does not belong in an address."""
+        payload = TableLocation(bbox=(0.0, 0.0, 10.0, 10.0)).to_mapping()
+        payload["caption"] = "Balance Sheet"
+
+        with pytest.raises(InvalidSourceElementError, match="unknown"):
+            TableLocation.from_mapping(payload)
+
+
+class TestCellLocation:
+    def test_round_trips_through_a_mapping(self) -> None:
+        location = CellLocation(
+            bbox=(10.0, 20.0, 60.0, 32.0),
+            row_index=3,
+            column_index=2,
+            row_span=1,
+            column_span=2,
+        )
+
+        assert CellLocation.from_mapping(location.to_mapping()) == location
+
+    def test_spans_default_to_one(self) -> None:
+        location = CellLocation(bbox=(0.0, 0.0, 10.0, 10.0), row_index=0, column_index=0)
+
+        assert (location.row_span, location.column_span) == (1, 1)
+
+    @pytest.mark.parametrize("field", ["row_index", "column_index"])
+    def test_grid_indices_are_not_negative(self, field: str) -> None:
+        fields: dict[str, object] = {
+            "bbox": (0.0, 0.0, 10.0, 10.0),
+            "row_index": 0,
+            "column_index": 0,
+        }
+        fields[field] = -1
+
+        with pytest.raises(InvalidSourceElementError, match=field):
+            CellLocation(**fields)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("field", ["row_span", "column_span"])
+    def test_a_span_covers_at_least_one_track(self, field: str) -> None:
+        """A zero span would make a cell occupy no column, which is not a cell."""
+        fields: dict[str, object] = {
+            "bbox": (0.0, 0.0, 10.0, 10.0),
+            "row_index": 0,
+            "column_index": 0,
+        }
+        fields[field] = 0
+
+        with pytest.raises(InvalidSourceElementError, match=field):
+            CellLocation(**fields)  # type: ignore[arg-type]
+
+    def test_a_spanning_header_is_representable(self) -> None:
+        """The case that makes a flattened header detectable at all (§17.2).
+
+        "Year ended March 31" over two period columns is one cell with
+        ``column_span=2``. A detector that emits it as a single-column cell is
+        indistinguishable by text and obvious by span.
+        """
+        spanning = CellLocation(
+            bbox=(100.0, 50.0, 300.0, 65.0),
+            row_index=0,
+            column_index=1,
+            column_span=2,
+        )
+
+        assert spanning.column_span == 2
+
+    def test_missing_grid_keys_are_reported(self) -> None:
+        with pytest.raises(InvalidSourceElementError, match="missing"):
+            CellLocation.from_mapping({"bbox": [0, 0, 10, 10]})
+
+
 class TestLocationDispatch:
     def test_rebuilds_the_type_matching_the_element(self) -> None:
         page = PageLocation(page_number=3, width=595.0, height=842.0, rotation=0)
@@ -159,6 +277,34 @@ class TestLocationDispatch:
 
         with pytest.raises(InvalidSourceElementError):
             location_from_mapping(ElementType.BLOCK, page.to_mapping())
+
+    @pytest.mark.parametrize("kind", list(ElementType))
+    def test_every_element_type_has_a_registered_location_shape(
+        self, kind: ElementType
+    ) -> None:
+        """An unregistered type raises KeyError; a registered one rejects the payload.
+
+        Widening ``ElementType`` without adding a shape is the one way to break
+        location dispatch, and it would otherwise surface as a KeyError from deep
+        inside a producer rather than here.
+        """
+        with pytest.raises(InvalidSourceElementError, match="missing"):
+            location_from_mapping(kind, {})
+
+    def test_a_table_payload_is_refused_for_a_cell(self) -> None:
+        """Both are boxes, so only the grid keys tell them apart."""
+        with pytest.raises(InvalidSourceElementError, match="missing"):
+            location_from_mapping(
+                ElementType.CELL, TableLocation(bbox=(0.0, 0.0, 1.0, 1.0)).to_mapping()
+            )
+
+    def test_a_cell_payload_is_refused_for_a_table(self) -> None:
+        payload = CellLocation(
+            bbox=(0.0, 0.0, 1.0, 1.0), row_index=0, column_index=0
+        ).to_mapping()
+
+        with pytest.raises(InvalidSourceElementError, match="unknown"):
+            location_from_mapping(ElementType.TABLE, payload)
 
 
 class TestExtractedElement:
@@ -226,6 +372,121 @@ class TestExtractedElement:
 
         with pytest.raises(AttributeError):
             element.text = "edited"  # type: ignore[misc]
+
+
+class TestTableElements:
+    def test_a_table_requires_a_table_location(self) -> None:
+        with pytest.raises(InvalidSourceElementError, match="TableLocation"):
+            table(location=BlockLocation(bbox=(0.0, 0.0, 10.0, 10.0)))
+
+    def test_a_cell_requires_a_cell_location(self) -> None:
+        with pytest.raises(InvalidSourceElementError, match="CellLocation"):
+            cell(location=BlockLocation(bbox=(0.0, 0.0, 10.0, 10.0)))
+
+    def test_a_table_holds_its_cells(self) -> None:
+        held = table(children=(cell("1,234", ordinal=0), cell("5,678", ordinal=1)))
+
+        assert [child.text for child in held.children] == ["1,234", "5,678"]
+
+    def test_a_cell_has_no_children(self) -> None:
+        """A nested table inside a cell is out of scope, not silently flattened."""
+        with pytest.raises(InvalidSourceElementError, match="no child"):
+            cell(children=(cell(),))
+
+    def test_a_table_carries_no_text_of_its_own(self) -> None:
+        """Its text is its cells'. A concatenation here would be a summary (§17.10)."""
+        assert table().text is None
+
+    def test_cell_text_is_verbatim_including_its_footnote_marker(self) -> None:
+        """§17.2 keeps the marker out of the value, never out of the text."""
+        assert cell("1,234 (a)").text == "1,234 (a)"
+
+    def test_a_negative_number_keeps_its_parentheses(self) -> None:
+        """Losing the parenthesis loses the sign, which is the worst cell defect."""
+        assert cell("(1,234)").text == "(1,234)"
+
+
+class TestSemantics:
+    def test_a_table_may_carry_a_caption(self) -> None:
+        captioned = table(semantics=TableSemantics(caption="Balance Sheet"))
+
+        assert captioned.semantics == TableSemantics(caption="Balance Sheet")
+
+    def test_a_cell_may_carry_its_paths(self) -> None:
+        described = cell(
+            semantics=CellSemantics(
+                header_path=("Year ended March 31", "2025"),
+                row_label_path=("Assets", "Of which: term deposits"),
+                footnote_refs=("a",),
+            )
+        )
+
+        assert described.semantics is not None
+
+    def test_paths_default_to_empty_rather_than_none(self) -> None:
+        """One shape for "no header", so no consumer distinguishes empty from NULL."""
+        semantics = CellSemantics()
+
+        assert semantics.header_path == ()
+        assert semantics.row_label_path == ()
+        assert semantics.footnote_refs == ()
+        assert semantics.is_header is False
+
+    @pytest.mark.parametrize(
+        ("kind", "location"),
+        [
+            (
+                ElementType.PAGE,
+                PageLocation(page_number=1, width=595.0, height=842.0, rotation=0),
+            ),
+            (ElementType.BLOCK, BlockLocation(bbox=(0.0, 0.0, 10.0, 10.0))),
+        ],
+    )
+    def test_a_type_without_semantics_refuses_them(
+        self, kind: ElementType, location: object
+    ) -> None:
+        """Refused rather than ignored: a dropped header path is lost §17.2 evidence."""
+        with pytest.raises(InvalidSourceElementError, match="no semantics"):
+            block(
+                element_type=kind,
+                location=location,
+                semantics=TableSemantics(caption="x"),
+            )
+
+    def test_a_table_refuses_cell_semantics(self) -> None:
+        with pytest.raises(InvalidSourceElementError, match="TableSemantics"):
+            table(semantics=CellSemantics(is_header=True))
+
+    def test_a_cell_refuses_table_semantics(self) -> None:
+        with pytest.raises(InvalidSourceElementError, match="CellSemantics"):
+            cell(semantics=TableSemantics(caption="x"))
+
+    def test_semantics_are_optional(self) -> None:
+        """A producer that finds no caption is not thereby producing a broken table."""
+        assert table().semantics is None
+        assert cell().semantics is None
+
+
+class TestElementType:
+    def test_the_types_are_the_five_the_schema_allows(self) -> None:
+        """Widening this set means widening the CHECK constraint in the same change.
+
+        The schema uses a CHECK rather than a native enum precisely so it can be
+        widened, and this test is what stops the enum and the constraint drifting:
+        a value the application can emit and the database rejects fails every
+        insert on a page that happens to contain one.
+        """
+        assert {kind.value for kind in ElementType} == {
+            "page",
+            "block",
+            "table",
+            "cell",
+            "footnote",
+        }
+
+    def test_there_is_no_row_element(self) -> None:
+        """§14.5 names table and cell; a row is a cell's ``row_index`` (see the enum)."""
+        assert "row" not in {kind.value for kind in ElementType}
 
 
 class TestExtractionState:

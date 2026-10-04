@@ -1,0 +1,297 @@
+# ADR-003 — Table Detector: No Admission
+
+- **Status:** accepted
+- **Date:** 2026-10-03
+- **Phase:** 6 — table detection and the source representation
+- **Decision:** **no table detector is admitted to production.** PyMuPDF
+  `find_tables(strategy="lines")` continues as the *provisional* detector for
+  extraction into storage only. Detected table regions are **excluded from the
+  retrieval path**. Admission waits on boundary measurement against real pages.
+- **This is deliberately not a selection between the two PyMuPDF strategies.** The
+  recorded evidence disqualifies both, so a choice between them would be a choice
+  between two inadmissible options.
+
+> **Amendment, 2026-10-04 — measured, and the decision is unchanged.** ENV-008
+> staged Docling's artifacts reproducibly and measured its regions against the
+> annotated pages.
+>
+> An initial count-based screen gave Docling **8 of 8** against PyMuPDF's 2 of 8,
+> and that was read here as near-admissible. **The blind boundary review reversed
+> it**: on the six table-bearing pages Docling bounds **2 of 6** against PyMuPDF's
+> **0 of 6**, and the screen had passed three pages whose regions were wrong —
+> including two where the single region contained no table at all while the real
+> table went undetected.
+>
+> Better than PyMuPDF, not admissible. See §"Where admission now stands".
+
+## Context
+
+PROJECT_BLUEPRINT.md §12.12 reserves parser and detector admission for a recorded
+evaluation; CLAUDE.md §4 requires developer approval for it and §8 forbids picking
+a winner by intuition. ADR-002 deferred *parser* selection. This record covers
+*detection*, which the work showed is a separable decision: one parser can host
+several detectors, and the `TableDetector` contract makes that explicit in code.
+
+Evidence: ENV-006 (real-corpus table validation, 1,403 pages) and ENV-007 (Docling
+feasibility). Nothing here is measured for the first time; this record decides.
+
+## What the evidence rules out
+
+### The question was framed wrongly, and the measurement corrected it
+
+ADR-003 was originally scoped to pick whichever strategy found more tables. Across
+150 pages sampled evenly from three filings:
+
+- `lines` never found a table `text` missed — **0 of 150 pages**.
+- `text` fired on **145 of 150 (97%)**.
+
+Financial filings do not carry a table on 97% of their pages. Recall is saturated
+and uninformative, and the "complementary, route between them" conclusion drawn
+earlier from a synthetic borderless fixture is **contradicted**. The decision
+surface is precision.
+
+### Precision disqualifies both strategies
+
+Ten pages, human-annotated, blinded and shuffled with controls, judged on the
+*region* rather than the page:
+
+| Verdict | Count |
+|---|---|
+| **Correctly bounded table** | **0 of 10** |
+| Real table inside, wrong boundary — merges several tables, or swallows prose | 6 |
+| No table at all — prose, headings, a chart | 4 |
+
+By the rule of three the 95% upper bound on the usable-region rate is ~26%, with
+0% observed. Disqualifying wherever in that interval the truth lies. **The control
+page failed too**, so the problem is not confined to pages `lines` rejects.
+
+The mechanism was identified during annotation: these tables are ruled under their
+headers and between sections, with **columns separated by alignment alone**.
+`lines` requires a grid and so finds nothing — on five of nine pages carrying real
+financial tables, including one page with four tables where it returned zero.
+`text` finds them and cannot bound them.
+
+**The missing capability is boundary segmentation of horizontally-ruled tables.**
+It is not grid refinement, and no threshold or parameter on either strategy
+supplies it.
+
+### The routing-predicate evaluation is void, not negative
+
+ENV-006 §3 measured cheap pre-filters to skip the detector on table-free pages,
+and found the best 100%-recall predicate saved only 17.8% of pages. That was
+recorded as a negative result. It is worse than negative: **the predicates were
+scored against what `find_tables` detected**, and `find_tables` is what this record
+disqualifies. The experiment measured agreement with a bad detector, so it
+establishes nothing about routing and must be re-run against a detector that is
+admitted. No routing predicate is adopted.
+
+## Why this is not an admission of Docling
+
+Docling supplies precisely the missing capability — explicit `col_span`, explicit
+`column_header`, and correct bounds — and ENV-007 established that its empty-cell
+omission is losslessly reconstructible because the spans are declared. On the
+reconstruction-burden criterion it is a strong result, and it removes an error
+class rather than shrinking it: ENV-006 measured the merge-versus-miss ambiguity at
+mean 19% / median 11% of grid positions, with **436 of 861 tables (51%) above 10%**,
+and that ambiguity is undecidable from a grid.
+
+**But its detection precision on real corpus pages is unmeasured.** Everything
+ENV-007 establishes about bounds comes from one synthetic page whose ground truth
+we authored.
+
+Admitting it on that basis would repeat a mistake this project has now made twice
+and recorded both times: ENV-004 overstated producer throughput by ~3.5× from
+synthetic fixtures, and a borderless-table fixture in this phase overstated
+strategy complementarity so badly that the first real-document measurement
+contradicted the conclusion outright. A third instance would mean the risk was
+written down and then ignored.
+
+## Costs recorded now, so admission is never argued on capability alone
+
+| Cost | Figure |
+|---|---|
+| Pinned dependencies | **73 → 147 packages** |
+| New heavyweight runtime | `torch==2.14.1+cpu`, `torchvision==0.29.1+cpu`, requiring a pinned CPU wheel index |
+| Model and package footprint | **≈1.9 GB**, against ≈20 MB for the entire current PyMuPDF path |
+| Throughput | **≈0.35 pages/s against ≈7.9 — roughly 23× slower.** The 1,403-page split extrapolates to ~68 minutes against ~3 |
+| Provisioning | Five obstacles, none resolved by weakening a control. Docling is categorically not a drop-in: `do_ocr=False` and a pre-staged, verified model cache are prerequisites under §12.11, §20.6 and §11.7 |
+| Auditability | torch and torchvision cannot be meaningfully audited at this project's level. Stated rather than glossed |
+| **Reproducibility** | **The staged artifacts were lost, and there is no procedure to restore them.** Measured 2026-10-04 — see below |
+
+### The provisioning cost is larger than ENV-007 recorded
+
+An attempt to run Docling on the ten annotated pages failed before parsing
+anything. `C:\Users\T9949\.cache\docling` no longer exists, and
+`huggingface_hub` raised `LocalEntryNotFoundError` after a certificate
+verification failure when it tried to fetch a model at parse time.
+
+Two things this establishes, neither of which ENV-007 captured:
+
+1. **ENV-007's artifact manifest is a record, not a procedure.** It names two
+   repositories and their resolved commits. Nothing in the repository re-stages
+   them, so the five-obstacle provisioning sequence survives only as prose in a
+   decision record. It has now been paid once and lost once.
+2. **§20.6 held again, for the second time on this library.** Verification was
+   never disabled, so a parse-time download failed loudly instead of silently
+   succeeding. ENV-007 recorded the same mechanism catching a different defect.
+
+The required artifact set is **unchanged** from ENV-007 and was confirmed by
+introspecting the pinned pipeline offline: `docling-project/docling-layout-heron`
+at `main` for layout, and TableFormer in `ACCURATE` mode, with OCR disabled.
+
+*A first reading of the traceback said otherwise* — that the fetch was for a
+vision-language model, because it passed through
+`docling/models/inference_engines/vlm/_utils.py`. That was wrong.
+`resolve_model_artifacts_path` is a shared helper that happens to live under that
+path, and `hf_vision_base` is the common base for HuggingFace *vision* models, so
+the layout model — an object detector — resolves through both. Recorded because the
+alarming reading was the first one available, which is the same way ENV-007 §3's
+`row_header` result went.
+
+**Therefore an admission prerequisite is added:** a committed, re-runnable
+staging script that fetches every required artifact at a pinned commit, verifies
+it, and populates a read-only cache — with the host's own trust anchors supplied
+and TLS verification left enabled. Until that exists, Docling cannot satisfy
+§20.6 on this host, independently of how well it detects tables. A parser whose
+artifacts cannot be restored from the repository is not a parser this project can
+deploy.
+
+**Met, 2026-10-04.** `scripts/stage_docling_models.py` stages both artifacts at
+pinned commits (530 MB) over TLS with the host's own trust store via
+`truststore`, nothing disabled. `Settings.docling_artifacts_path` and
+`build_docling_table_detector()` make a missing model raise instead of download.
+ENV-008 records it. The cost that remains is the one inherent to the category:
+~530 MB of weights that are not in the wheel.
+
+Two findings came out of building the adapter and are recorded here because
+neither appears in ENV-007:
+
+**Docling rewrites characters.** On one page, the document's eight U+2013 EN DASHes
+came back as ASCII hyphens and both U+20B9 RUPEE SIGNs vanished, leaving no
+non-ASCII character in any cell. In a financial table the en dash is the nil
+marker, so flattening it to a hyphen destroys the difference between "no such item"
+and a negative sign — and §14.9 citations are character offsets into stored text,
+which must therefore be the document's own. The adapter takes **structure from
+Docling and text from PyMuPDF** for this reason. That is a mitigation, not a free
+win: it is a permanent design constraint, and it means two independent PDF engines
+read the same bytes (ENV-007 open item 5).
+
+**Docling reports dropped cells only in a log line** — `"N of M pdf cells matched
+neither a row nor a column band ... and were dropped"` — with no API surface. The
+adapter installs a log handler to capture it. A detector whose content loss is
+reported only to a logger is a silent failure by default, and that property is a
+cost of the library, not of our wiring.
+
+## What was built so that non-admission is survivable
+
+- **`TableDetector` contract with injection.** `PyMuPdfProducer` takes a detector;
+  nothing hard-codes one. Changing detector is a constructor argument.
+- **The Docling adapter exists, is tested, and is selected by nothing.** It is
+  reachable the moment a measurement justifies it.
+- **`source_elements.extraction_method` is per element.** A run routing different
+  pages to different detectors is already representable with no schema change.
+- **The quality verdict.** Each table carries `accepted` / `review_required` /
+  `rejected` with its reasons and signals, so an imperfect detector's output is
+  refusable per table instead of trusted wholesale. This is what makes continuing
+  to extract with an inadmissible detector defensible rather than reckless.
+
+## Operative constraints while no detector is admitted
+
+1. **Table cells are stored and citable (§17.1) and must not be indexed, embedded
+   or ranked in retrieval.** Indexing the current regions would embed chunks that
+   swallow paragraphs or bisect tables.
+2. **Narrative-first retrieval (§15) is therefore the evidence-backed sequence**,
+   not merely the convenient one.
+3. **No threshold on the quality signals gates anything** (CLAUDE.md §9). The
+   verdict rests only on structurally unambiguous conditions.
+
+## Consequence for the rest of Phase 6
+
+The remaining table-semantics work presupposes that a table's **boundary** is
+right, and 0 of 10 measured regions were.
+
+- **Row-role tagging** (subtotals, totals, formula rows) operates inside the
+  region. Where a region merged four tables, "the total row" is four total rows.
+- **Adjacency** — units above the table, caption above, footnotes below — is the
+  clearest case. "The units declaration sits in the line above the table" has no
+  meaning when the region's top edge is wrong, and this is the commit aimed at the
+  88% of tables with no visible units declaration.
+- **Multi-page stitching** joins region to region, so it inherits both regions'
+  boundary errors and compounds them.
+
+This does not make that work wrong, and it is not an argument for skipping it. It
+is an argument for recording what it rests on: each of those commits is **work on
+provisional geometry**, and their output must be re-validated against whichever
+detector is eventually admitted. The alternative sequencing — admit a
+boundary-capable detector first, then build semantics on it once — is cheaper if
+the admission is close and more expensive if it is not. **That sequencing choice is
+the developer's and is not decided here.**
+
+## What would trigger admission
+
+Detector precision measured on **real corpus pages against human-verified truth**,
+for a detector that reports table bounds. The threshold is not set here: CLAUDE.md
+§4 reserves it for developer approval, and inventing a number would be exactly the
+intuition §8 forbids. ENV-006 open item 1 and ENV-007 open item 1 own the
+measurement.
+
+Admission would also need the §20.6 artifact manifest pinned to commits rather than
+a branch, the committed staging script described above, and peak memory measured
+against §41.11's shared 15.7 GB envelope.
+
+The measurement is cheaper than it looks and should be done on the **ten pages
+already annotated**, not a fresh sample. `evaluation/data/detector-precision-annotation.tsv`
+records how many real tables sit on each of those pages, so a candidate is
+screened automatically: four pages hold no table and must yield no region, and
+four more have an exact count. PyMuPDF scores 0 of 8 on that screen. It costs no
+new annotation time and roughly a minute of compute once the artifacts are staged.
+
+## Where admission now stands
+
+ENV-008 closed the two things that made admission impossible rather than merely
+unproven. What is left is small and specific.
+
+| Prerequisite | State |
+|---|---|
+| Reproducible artifact staging under §20.6 | **met** — ENV-008 §1 |
+| Model revisions pinned to commits, not branches | **met** — ENV-007 open item 8 closed |
+| Precision against human-verified truth | **met, and it does not support admission** — 2 of 6 bounded |
+| Boundary correctness | **met** — ENV-008 §2.5, blind and paired |
+| Corpus-wide false-positive rate on narrative pages | outstanding — ENV-008 open item 3 |
+| Peak memory against §41.11's shared envelope | outstanding — ADR-004 |
+| Cell-content fidelity inside a bounded region | outstanding — a separate question from bounding |
+
+**What has not changed.** The operative constraints still hold: table cells stay
+out of the retrieval path, and PyMuPDF `lines` remains the provisional detector
+for storage. Nothing in the extraction service constructs a Docling detector.
+
+**What a reader should take from this record.** The measurement ADR-003 asked for
+has run, blind and paired, on the hardest pages in the corpus. Docling bounds 2 of
+6 where PyMuPDF bounds 0 of 6. That is a real improvement over a catastrophic
+baseline and it is not a production detector, so **no detector is admitted and the
+operative constraints stand.**
+
+**The most useful thing learned is the shape of Docling's error.** It is not that
+it cannot find tables — it finds approximately the right regions and places their
+edges wrongly, typically by a row: clipping a final row, starting after the first
+few, absorbing the line beneath. Even the two pages judged correct carry it.
+PyMuPDF's failure is an inability to segment at all; Docling's is a
+systematically misplaced edge, and those call for different responses.
+
+**Next step, stated here rather than in a chat message.** Test whether the offset
+is the region deriving from detected cell content rather than the table's ruled
+extent (ENV-008 open item 2). If it is, the edge may be correctable above the
+detector — the ruling lines PyMuPDF reports are exactly the signal Docling appears
+not to use — and that would be a cheaper path to an admissible detector than
+replacing the candidate. If it is not, the search widens.
+
+**Nothing in that work should hold up the retrieval path**, which is excluded from
+tables either way under the operative constraints above.
+
+## Relationship to ADR-002
+
+ADR-002 stands. Its provisionality was always that §12.2/§12.4/§12.9 routing did
+not exist, not that PyMuPDF was suspect — and as a *text* producer the evidence
+strengthened it (184–220 pages/s, clean text, geometry correct after the rotation
+fix). What this record disqualifies is its **table detection**, which is a
+different capability of the same library. Parser admission remains ADR-004's.
