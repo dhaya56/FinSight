@@ -25,6 +25,7 @@ from finsight.vector_index.port import (
     VectorIndexShapeError,
 )
 from finsight.vector_index.qdrant_index import (
+    FILTERED_FIELDS,
     QdrantVectorIndex,
     collection_name,
     point_id,
@@ -335,3 +336,99 @@ class TestHardFilters:
 
         assert index.count(filters={"generation_id": "g1"}) == 1
         assert index.count() == 2
+
+
+class TestProductionConfiguration:
+    """Settings that fail silently when wrong, so each is asserted explicitly."""
+
+    def test_every_filtered_field_has_a_payload_index(
+        self, index: QdrantVectorIndex
+    ) -> None:
+        """The full-scan trap.
+
+        Filtering on an unindexed payload field makes Qdrant scan every
+        candidate's payload. Measured at 20,000 points: 23.5 ms without an index
+        against 11.5 ms with one, and the gap widens because the scan is linear.
+        Nothing errors — the query just gets slower as the corpus grows.
+        """
+        client = QdrantClient(url=get_settings().qdrant_url, timeout=30)
+        schema = client.get_collection(index.collection).payload_schema
+        client.close()
+
+        assert set(FILTERED_FIELDS) <= set(schema)
+
+    def test_hnsw_parameters_are_stated_not_inherited(
+        self, index: QdrantVectorIndex
+    ) -> None:
+        """A future Qdrant changing its defaults would change recall silently."""
+        client = QdrantClient(url=get_settings().qdrant_url, timeout=30)
+        dense = client.get_collection(index.collection).config.params.vectors["dense"]
+        client.close()
+
+        assert dense.hnsw_config is not None
+        assert dense.hnsw_config.m == 16
+        assert dense.hnsw_config.ef_construct == 100
+
+    def test_the_distance_metric_is_cosine(self, index: QdrantVectorIndex) -> None:
+        """Dot measured 1.4x faster and is not used.
+
+        The two are identical for unit vectors, which the embedding port
+        guarantees — but Qdrant normalises on insert under cosine, so cosine stays
+        correct if that guarantee is ever violated while dot would silently rank
+        by vector magnitude.
+        """
+        client = QdrantClient(url=get_settings().qdrant_url, timeout=30)
+        dense = client.get_collection(index.collection).config.params.vectors["dense"]
+        client.close()
+
+        assert dense.distance == models.Distance.COSINE
+
+    def test_no_quantization_is_configured(self, index: QdrantVectorIndex) -> None:
+        """Quantization trades recall for memory, and recall is the product here.
+
+        A subtly different nearest neighbour is a subtly wrong answer about a
+        filing. §22.6 has measured no recall cost, so there is nothing to justify
+        the trade.
+        """
+        client = QdrantClient(url=get_settings().qdrant_url, timeout=30)
+        config = client.get_collection(index.collection).config
+        client.close()
+
+        assert config.quantization_config is None
+
+    def test_sparse_vectors_use_server_side_idf(
+        self, index: QdrantVectorIndex
+    ) -> None:
+        client = QdrantClient(url=get_settings().qdrant_url, timeout=30)
+        sparse = client.get_collection(index.collection).config.params.sparse_vectors
+        client.close()
+
+        assert sparse["bm25"].modifier == models.Modifier.IDF
+
+
+class TestSparseValidation:
+    def test_mismatched_sparse_indices_and_values_are_refused(
+        self, index: QdrantVectorIndex
+    ) -> None:
+        """A shifted pairing scores nonsense on every lexical query.
+
+        The point would look perfectly healthy: right dimensions, right payload,
+        right id. Only its lexical scores would be meaningless.
+        """
+        with pytest.raises(VectorIndexShapeError, match="pairing"):
+            index.upsert(
+                [chunk(uuid4(), A, sparse=((1, 2, 3), (0.5, 0.5)))]
+            )
+
+    def test_a_chunk_with_no_terms_is_accepted_deliberately(
+        self, index: QdrantVectorIndex
+    ) -> None:
+        """A row of punctuation yields no lexemes, which is a real outcome.
+
+        It stays dense-searchable and is invisible to lexical search, which is
+        correct — there is nothing to match lexically.
+        """
+        termless = uuid4()
+        index.upsert([chunk(termless, A)])
+
+        assert index.search_dense(A, limit=1)[0].chunk_id == termless

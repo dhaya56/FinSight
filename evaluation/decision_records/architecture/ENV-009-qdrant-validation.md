@@ -115,6 +115,66 @@ reason: idle is not the figure a limit should be derived from, and nothing is
 indexed yet. A value chosen now would be invented headroom. They are set once the
 corpus is embedded and peak usage is measured.
 
+## Production-configuration audit
+
+Every item below came from a review against four production-practice sources, and
+each was checked against the running service rather than reasoned about.
+
+### Acted on
+
+| Finding | Evidence | Resolution |
+|---|---|---|
+| **Payload indexes absent — the full-scan trap.** Filtering on an unindexed field makes Qdrant scan every candidate's payload | `payload_schema: NONE`. Measured at 20,000 points: **23.5 ms without an index against 11.5 ms with one, 2.0x**, widening with the collection because the scan is linear | Indexes created for all seven §20.2 filter fields, **before ingest** — Qdrant uses them to build filterable HNSW links, so adding them afterwards does not retroactively improve the graph |
+| **HNSW parameters inherited silently** | `m=16`, `ef_construct=100` — the recommended production values, but by default | Stated explicitly. A future Qdrant changing its defaults would otherwise change this collection's recall with nothing in the diff |
+| **Mismatched sparse indices and values unvalidated** | A shifted pairing would be accepted | Refused. The point would look healthy — right dimensions, right payload, right id — and score nonsense on every lexical query |
+
+### Measured and deliberately not adopted
+
+**Dot product instead of cosine.** Mathematically identical for unit vectors, which
+the embedding port guarantees, and measured **1.4x faster — 13.8 ms against 19.2 ms
+at 20,000 points.** Not adopted: Qdrant normalises on insert under cosine, so cosine
+stays correct if the port's guarantee is ever violated, while dot would rank by
+vector **magnitude** — longer documents first, silently and systematically. Five
+milliseconds at this scale does not buy that risk. Revisit if latency binds.
+
+**Quantization (scalar or product).** Cuts memory up to 4x and alters top-k
+neighbours. Not adopted: a subtly different nearest neighbour is a subtly wrong
+answer about a filing, §22.6 has measured no recall cost to justify the trade, and
+memory is not currently a constraint. If it is ever adopted it applies to the dense
+vectors **only** — sparse vectors carry meaning in exact irregular weights that
+dense quantization destroys — and requires an `oversampling` setting so the rough
+scan does not miss the true top-k.
+
+**gRPC transport.** Recommended for throughput. **Could not be measured**: compose
+publishes only the REST port, by design, and gRPC needs 6334. Left for the
+throughput measurement, where the comparison can justify opening a second port.
+
+### Checked and already correct
+
+| Point | Status |
+|---|---|
+| Deterministic point ids, so an update overwrites rather than duplicating | Already implemented and tested — uuid5 over chunk + model + config (§29.9) |
+| HNSW as the index algorithm | Qdrant's default and the right choice at this scale |
+| Hybrid dense + sparse rather than dense alone | The whole design; ADR-005 |
+| RRF rather than weighted score averaging | Planned application-level, because dense and BM25 scores are not comparable. §20.13 needs the fusion in QueryTrace, which native fusion does not expose |
+| Batched writes rather than per-point upserts | The port takes a sequence; the indexer batches |
+| Read consistency in a cluster | Single node. Not applicable, and noted so it is not forgotten if that changes |
+
+### Open, with the reason
+
+- **`on_disk` / memmap for vectors and the sparse index.** Left in RAM. The corpus
+  is roughly 4,000 chunks — about 12 MB of vectors — so disk-backing would trade
+  latency for memory that is not scarce. Revisit when the collection grows or when
+  loaded memory is measured.
+- **Low-weight term pruning.** BM25 weights derive from PostgreSQL lexemes rather
+  than a learned sparse model, so the pathological "noise token" bloat the practice
+  warns about does not arise the same way. Unmeasured.
+- **Distinguishing "no terms" from "term generation failed".** The adapter refuses a
+  malformed sparse pair but cannot tell a legitimately term-free chunk from one
+  whose terms were lost upstream. The indexer can: a chunk whose `lexemes` is NULL
+  is a pipeline failure, while an empty vector is a real outcome. Recorded as a
+  requirement for the indexer rather than contorting the port.
+
 ## Limitations
 
 - **No retrieval quality measured.** This record covers plumbing only.

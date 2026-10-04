@@ -37,6 +37,27 @@ from finsight.vector_index.port import (
     VectorIndexUnavailableError,
 )
 
+FILTERED_FIELDS: Final[tuple[str, ...]] = (
+    "generation_id",
+    "document_version_id",
+    "issuer_name",
+    "fiscal_period",
+    "reporting_basis",
+    "document_type",
+    "evidence_type",
+)
+"""Payload fields §20.2 filters on, each of which needs its own index.
+
+**Measured, not assumed.** Filtering on an unindexed payload field makes Qdrant
+scan every candidate's payload: at 20,000 points a filtered dense search took
+23.5 ms without an index and 11.5 ms with one, a **2.0x difference** that widens
+with the collection because the scan is linear.
+
+They are created immediately after the collection and before any ingest, which is
+the order Qdrant wants — it uses payload indexes to build filterable HNSW links,
+so indexes added afterwards do not retroactively improve the graph.
+"""
+
 DENSE_VECTOR: Final = "dense"
 SPARSE_VECTOR: Final = "bm25"
 
@@ -107,27 +128,7 @@ class QdrantVectorIndex:
             if self._client.collection_exists(self._collection):
                 self._verify()
                 return
-            self._client.create_collection(
-                collection_name=self._collection,
-                vectors_config={
-                    DENSE_VECTOR: models.VectorParams(
-                        size=self._dimensions,
-                        # Cosine, on a measured property: the embedding port
-                        # promises unit vectors and Nomic was measured returning
-                        # norm 1.0. With unit vectors cosine and dot agree, and
-                        # cosine stays correct if a later model does not normalise.
-                        distance=models.Distance.COSINE,
-                    )
-                },
-                sparse_vectors_config={
-                    SPARSE_VECTOR: models.SparseVectorParams(
-                        # Server-side IDF. This is the half of BM25 that needs
-                        # collection-wide statistics, which a client computing
-                        # term weights per chunk cannot know (ADR-005).
-                        modifier=models.Modifier.IDF
-                    )
-                },
-            )
+            self._create()
         except (UnexpectedResponse, ApiException) as error:
             raise VectorIndexUnavailableError(
                 f"could not prepare collection {self._collection!r}: {error}"
@@ -136,6 +137,59 @@ class QdrantVectorIndex:
             raise VectorIndexUnavailableError(
                 f"could not reach qdrant: {error}"
             ) from error
+
+    def _create(self) -> None:
+        """Create the collection, then its payload indexes, then nothing else.
+
+        The order is Qdrant's requirement rather than a preference: payload
+        indexes inform the filterable HNSW links built during ingest, so indexes
+        added after data is loaded do not retroactively improve the graph.
+
+        HNSW parameters are stated explicitly even though they match the current
+        defaults. ``m=16`` and ``ef_construct=100`` are the values a production
+        baseline wants, and inheriting them silently means a future Qdrant that
+        changes its defaults would change this collection's recall with nothing in
+        the diff to show it.
+        """
+        self._client.create_collection(
+            collection_name=self._collection,
+            vectors_config={
+                DENSE_VECTOR: models.VectorParams(
+                    size=self._dimensions,
+                    # Cosine rather than dot, and deliberately so. The embedding
+                    # port promises unit vectors, which makes the two
+                    # mathematically identical, and dot measured 1.4x faster
+                    # (13.8 ms against 19.2 ms at 20,000 points). Cosine wins
+                    # anyway because Qdrant normalises on insert: if the port's
+                    # guarantee were ever violated, dot would rank by vector
+                    # magnitude — longer documents first, silently — while cosine
+                    # stays correct. Revisit if latency becomes the constraint.
+                    distance=models.Distance.COSINE,
+                    hnsw_config=models.HnswConfigDiff(m=16, ef_construct=100),
+                )
+            },
+            sparse_vectors_config={
+                SPARSE_VECTOR: models.SparseVectorParams(
+                    # Server-side IDF: the half of BM25 that needs
+                    # collection-wide statistics, which a client computing term
+                    # weights per chunk cannot know (ADR-005).
+                    modifier=models.Modifier.IDF
+                )
+                # No quantization here, ever. Sparse vectors carry meaning in
+                # exact, irregular float weights across a wide index space, and
+                # dense quantization schemes destroy that. Dense quantization is
+                # also unused — see ENV-009 — because a financial answer built on
+                # subtly-wrong neighbours is the failure this system exists to
+                # avoid, and §22.6 has measured no recall cost to justify it.
+            },
+        )
+        for field in FILTERED_FIELDS:
+            self._client.create_payload_index(
+                collection_name=self._collection,
+                field_name=field,
+                field_schema=models.PayloadSchemaType.KEYWORD,
+                wait=True,
+            )
 
     def _verify(self) -> None:
         """Refuse a collection whose shape disagrees with this configuration."""
@@ -182,6 +236,19 @@ class QdrantVectorIndex:
         return len(points)
 
     def _vectors(self, chunk: IndexedChunk) -> dict[str, Any]:
+        """Build the named vectors, refusing a malformed sparse pair.
+
+        Mismatched indices and values is a pipeline bug that Qdrant would either
+        reject obscurely or, worse, accept — and a point whose sparse weights are
+        shifted against their terms scores nonsense on every lexical query while
+        looking perfectly healthy.
+        """
+        if len(chunk.sparse_indices) != len(chunk.sparse_values):
+            raise VectorIndexShapeError(
+                f"chunk {chunk.chunk_id} has {len(chunk.sparse_indices)} sparse "
+                f"indices and {len(chunk.sparse_values)} values; the pairing "
+                "would be meaningless"
+            )
         vectors: dict[str, Any] = {DENSE_VECTOR: list(chunk.dense)}
         if chunk.sparse_indices:
             vectors[SPARSE_VECTOR] = models.SparseVector(
