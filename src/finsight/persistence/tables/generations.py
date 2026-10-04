@@ -95,6 +95,14 @@ class Generation(Base):
             unique=True,
             postgresql_where=sql_text("state = 'active'"),
         ),
+        Index(
+            "uq_generations_configuration",
+            "document_version_id",
+            "extraction_run_id",
+            "chunking_config_version",
+            unique=True,
+            postgresql_where=sql_text("state <> 'failed'"),
+        ),
     )
     """Three constraints and an index, each refusing a specific wrong state.
 
@@ -108,6 +116,13 @@ class Generation(Base):
     empty filing as queryable. More component columns join this constraint as their
     stages arrive, which is the point of writing it as a condition on ``active``
     rather than as a NOT NULL on the column.
+
+    ``uq_generations_configuration`` is idempotency, enforced the way extraction
+    already enforces it. Re-running chunking on an unchanged version with an
+    unchanged configuration would otherwise build a second generation and re-embed
+    every chunk — measured at roughly 105 seconds for a 1,300-chunk filing, for a
+    byte-identical result. Failed generations are excluded so a failure stays
+    retryable, exactly as ``uq_extraction_runs_document_version_id`` does.
 
     The partial unique index allows **one** active generation per document version
     while leaving any number of shadow, superseded and failed ones. Enforced by the
@@ -135,6 +150,17 @@ class Generation(Base):
     Nullable because the generation is created first and its components attach as
     they complete. Null on an active generation is refused by
     ``active_requires_components``.
+    """
+
+    chunking_config_version: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+    """Which chunking configuration built this generation's chunks (§18.10).
+
+    Nullable because a generation exists before its chunking component completes.
+    It participates in the configuration index below, which is what makes
+    re-chunking an unchanged document a recorded no-op rather than ~105 seconds of
+    re-embedding for a byte-identical result.
     """
 
     created_at: Mapped[datetime.datetime] = mapped_column(

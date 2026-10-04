@@ -44,7 +44,11 @@ class GenerationRepository:
         self._session = session
 
     def open(
-        self, *, document_version_id: UUID, extraction_run_id: UUID | None = None
+        self,
+        *,
+        document_version_id: UUID,
+        extraction_run_id: UUID | None = None,
+        chunking_config_version: str | None = None,
     ) -> UUID:
         """Create a shadow generation and return its identifier.
 
@@ -55,6 +59,7 @@ class GenerationRepository:
             document_version_id=document_version_id,
             state=STATE_SHADOW,
             extraction_run_id=extraction_run_id,
+            chunking_config_version=chunking_config_version,
         )
         self._session.add(generation)
         self._session.flush()
@@ -123,6 +128,28 @@ class GenerationRepository:
             .where(Generation.id == generation_id)
             .values(state=STATE_FAILED, activated_at=None)
         )
+
+    def for_configuration(
+        self,
+        *,
+        document_version_id: UUID,
+        extraction_run_id: UUID,
+        chunking_config_version: str,
+    ) -> UUID | None:
+        """A non-failed generation already built from exactly this configuration.
+
+        What makes re-chunking an unchanged document a no-op. Failed generations
+        are excluded so a failure stays retryable, matching the partial unique
+        index that enforces the same rule in the database.
+        """
+        return self._session.execute(
+            select(Generation.id).where(
+                Generation.document_version_id == document_version_id,
+                Generation.extraction_run_id == extraction_run_id,
+                Generation.chunking_config_version == chunking_config_version,
+                Generation.state != STATE_FAILED,
+            )
+        ).scalar_one_or_none()
 
     def active_for(self, *, document_version_id: UUID) -> UUID | None:
         """The generation retrieval may see for this version, or None.

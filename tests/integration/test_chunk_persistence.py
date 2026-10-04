@@ -156,7 +156,10 @@ class TestWriting:
         )
 
         rows = session.execute(
-            select(ChunkSource.source_element_id).order_by(ChunkSource.position)
+            select(ChunkSource.source_element_id)
+            .join(Chunk, Chunk.id == ChunkSource.chunk_id)
+            .where(Chunk.generation_id == generation_id)
+            .order_by(ChunkSource.position)
         ).scalars().all()
         assert list(rows) == elements
 
@@ -175,7 +178,10 @@ class TestWriting:
         )
 
         assert session.execute(
-            select(func.count()).select_from(ChunkSource)
+            select(func.count())
+            .select_from(ChunkSource)
+            .join(Chunk, Chunk.id == ChunkSource.chunk_id)
+            .where(Chunk.generation_id == generation_id)
         ).scalar_one() == 1
 
     def test_a_child_points_at_its_parent(
@@ -195,10 +201,16 @@ class TestWriting:
         )
 
         child = session.execute(
-            select(Chunk).where(Chunk.role == ChunkRole.CHILD.value)
+            select(Chunk).where(
+                Chunk.generation_id == generation_id,
+                Chunk.role == ChunkRole.CHILD.value,
+            )
         ).scalar_one()
         parent = session.execute(
-            select(Chunk).where(Chunk.role == ChunkRole.PARENT.value)
+            select(Chunk).where(
+                Chunk.generation_id == generation_id,
+                Chunk.role == ChunkRole.PARENT.value,
+            )
         ).scalar_one()
         assert child.parent_id == parent.id
 
@@ -229,7 +241,9 @@ class TestOutbox:
             text_search_config=CONFIG,
         )
 
-        event = session.execute(select(IndexOutbox)).scalar_one()
+        event = session.execute(
+            select(IndexOutbox).where(IndexOutbox.generation_id == generation_id)
+        ).scalar_one()
         assert event.state == EVENT_PENDING
         assert event.completed_at is None
 
@@ -255,7 +269,9 @@ class TestOutbox:
         )
 
         assert session.execute(
-            select(func.count()).select_from(IndexOutbox)
+            select(func.count())
+            .select_from(IndexOutbox)
+            .where(IndexOutbox.generation_id == generation_id)
         ).scalar_one() == 1
 
     def test_pending_events_are_listed_for_the_indexer(
@@ -291,10 +307,10 @@ class TestLexicalVector:
 
         found = session.execute(
             text(
-                "SELECT count(*) FROM chunks"
-                " WHERE lexemes @@ websearch_to_tsquery(CAST(:cfg AS regconfig), :q)"
+                "SELECT count(*) FROM chunks WHERE generation_id = :g"
+                " AND lexemes @@ websearch_to_tsquery(CAST(:cfg AS regconfig), :q)"
             ),
-            {"cfg": CONFIG, "q": "lending"},
+            {"g": generation_id, "cfg": CONFIG, "q": "lending"},
         ).scalar_one()
 
         assert found == 1
@@ -312,10 +328,10 @@ class TestLexicalVector:
 
         found = session.execute(
             text(
-                "SELECT count(*) FROM chunks"
-                " WHERE lexemes @@ websearch_to_tsquery(CAST(:cfg AS regconfig), :q)"
+                "SELECT count(*) FROM chunks WHERE generation_id = :g"
+                " AND lexemes @@ websearch_to_tsquery(CAST(:cfg AS regconfig), :q)"
             ),
-            {"cfg": CONFIG, "q": "aviation"},
+            {"g": generation_id, "cfg": CONFIG, "q": "aviation"},
         ).scalar_one()
 
         assert found == 0
@@ -390,7 +406,9 @@ class TestTheDatabaseRefusesUnsafeChunks:
             chunks=[derived("Parent", elements, role=ChunkRole.PARENT)],
             text_search_config=CONFIG,
         )
-        existing = session.execute(select(Chunk.id)).scalar_one()
+        existing = session.execute(
+            select(Chunk.id).where(Chunk.generation_id == generation_id)
+        ).scalar_one()
 
         session.add(
             Chunk(

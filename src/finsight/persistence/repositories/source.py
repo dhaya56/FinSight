@@ -54,6 +54,18 @@ from finsight.persistence.tables.source import (
 
 
 @dataclass(frozen=True, slots=True)
+class NarrativeBlock:
+    """One block in document order, with what the chunker needs and nothing else."""
+
+    element_id: UUID
+    text: str
+    page_number: int
+    ordinal: int
+    bbox: tuple[float, float, float, float] | None
+    page_tables: tuple[tuple[float, float, float, float], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ElementCounts:
     """What a run produced, counted rather than loaded."""
 
@@ -258,6 +270,60 @@ class SourceRepository:
         )
         return self._session.execute(statement).scalar_one_or_none()
 
+    def narrative_blocks(self, *, run_id: UUID) -> list[NarrativeBlock]:
+        """A run's blocks in document order, with each page's table regions.
+
+        The recursive read ``elements_for_run`` declined to attempt, now that
+        chunking needs it (§18.1). Ordered by the page's ordinal then the block's,
+        which is reading order as the producer judged it.
+
+        **Blocks only.** Cells are excluded because ADR-003 refuses to index them
+        while no detector bounds a table correctly, and footnotes belong to the
+        table they annotate rather than to the running text.
+
+        Each row carries its page's table regions so the chunker's caller can mark
+        table-derived blocks (§18.4) without a second query per page.
+        """
+        statement = sql_text(
+            """
+            WITH page AS (
+                SELECT id, ordinal,
+                       (location->>'page_number')::int AS page_number
+                FROM source_elements
+                WHERE extraction_run_id = :run_id AND element_type = 'page'
+            ),
+            regions AS (
+                SELECT parent_id, jsonb_agg(location->'bbox') AS boxes
+                FROM source_elements
+                WHERE extraction_run_id = :run_id AND element_type = 'table'
+                GROUP BY parent_id
+            )
+            SELECT b.id, b.text, p.page_number, b.location->'bbox' AS bbox,
+                   COALESCE(r.boxes, '[]'::jsonb) AS page_tables
+            FROM source_elements AS b
+            JOIN page AS p ON p.id = b.parent_id
+            LEFT JOIN regions AS r ON r.parent_id = b.parent_id
+            WHERE b.extraction_run_id = :run_id
+              AND b.element_type = 'block'
+              AND b.text IS NOT NULL
+            ORDER BY p.ordinal, b.ordinal
+            """
+        )
+        rows = self._session.execute(statement.bindparams(run_id=run_id)).all()
+        return [
+            NarrativeBlock(
+                element_id=row.id,
+                text=row.text,
+                page_number=row.page_number,
+                ordinal=index,
+                bbox=_box(row.bbox),
+                page_tables=tuple(
+                    box for box in (_box(raw) for raw in row.page_tables) if box
+                ),
+            )
+            for index, row in enumerate(rows)
+        ]
+
     def counts_for_run(self, *, run_id: UUID) -> ElementCounts:
         """Summarise a run without loading its elements.
 
@@ -384,6 +450,13 @@ def _extension_row(
         "is_total": semantics.is_total,
         "units": semantics.units,
     }
+
+
+def _box(raw: object) -> tuple[float, float, float, float] | None:
+    """Read a bbox out of a JSONB location, or None when it has none."""
+    if not isinstance(raw, list) or len(raw) != 4:
+        return None
+    return (float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3]))
 
 
 def count_elements(elements: Iterable[ExtractedElement]) -> int:

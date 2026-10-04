@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from uuid import UUID
 
+from finsight.chunking.service import build_chunking_service
 from finsight.corpus.manifest import MANIFEST_PATH, CorpusError, Split, load_manifest
 from finsight.corpus.service import IngestionReport, build_corpus_ingestion_service
 from finsight.corpus.store import CorpusStore, digest_of, media_type_for
@@ -43,6 +44,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Identifier of a document version already recorded by intake.",
     )
     extract.set_defaults(handler=run_extract)
+
+    chunk = subcommands.add_parser(
+        "chunk",
+        help="Build retrieval chunks from a version's extracted blocks.",
+    )
+    chunk.add_argument(
+        "document_version_id",
+        type=UUID,
+        help="Identifier of a document version that has been extracted.",
+    )
+    chunk.set_defaults(handler=run_chunk)
 
     _add_corpus_commands(subcommands)
 
@@ -305,6 +317,24 @@ def run_corpus_list(args: argparse.Namespace) -> int:
             f"  {entry.document_id:40} {entry.split.value:30} "
             f"{entry.document_type.value:18} {entry.fiscal_period}{frozen}"
         )
+    return EXIT_OK
+
+
+def run_chunk(args: argparse.Namespace) -> int:
+    """Chunk one document version's extracted blocks and queue them for indexing.
+
+    Re-running with an unchanged configuration is a no-op and says so. Building a
+    second generation would re-embed every chunk for a byte-identical result.
+    """
+    result = build_chunking_service().chunk(args.document_version_id)
+
+    outcome = "already recorded" if result.already_existed else "recorded"
+    print(f"chunking {outcome}")
+    print(f"  generation: {result.generation_id}")
+    print(f"  version:    {result.document_version_id}")
+    if not result.already_existed:
+        print(f"  chunks:     {result.chunk_count}")
+        print("  note:       queued for indexing; run 'index' to make them searchable")
     return EXIT_OK
 
 
