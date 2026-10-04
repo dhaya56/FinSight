@@ -33,7 +33,11 @@ from finsight.extraction.contracts import ExtractionError
 from finsight.extraction.service import ExtractionService, build_extraction_service
 from finsight.ingestion.intake import IntakeService, build_intake_service
 from finsight.persistence.database import session_scope
+from finsight.persistence.repositories.document_metadata import (
+    DocumentMetadataRepository,
+)
 from finsight.persistence.repositories.source import ElementCounts, SourceRepository
+from finsight.persistence.tables.document_metadata import SOURCE_CORPUS_MANIFEST
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +166,8 @@ class CorpusIngestionService:
                 filename=entry.filename,
             )
 
+        self._record_metadata(entry, version_id=received.version_id)
+
         recorded = self._extraction.extract(received.version_id)
 
         with self._session_scope() as session:
@@ -178,6 +184,34 @@ class CorpusIngestionService:
             seconds=time.perf_counter() - started,
             peak_python_mib=_peak_mib() if measure_memory else None,
         )
+
+
+    def _record_metadata(self, entry: CorpusEntry, *, version_id: UUID) -> None:
+        """Record the §20.2 filter values the manifest declares for this entry.
+
+        Before extraction rather than after, so a filing whose extraction fails is
+        still identifiable. The values describe the document, not the parse, and
+        losing them because a parser stumbled would make the failure harder to
+        investigate than it needs to be.
+
+        ``source`` records that these are a curator's claim rather than something
+        read from the filing. Nothing extracts issuer or period yet, and the
+        distinction has to survive until something does.
+        """
+        with self._session_scope() as session:
+            DocumentMetadataRepository(session).record(
+                document_version_id=version_id,
+                issuer_name=entry.issuer_name,
+                issuer_identifier=entry.issuer_identifier or None,
+                document_type=str(entry.document_type),
+                jurisdiction=entry.jurisdiction or None,
+                fiscal_period=entry.fiscal_period,
+                period_end=entry.period_end,
+                reporting_basis=entry.reporting_basis,
+                currency=entry.currency or None,
+                units_as_presented=entry.units_as_presented or None,
+                source=SOURCE_CORPUS_MANIFEST,
+            )
 
 
 def _peak_mib() -> float:

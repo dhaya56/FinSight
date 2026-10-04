@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import text
 
+from db_cleanup import statements as cleanup_statements
 from finsight.domain.representations.source import (
     ElementType,
     ExtractionState,
@@ -48,43 +49,7 @@ from pdf_fixtures import (
 
 pytestmark = pytest.mark.integration
 
-_RUNS = """
-    SELECT id FROM extraction_runs WHERE document_version_id IN (
-        SELECT id FROM document_versions WHERE content_hash = ANY(:hashes)
-    )
-"""
-_ELEMENTS = f"SELECT id FROM source_elements WHERE extraction_run_id IN ({_RUNS})"
 
-CLEANUP = f"""
-    UPDATE document_versions SET current_extraction_run_id = NULL
-    WHERE content_hash = ANY(:hashes);
-
-    DELETE FROM source_tables WHERE source_element_id IN ({_ELEMENTS});
-
-    DELETE FROM source_table_cells WHERE source_element_id IN ({_ELEMENTS});
-
-    DELETE FROM source_elements WHERE extraction_run_id IN ({_RUNS});
-
-    DELETE FROM extraction_runs WHERE document_version_id IN (
-        SELECT id FROM document_versions WHERE content_hash = ANY(:hashes)
-    );
-
-    DELETE FROM document_versions WHERE content_hash = ANY(:hashes);
-
-    DELETE FROM documents
-    WHERE id NOT IN (SELECT document_id FROM document_versions);
-"""
-"""Unwinds a test's rows in dependency order.
-
-The pointer is cleared first: ``document_versions`` references
-``extraction_runs`` and ``extraction_runs`` references ``document_versions``, so
-neither can be deleted while the pointer still stands.
-
-The semantics extensions go before ``source_elements`` they key to. Until a test
-extracted a table there was nothing in them and their absence here was invisible,
-which is the shape of cleanup bug that surfaces as an unrelated test failing on a
-foreign key much later.
-"""
 
 
 @pytest.fixture(scope="module")
@@ -115,7 +80,7 @@ def stored(intake: IntakeService) -> Iterator[Callable[[bytes, str], UUID]]:
 
     if hashes:
         with get_engine().begin() as connection:
-            for statement in filter(None, (s.strip() for s in CLEANUP.split(";"))):
+            for statement in cleanup_statements():
                 query = text(statement)
                 if ":hashes" in statement:
                     query = query.bindparams(hashes=hashes)

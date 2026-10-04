@@ -13,6 +13,7 @@ from logging.config import fileConfig
 from alembic import context
 
 from finsight.persistence.database import get_engine
+from finsight.persistence.tables import document_metadata as _metadata  # noqa: F401
 from finsight.persistence.tables import documents as _documents  # noqa: F401
 from finsight.persistence.tables import generations as _generations  # noqa: F401
 from finsight.persistence.tables import source as _source  # noqa: F401

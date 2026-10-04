@@ -18,6 +18,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import text
 
+from db_cleanup import statements as cleanup_statements
 from finsight.corpus.manifest import CorpusEntry, Split, load_manifest
 from finsight.corpus.service import CorpusIngestionService, build_corpus_ingestion_service
 from finsight.corpus.store import ChecksumMismatchError, CorpusStore, HeldOutAccessError
@@ -28,25 +29,6 @@ from pdf_fixtures import PlacedText, build_malformed_pdf, build_pdf
 
 pytestmark = pytest.mark.integration
 
-CLEANUP = """
-    UPDATE document_versions SET current_extraction_run_id = NULL
-    WHERE content_hash = ANY(:hashes);
-
-    DELETE FROM source_elements WHERE extraction_run_id IN (
-        SELECT id FROM extraction_runs WHERE document_version_id IN (
-            SELECT id FROM document_versions WHERE content_hash = ANY(:hashes)
-        )
-    );
-
-    DELETE FROM extraction_runs WHERE document_version_id IN (
-        SELECT id FROM document_versions WHERE content_hash = ANY(:hashes)
-    );
-
-    DELETE FROM document_versions WHERE content_hash = ANY(:hashes);
-
-    DELETE FROM documents
-    WHERE id NOT IN (SELECT document_id FROM document_versions);
-"""
 
 ENTRY = """
 [[document]]
@@ -103,7 +85,7 @@ def corpus(tmp_path: Path) -> Iterator[Path]:
     ]
     if digests:
         with get_engine().begin() as connection:
-            for statement in filter(None, (s.strip() for s in CLEANUP.split(";"))):
+            for statement in cleanup_statements():
                 query = text(statement)
                 if ":hashes" in statement:
                     query = query.bindparams(hashes=digests)
