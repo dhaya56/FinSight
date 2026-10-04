@@ -188,6 +188,21 @@ class Settings(BaseSettings):
         ),
     )
 
+    text_search_config: str = Field(
+        default="english",
+        description=(
+            "PostgreSQL text-search configuration used to analyse chunk text and "
+            "queries. NOT A SELECTED VALUE. §9.7 requires the configuration, how "
+            "per-document language is determined, the index type and any field "
+            "weighting to be chosen with recorded evidence when the lexical index "
+            "is built. The corpus is India-first with non-Indian supplements, so a "
+            "single hardcoded language is explicitly not a safe default. This is "
+            "the setting that makes the choice visible and changeable; changing it "
+            "requires re-chunking under a new generation, because the stored "
+            "lexemes were analysed with the old one."
+        ),
+    )
+
     # ----------------------------------------------------------------- Ingestion
 
     upload_max_bytes: int = Field(
