@@ -106,6 +106,42 @@ batches to cut round trips and does **not** thread, and a future attempt to add 
 worker pool would be wasted effort. At this rate a 1,303-chunk filing embeds in
 roughly 105 seconds.
 
+#### Correction, 2026-10-05: that rate was measured on the wrong text
+
+**The throughput table above is real but was measured on 34-character sentences,
+and it does not describe indexing.** The conclusion about threading survives; the
+rate does not. Measured against the same running model, one variable changed at a
+time, after a warm-up call:
+
+| Case | Mean characters | Throughput |
+|---|---|---|
+| Short probe — the shape measured above | 34 | **32.4 texts/s** |
+| Real child chunk text | 1,349 | **1.82 texts/s** |
+| Real child chunk text, enriched for indexing | 1,456 | **1.68 texts/s** |
+
+**An 18x shortfall**, and the "1,303-chunk filing in roughly 105 seconds" claim is
+wrong by about 7x. The first full index of a real filing took **522 seconds for
+1,301 chunks — 2.1 chunks/s**, which agrees with the 1.68/s above once the DB and
+Qdrant round trips are counted as the small part they are.
+
+The cause is simply sequence length: the probe was 40x shorter than the work. Nomic
+on CPU costs time per token, so a per-text rate measured on one text length
+predicts nothing at another. **The lesson is the one ENV-004 already recorded about
+synthetic fixtures** — this is the same mistake in a different place, and it reached
+a decision record rather than a test.
+
+Two figures worth carrying forward:
+
+- **Enrichment costs 8%** (1.82 → 1.68 texts/s). That is the price of the context
+  §14.2 asks for, and it is cheap.
+- **A full re-index of the development corpus is ~47 minutes** (4,816 children at
+  1.7/s), not the ~6 minutes the old figure implied. That is the number to plan a
+  re-embed around, and it makes `BM25_CONFIG_VERSION` and
+  `embedding_config_version` changes genuinely expensive rather than nominally so.
+
+The original table is left in place rather than rewritten, because the error was not
+in the measurement — it was in generalising it to work it never covered.
+
 The contention that *does* matter is with generation: §41.11 flags a shared 15.7 GB
 envelope, and Phase 8 puts `llama3.1:8b` (4.9 GB) on the same host Ollama. That is
 unmeasured and remains an open item.

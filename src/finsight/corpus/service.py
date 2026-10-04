@@ -41,12 +41,18 @@ from finsight.domain.identifiers import HASH_ALGORITHM
 from finsight.domain.representations.source import ExtractionState
 from finsight.extraction.contracts import ExtractionError
 from finsight.extraction.service import ExtractionService, build_extraction_service
+from finsight.indexing.service import (
+    IndexingError,
+    IndexingService,
+    build_indexing_service,
+)
 from finsight.ingestion.intake import IntakeService, build_intake_service
 from finsight.persistence.database import session_scope
 from finsight.persistence.repositories.document_metadata import (
     DocumentMetadataRepository,
 )
 from finsight.persistence.repositories.documents import DocumentRepository
+from finsight.persistence.repositories.generations import GenerationRepository
 from finsight.persistence.repositories.source import ElementCounts, SourceRepository
 from finsight.persistence.tables.document_metadata import SOURCE_CORPUS_MANIFEST
 
@@ -58,6 +64,14 @@ class NotIngestedError(CorpusError):
     document exists and the database disagrees, which means a stage was run out of
     order. Distinguished from an extraction or chunking failure so that "never
     ingested" cannot be mistaken for "ingested and unchunkable".
+    """
+
+
+class NotChunkedError(CorpusError):
+    """The version is ingested but no generation was built from its current run.
+
+    Also a stage-ordering failure, and distinct from the one above so that the
+    message names the stage to run rather than the stage that complained.
     """
 
 
@@ -344,6 +358,135 @@ class CorpusChunkingService:
             return version.id
 
 
+@dataclass(frozen=True, slots=True)
+class CorpusIndexingOutcome:
+    """What happened to one corpus document's indexing stage."""
+
+    document_id: str
+    generation_id: UUID | None = None
+    indexed: int = 0
+    activated: bool = False
+    already_complete: bool = False
+    seconds: float = 0.0
+    failure: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.failure is None
+
+
+@dataclass(frozen=True, slots=True)
+class CorpusIndexingReport:
+    """The result of indexing a selection of the corpus."""
+
+    outcomes: tuple[CorpusIndexingOutcome, ...]
+
+    @property
+    def total_seconds(self) -> float:
+        return sum(outcome.seconds for outcome in self.outcomes)
+
+    @property
+    def failures(self) -> tuple[CorpusIndexingOutcome, ...]:
+        return tuple(outcome for outcome in self.outcomes if not outcome.succeeded)
+
+
+class CorpusIndexingService:
+    """Index and activate the current generation of every document in a selection.
+
+    The third stage driver, completing the set. Each stage is addressable for the
+    whole corpus, which is what makes the pipeline runnable without reading
+    identifiers out of the database by hand:
+
+    ``corpus ingest`` -> ``corpus chunk`` -> ``corpus index``
+
+    Resolves each entry to the generation built from its *current* extraction run,
+    so re-extraction under a new configuration moves this stage onto the new
+    generation automatically rather than re-indexing the superseded one.
+    """
+
+    def __init__(
+        self,
+        store: CorpusStore,
+        indexing: IndexingService,
+        session_scope_factory: Callable[[], AbstractContextManager[Session]] = session_scope,
+    ) -> None:
+        self._store = store
+        self._indexing = indexing
+        self._session_scope = session_scope_factory
+
+    def index(
+        self, entries: Sequence[CorpusEntry], *, retry: bool = False
+    ) -> CorpusIndexingReport:
+        """Index each entry, continuing past documents that fail.
+
+        Raises:
+            HeldOutAccessError: an entry belongs to a frozen split.
+        """
+        for entry in entries:
+            self._store.ensure_readable(entry)
+
+        return CorpusIndexingReport(
+            outcomes=tuple(
+                self._index_one(entry, retry=retry) for entry in entries
+            )
+        )
+
+    def _index_one(
+        self, entry: CorpusEntry, *, retry: bool
+    ) -> CorpusIndexingOutcome:
+        started = time.perf_counter()
+        try:
+            generation_id = self._generation_of(entry)
+            recorded = self._indexing.index(generation_id, retry=retry)
+        except (NotIngestedError, NotChunkedError, IndexingError) as error:
+            return CorpusIndexingOutcome(
+                document_id=entry.document_id,
+                seconds=time.perf_counter() - started,
+                failure=type(error).__name__,
+            )
+
+        return CorpusIndexingOutcome(
+            document_id=entry.document_id,
+            generation_id=recorded.generation_id,
+            indexed=recorded.indexed,
+            activated=recorded.activated,
+            already_complete=recorded.already_complete,
+            seconds=time.perf_counter() - started,
+        )
+
+    def _generation_of(self, entry: CorpusEntry) -> UUID:
+        """The generation built from this entry's current extraction run.
+
+        Raises:
+            NotIngestedError: nothing holds the entry's bytes.
+            NotChunkedError: the version has no extraction run, or no generation
+                was built from the current one.
+        """
+        with self._session_scope() as session:
+            version = DocumentRepository(session).version_by_content_hash(
+                hash_algorithm=HASH_ALGORITHM, content_hash=entry.sha256
+            )
+            if version is None:
+                raise NotIngestedError(
+                    f"'{entry.document_id}' has not been ingested; run "
+                    "'corpus ingest' first"
+                )
+            if version.current_extraction_run_id is None:
+                raise NotChunkedError(
+                    f"'{entry.document_id}' has no completed extraction"
+                )
+            generation_id = GenerationRepository(session).for_current_run(
+                document_version_id=version.id,
+                extraction_run_id=version.current_extraction_run_id,
+            )
+            if generation_id is None:
+                raise NotChunkedError(
+                    f"'{entry.document_id}' has no generation for its current "
+                    "extraction run; run 'corpus chunk' first"
+                )
+            return generation_id
+
+
 def _peak_mib() -> float:
     if not tracemalloc.is_tracing():
         return 0.0
@@ -363,3 +506,8 @@ def build_corpus_ingestion_service(store: CorpusStore) -> CorpusIngestionService
 def build_corpus_chunking_service(store: CorpusStore) -> CorpusChunkingService:
     """Wire corpus chunking to the configured tokenizer and database."""
     return CorpusChunkingService(store=store, chunking=build_chunking_service())
+
+
+def build_corpus_indexing_service(store: CorpusStore) -> CorpusIndexingService:
+    """Wire corpus indexing to the configured model, index and database."""
+    return CorpusIndexingService(store=store, indexing=build_indexing_service())

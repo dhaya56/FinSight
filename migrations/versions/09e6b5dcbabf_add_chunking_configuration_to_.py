@@ -9,6 +9,11 @@ version with an unchanged configuration produced a *second* generation and
 re-embedded every chunk. Measured at roughly 105 seconds for a 1,300-chunk filing,
 for a byte-identical result.
 
+(That figure came from ADR-004's throughput probe and was later measured at 522
+seconds against real chunks. Left as written, since an applied migration records
+what was known when it ran; ADR-004 carries the correction. The argument for the
+index is only strengthened.)
+
 Extraction already solved this with a partial unique index on
 (document_version_id, producer_policy, config_version). This is the same shape,
 keyed on the chunking configuration, and it excludes failed generations for the

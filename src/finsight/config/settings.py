@@ -243,10 +243,13 @@ class Settings(BaseSettings):
         default=32,
         ge=1,
         description=(
-            "Unmeasured initial default. Ollama serialises embedding work — "
-            "measured at 12.3 texts/s with one client thread and 12.3 with "
-            "eight — so batching reduces round trips rather than adding "
-            "parallelism, and a client-side thread pool would buy nothing."
+            "Unmeasured initial default. Ollama serialises embedding work, so "
+            "batching reduces round trips rather than adding parallelism and a "
+            "client-side thread pool would buy nothing — measured at 12.3 texts/s "
+            "with one client thread and 12.3 with eight. Note that rate came from "
+            "34-character probes; real enriched chunks measure 1.68 texts/s, and "
+            "ADR-004 carries the correction. The threading conclusion holds; the "
+            "rate does not."
         ),
     )
     embedding_max_input_chars: int = Field(

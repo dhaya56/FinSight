@@ -16,20 +16,29 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from qdrant_client import QdrantClient
 from sqlalchemy import text
 
 from db_cleanup import statements as cleanup_statements
+from finsight.config.settings import get_settings
 from finsight.corpus.manifest import CorpusEntry, Split, load_manifest
 from finsight.corpus.service import (
     CorpusChunkingService,
+    CorpusIndexingService,
     CorpusIngestionService,
     build_corpus_chunking_service,
     build_corpus_ingestion_service,
 )
 from finsight.corpus.store import ChecksumMismatchError, CorpusStore, HeldOutAccessError
 from finsight.domain.representations.source import ExtractionState
+from finsight.embedding.fake import FakeEmbedder
+from finsight.indexing.service import (
+    IndexingService,
+    TransactionalIndexingRecorder,
+)
 from finsight.object_store.s3_store import dispose_s3_client
 from finsight.persistence.database import dispose_engine, get_engine
+from finsight.vector_index.qdrant_index import QdrantVectorIndex
 from pdf_fixtures import PlacedText, build_malformed_pdf, build_pdf
 
 pytestmark = pytest.mark.integration
@@ -162,6 +171,38 @@ def service(corpus: Path) -> CorpusIngestionService:
 @pytest.fixture
 def chunker(corpus: Path) -> CorpusChunkingService:
     return build_corpus_chunking_service(CorpusStore(root=corpus))
+
+
+@pytest.fixture
+def indexer(corpus: Path) -> Iterator[CorpusIndexingService]:
+    """The indexing driver, on the deterministic fake and its own collection.
+
+    Not ``build_corpus_indexing_service``: that wires host-native Ollama, which
+    does not exist in CI. The fake exercises everything except the model, so these
+    tests prove the three stages compose and assert nothing about retrieval quality.
+    """
+    settings = get_settings()
+    client = QdrantClient(url=settings.qdrant_url, timeout=30)
+    index = QdrantVectorIndex(
+        client=client,
+        model=f"test-corpus-{uuid4().hex[:8]}",
+        dimensions=32,
+        config_version="1",
+    )
+    try:
+        yield CorpusIndexingService(
+            store=CorpusStore(root=corpus),
+            indexing=IndexingService(
+                recorder=TransactionalIndexingRecorder(),
+                embedder=FakeEmbedder(dimensions=32),
+                index=index,
+                batch_size=8,
+            ),
+        )
+    finally:
+        if client.collection_exists(index.collection):
+            client.delete_collection(index.collection)
+        client.close()
 
 
 class TestCorpusIngestion:
@@ -357,6 +398,102 @@ class TestCorpusChunking:
             ).one()
 
         assert cited == blocks
+
+
+class TestCorpusIndexing:
+    """The third stage driver, and the chain it completes.
+
+    ``corpus ingest`` -> ``corpus chunk`` -> ``corpus index``. What is proved here is
+    that the three compose for a whole split without an identifier being read out of
+    the database by hand, which is the gap that left two of three real filings
+    unchunked for a phase.
+    """
+
+    def test_the_whole_split_is_indexed_and_activated(
+        self,
+        service: CorpusIngestionService,
+        chunker: CorpusChunkingService,
+        indexer: CorpusIndexingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        entries = [add(), add()]
+        service.ingest(entries)
+        chunker.chunk(entries)
+
+        report = indexer.index(entries)
+
+        assert report.failures == ()
+        for outcome in report.outcomes:
+            assert outcome.activated is True
+            assert outcome.indexed > 0
+
+    def test_indexing_activates_the_generation_chunking_built(
+        self,
+        service: CorpusIngestionService,
+        chunker: CorpusChunkingService,
+        indexer: CorpusIndexingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        """The stages must agree on which generation they are working on."""
+        entry = add()
+        service.ingest([entry])
+        chunked = chunker.chunk([entry]).outcomes[0]
+
+        indexed = indexer.index([entry]).outcomes[0]
+
+        assert indexed.generation_id == chunked.generation_id
+
+    def test_a_document_that_was_never_chunked_is_reported_as_such(
+        self,
+        service: CorpusIngestionService,
+        indexer: CorpusIndexingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        """Named for the stage to run, not the stage that complained."""
+        entry = add()
+        service.ingest([entry])
+
+        report = indexer.index([entry])
+
+        assert report.outcomes[0].failure == "NotChunkedError"
+
+    def test_a_document_that_was_never_ingested_is_reported_as_such(
+        self,
+        indexer: CorpusIndexingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        report = indexer.index([add()])
+
+        assert report.outcomes[0].failure == "NotIngestedError"
+
+    def test_a_held_out_document_is_refused_before_any_indexing(
+        self,
+        indexer: CorpusIndexingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        entry = add(split=Split.HELD_OUT_PDF_CORE, frozen=True)
+
+        with pytest.raises(HeldOutAccessError):
+            indexer.index([entry])
+
+    def test_one_failure_does_not_stop_the_rest(
+        self,
+        service: CorpusIngestionService,
+        chunker: CorpusChunkingService,
+        indexer: CorpusIndexingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        """§11.11's discipline applied to the indexing stage."""
+        ready = add()
+        service.ingest([ready])
+        chunker.chunk([ready])
+        unchunked = add()
+        service.ingest([unchunked])
+
+        report = indexer.index([unchunked, ready])
+
+        assert report.outcomes[0].failure == "NotChunkedError"
+        assert report.outcomes[1].activated is True
 
 
 class TestPreconditions:

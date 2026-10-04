@@ -13,20 +13,52 @@ outside any transaction.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import func, insert, select
+from sqlalchemy import func, insert, select, update
 from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 
 from finsight.chunking.contracts import Chunk as DerivedChunk
 from finsight.domain.representations.retrieval import ChunkRole
 from finsight.persistence.tables.chunks import (
+    EVENT_COMPLETED,
+    EVENT_FAILED,
     EVENT_PENDING,
     Chunk,
     ChunkSource,
     IndexOutbox,
 )
+from finsight.persistence.tables.document_metadata import DocumentMetadata
+
+
+@dataclass(frozen=True, slots=True)
+class PendingChunk:
+    """One chunk awaiting indexing, with everything the indexer needs.
+
+    Read in a single join rather than a query per chunk. The metadata fields come
+    from ``document_metadata`` and are NULL for anything ingested outside the
+    corpus, which the indexer handles by omitting them from the filter payload
+    rather than inventing a value.
+    """
+
+    chunk_id: UUID
+    document_version_id: UUID
+    text: str
+    lexemes: str | None
+    """The analysed form. ``None`` means never analysed — a pipeline fault — while
+    ``''`` means analysed to no terms, which is legitimate."""
+
+    heading_path: tuple[str, ...]
+    page_numbers: tuple[int, ...]
+    evidence_type: str
+
+    issuer_name: str | None = None
+    document_type: str | None = None
+    fiscal_period: str | None = None
+    reporting_basis: str | None = None
+    currency: str | None = None
 
 
 class ChunkRepository:
@@ -172,6 +204,158 @@ class ChunkRepository:
                 .limit(limit)
             ).scalars()
         )
+
+    def pending_chunks(
+        self, *, generation_id: UUID, limit: int
+    ) -> list[PendingChunk]:
+        """Pending chunks with their text, lexemes and document context.
+
+        One query with two joins, rather than a list of ids followed by a read per
+        chunk. The indexer processes the whole corpus in batches, so a per-chunk
+        round trip would add one to every chunk — 4,816 of them for the development
+        split alone.
+
+        The metadata join is an outer join on purpose: a chunk whose document has no
+        recorded issuer must still be indexed, with the filter fields absent rather
+        than the chunk missing.
+        """
+        statement = (
+            select(
+                Chunk.id,
+                Chunk.document_version_id,
+                Chunk.text,
+                Chunk.lexemes,
+                Chunk.heading_path,
+                Chunk.page_numbers,
+                Chunk.evidence_type,
+                DocumentMetadata.issuer_name,
+                DocumentMetadata.document_type,
+                DocumentMetadata.fiscal_period,
+                DocumentMetadata.reporting_basis,
+                DocumentMetadata.currency,
+            )
+            .join(IndexOutbox, IndexOutbox.chunk_id == Chunk.id)
+            .outerjoin(
+                DocumentMetadata,
+                DocumentMetadata.document_version_id == Chunk.document_version_id,
+            )
+            .where(
+                IndexOutbox.generation_id == generation_id,
+                IndexOutbox.state == EVENT_PENDING,
+            )
+            .order_by(Chunk.ordinal)
+            .limit(limit)
+        )
+        return [
+            PendingChunk(
+                chunk_id=row.id,
+                document_version_id=row.document_version_id,
+                text=row.text,
+                # ``lexemes`` is TSVECTOR; SQLAlchemy hands it back as the text
+                # form, which is what the BM25 parser reads. The cast is explicit
+                # so a driver that returned a richer object fails here rather than
+                # producing an empty sparse vector for every chunk.
+                lexemes=None if row.lexemes is None else str(row.lexemes),
+                heading_path=tuple(row.heading_path or ()),
+                page_numbers=tuple(row.page_numbers or ()),
+                evidence_type=row.evidence_type,
+                issuer_name=row.issuer_name,
+                document_type=row.document_type,
+                fiscal_period=row.fiscal_period,
+                reporting_basis=row.reporting_basis,
+                currency=row.currency,
+            )
+            for row in self._session.execute(statement)
+        ]
+
+    def event_count(self, *, generation_id: UUID) -> int:
+        """How many chunks this generation queued for indexing.
+
+        The denominator for reconciliation (§29.11). Counted from the outbox rather
+        than from ``chunks``, because only children are queued — a parent repeats
+        its children's text and is deliberately not indexed.
+        """
+        return self._session.execute(
+            select(func.count())
+            .select_from(IndexOutbox)
+            .where(IndexOutbox.generation_id == generation_id)
+        ).scalar_one()
+
+    def completed_event_count(self, *, generation_id: UUID) -> int:
+        return self._session.execute(
+            select(func.count())
+            .select_from(IndexOutbox)
+            .where(
+                IndexOutbox.generation_id == generation_id,
+                IndexOutbox.state == EVENT_COMPLETED,
+            )
+        ).scalar_one()
+
+    def complete_events(self, *, chunk_ids: Sequence[UUID]) -> None:
+        """Record that these chunks reached the index (§29.10).
+
+        ``clock_timestamp()`` rather than ``now()``, for the reason recorded on
+        ``GenerationRepository.activate``: ``now()`` is the transaction's start
+        time, and a completion stamped before the upsert it describes reads as
+        though the work happened out of order.
+        """
+        if not chunk_ids:
+            return
+        self._session.execute(
+            update(IndexOutbox)
+            .where(IndexOutbox.chunk_id.in_(list(chunk_ids)))
+            .values(
+                state=EVENT_COMPLETED,
+                completed_at=func.clock_timestamp(),
+                failure_reason=None,
+                attempts=IndexOutbox.attempts + 1,
+            )
+        )
+
+    def fail_events(self, *, chunk_ids: Sequence[UUID], reason: str) -> None:
+        """Record that these chunks could not be indexed, and why.
+
+        Marked failed rather than left pending. A permanent fault — a chunk the
+        model refuses as too long — would otherwise be retried by every subsequent
+        run forever, and the ``attempts`` column exists to make that visible rather
+        than to permit it. :meth:`reset_failed_events` is how a retry is asked for.
+
+        ``completed_at`` is set even though nothing completed. The
+        ``completed_at_matches_state`` CHECK ties a NULL timestamp to ``pending``
+        exactly, so the column means "no longer awaiting work" rather than
+        "succeeded", and a failed event has to carry one. Worth knowing before
+        reading the column as a success time.
+        """
+        if not chunk_ids:
+            return
+        self._session.execute(
+            update(IndexOutbox)
+            .where(IndexOutbox.chunk_id.in_(list(chunk_ids)))
+            .values(
+                state=EVENT_FAILED,
+                completed_at=func.clock_timestamp(),
+                failure_reason=reason[:128],
+                attempts=IndexOutbox.attempts + 1,
+            )
+        )
+
+    def reset_failed_events(self, *, generation_id: UUID) -> int:
+        """Return a generation's failed events to pending, for a retry.
+
+        Separate from the indexer so retrying is an explicit operator action. An
+        indexer that silently reset failures on every run would turn the
+        ``attempts`` count into noise and hide a chunk that can never be indexed.
+        """
+        reset = self._session.execute(
+            update(IndexOutbox)
+            .where(
+                IndexOutbox.generation_id == generation_id,
+                IndexOutbox.state == EVENT_FAILED,
+            )
+            .values(state=EVENT_PENDING, completed_at=None, failure_reason=None)
+            .returning(IndexOutbox.chunk_id)
+        ).scalars()
+        return len(list(reset))
 
 
 class UnknownTextSearchConfigError(RuntimeError):

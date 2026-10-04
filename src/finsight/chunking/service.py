@@ -13,9 +13,13 @@ long-running computation out of one.
 **Re-chunking an unchanged document is a recorded no-op.** A partial unique index
 on (document version, extraction run, chunking configuration) makes a repeat run
 return the existing generation rather than building a second one — which would
-re-embed every chunk, measured at roughly 105 seconds for a 1,300-chunk filing, for
-a byte-identical result. Extraction established this pattern; chunking inherits it
+re-embed every chunk, **measured at 522 seconds for a 1,301-chunk filing**, for a
+byte-identical result. Extraction established this pattern; chunking inherits it
 rather than rediscovering the cost in production.
+
+(An earlier version of this note said 105 seconds, from ADR-004's throughput probe.
+That probe embedded 34-character sentences; real chunks average 1,456 characters
+enriched and embed 18x slower. ADR-004 carries the correction.)
 """
 
 from collections.abc import Callable, Sequence

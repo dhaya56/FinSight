@@ -20,13 +20,17 @@ from finsight.corpus.manifest import MANIFEST_PATH, CorpusError, Split, load_man
 from finsight.corpus.service import (
     IngestionReport,
     build_corpus_chunking_service,
+    build_corpus_indexing_service,
     build_corpus_ingestion_service,
 )
 from finsight.corpus.store import CorpusStore, digest_of, media_type_for
 from finsight.domain.errors import DomainError
+from finsight.embedding.port import EmbeddingError
 from finsight.extraction.service import build_extraction_service
+from finsight.indexing.service import build_indexing_service
 from finsight.object_store.port import ObjectStoreError
 from finsight.persistence.repositories.source import ElementCounts
+from finsight.vector_index.port import VectorIndexError
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -60,6 +64,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Identifier of a document version that has been extracted.",
     )
     chunk.set_defaults(handler=run_chunk)
+
+    index = subcommands.add_parser(
+        "index",
+        help="Embed and index a generation's chunks, then activate it.",
+    )
+    index.add_argument(
+        "generation_id",
+        type=UUID,
+        help="Identifier of a shadow generation produced by chunking.",
+    )
+    index.add_argument(
+        "--retry",
+        action="store_true",
+        help=(
+            "Return a failed generation and its failed events to a retryable "
+            "state first. Not needed after an outage, which leaves events pending."
+        ),
+    )
+    index.set_defaults(handler=run_index)
 
     _add_corpus_commands(subcommands)
 
@@ -129,6 +152,23 @@ def _add_corpus_commands(subcommands: argparse._SubParsersAction) -> None:  # ty
         help="Which split to chunk. Defaults to development; held-out is refused.",
     )
     chunking.set_defaults(handler=run_corpus_chunk)
+
+    indexing = commands.add_parser(
+        "index", help="Index and activate the current generation of every document."
+    )
+    indexing.add_argument(
+        "--split",
+        type=Split,
+        choices=list(Split),
+        default=Split.DEVELOPMENT,
+        help="Which split to index. Defaults to development; held-out is refused.",
+    )
+    indexing.add_argument(
+        "--retry",
+        action="store_true",
+        help="Reopen failed generations and their failed events first.",
+    )
+    indexing.set_defaults(handler=run_corpus_index)
 
 
 def _add_split_option(parser: argparse.ArgumentParser) -> None:
@@ -338,6 +378,45 @@ def run_corpus_chunk(args: argparse.Namespace) -> int:
     return EXIT_FAILED if failed else EXIT_OK
 
 
+def run_corpus_index(args: argparse.Namespace) -> int:
+    """Index every chunked document in a split and activate what succeeds.
+
+    The slow stage: measured at 1.68 texts/s against real enriched chunks, so the
+    development split is roughly 47 minutes from cold. Each document activates as it
+    finishes rather than at the end, so an interrupted run leaves the documents it
+    completed queryable.
+    """
+    entries = _selected(args)
+    if not entries:
+        print("no documents recorded for that selection")
+        return EXIT_OK
+
+    report = build_corpus_indexing_service(_corpus_store()).index(
+        entries, retry=args.retry
+    )
+
+    for outcome in report.outcomes:
+        if outcome.failure is not None:
+            print(f"  {outcome.document_id:40} FAILED {outcome.failure}")
+            continue
+        print(
+            f"  {outcome.document_id:40} "
+            f"{'activated' if outcome.activated else 'NOT ACTIVATED':16} "
+            f"{outcome.seconds:.2f}s"
+        )
+        print(f"      generation {outcome.generation_id}")
+        print(f"      indexed    {outcome.indexed}")
+        if outcome.already_complete:
+            print("      note       already indexed by an earlier run")
+
+    failed = len(report.failures)
+    print(
+        f"{len(report.outcomes) - failed} succeeded, {failed} failed, "
+        f"{report.total_seconds:.2f}s total"
+    )
+    return EXIT_FAILED if failed else EXIT_OK
+
+
 def _write_report(path: Path, report: IngestionReport) -> None:
     """Write per-document detail that is too long for a decision record.
 
@@ -406,6 +485,25 @@ def run_chunk(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def run_index(args: argparse.Namespace) -> int:
+    """Index one generation and report whether it became queryable.
+
+    Activation is the fact worth printing. Everything before it is work; only this
+    makes the chunks visible to retrieval (§11.13), and a run that indexed
+    everything and did not activate is a failure however healthy the counts look.
+    """
+    result = build_indexing_service().index(args.generation_id, retry=args.retry)
+
+    print("indexing complete")
+    print(f"  generation: {result.generation_id}")
+    print(f"  collection: {result.collection}")
+    print(f"  indexed:    {result.indexed}")
+    if result.already_complete:
+        print("  note:       every chunk was already indexed by an earlier run")
+    print(f"  activated:  {result.activated}")
+    return EXIT_OK
+
+
 def run_extract(args: argparse.Namespace) -> int:
     """Extract one document version and report what was recorded.
 
@@ -435,11 +533,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     Only errors this project defines are caught. An unexpected exception keeps
     its traceback, because a swallowed stack trace is how a real defect gets
     mistaken for a bad document.
+
+    The embedding and vector-index families are caught too, and they are not
+    defects: Ollama being down or Qdrant being unreachable is an ordinary
+    operational state for a host-native model and a derived index, and printing a
+    stack trace for it would suggest otherwise.
     """
     args = build_parser().parse_args(argv)
     try:
         exit_code: int = args.handler(args)
-    except (DomainError, ObjectStoreError, CorpusError) as error:
+    except (
+        DomainError,
+        ObjectStoreError,
+        CorpusError,
+        EmbeddingError,
+        VectorIndexError,
+    ) as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_FAILED
     return exit_code

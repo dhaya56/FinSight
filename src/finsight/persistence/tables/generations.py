@@ -120,7 +120,7 @@ class Generation(Base):
     ``uq_generations_configuration`` is idempotency, enforced the way extraction
     already enforces it. Re-running chunking on an unchanged version with an
     unchanged configuration would otherwise build a second generation and re-embed
-    every chunk — measured at roughly 105 seconds for a 1,300-chunk filing, for a
+    every chunk — **measured at 522 seconds for a 1,301-chunk filing**, for a
     byte-identical result. Failed generations are excluded so a failure stays
     retryable, exactly as ``uq_extraction_runs_document_version_id`` does.
 
@@ -159,7 +159,7 @@ class Generation(Base):
 
     Nullable because a generation exists before its chunking component completes.
     It participates in the configuration index below, which is what makes
-    re-chunking an unchanged document a recorded no-op rather than ~105 seconds of
+    re-chunking an unchanged document a recorded no-op rather than ~9 minutes of
     re-embedding for a byte-identical result.
     """
 

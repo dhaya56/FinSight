@@ -6,8 +6,8 @@ provoke against real infrastructure: a configuration that was already chunked, a
 two runs racing to chunk the same version.
 
 :class:`TestIdempotency` is the one that matters. Re-chunking an unchanged document
-re-embeds every chunk, measured at roughly 105 seconds for a 1,300-chunk filing,
-for a byte-identical result.
+re-embeds every chunk, measured at 522 seconds for a 1,301-chunk filing, for a
+byte-identical result.
 """
 
 import uuid

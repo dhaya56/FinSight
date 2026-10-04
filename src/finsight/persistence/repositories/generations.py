@@ -37,6 +37,14 @@ from finsight.persistence.tables.generations import (
 )
 
 
+class GenerationActiveError(RuntimeError):
+    """An operation was attempted that is only valid on a non-active generation.
+
+    Separate from a domain error because it reports a caller mistake rather than a
+    condition of the data: the generation is fine, and the request was not.
+    """
+
+
 class GenerationRepository:
     """Record and advance generations. Opens no transaction of its own."""
 
@@ -129,6 +137,38 @@ class GenerationRepository:
             .values(state=STATE_FAILED, activated_at=None)
         )
 
+    def reopen(self, *, generation_id: UUID) -> None:
+        """Return a failed generation to shadow so indexing can be retried.
+
+        Guarded to the failed state, and the guard is the point. A failed
+        generation was never queryable, so reopening it takes nothing from a
+        reader; an *active* one is being served right now, and returning it to
+        shadow would make a reader's evidence vanish mid-session while the
+        reprocessing §11.13 requires — build a new generation, switch atomically —
+        was never performed.
+
+        A generation that is not failed is left exactly as it is, and the caller
+        sees no error: asking to reopen a shadow generation is a harmless no-op,
+        which is what makes ``index --retry`` safe to pass habitually.
+
+        Raises:
+            GenerationActiveError: the generation is active.
+        """
+        state = self.state_of(generation_id=generation_id)
+        if state == STATE_ACTIVE:
+            raise GenerationActiveError(
+                f"generation {generation_id} is active and is being served; "
+                "reprocessing builds a new generation rather than reopening this "
+                "one (§11.13)"
+            )
+        if state != STATE_FAILED:
+            return
+        self._session.execute(
+            update(Generation)
+            .where(Generation.id == generation_id, Generation.state == STATE_FAILED)
+            .values(state=STATE_SHADOW, activated_at=None)
+        )
+
     def for_configuration(
         self,
         *,
@@ -151,6 +191,34 @@ class GenerationRepository:
             )
         ).scalar_one_or_none()
 
+    def for_current_run(
+        self, *, document_version_id: UUID, extraction_run_id: UUID
+    ) -> UUID | None:
+        """The generation built from this extraction run, whatever its state.
+
+        Keyed on the run rather than the chunking configuration, because the caller
+        is a stage driver asking "which generation should I index for this
+        document?" — and the answer must not change when the chunking configuration
+        does. A re-chunk under a new configuration supersedes the old generation
+        through the configuration index, so at most one non-failed generation exists
+        per run.
+
+        Failed generations are excluded, so a document whose indexing failed reports
+        as unchunked rather than silently retrying a generation that needs
+        ``--retry`` to be reopened. Ordered newest first so that a run holding both
+        a superseded and a current generation yields the current one.
+        """
+        return self._session.execute(
+            select(Generation.id)
+            .where(
+                Generation.document_version_id == document_version_id,
+                Generation.extraction_run_id == extraction_run_id,
+                Generation.state != STATE_FAILED,
+            )
+            .order_by(Generation.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
     def active_for(self, *, document_version_id: UUID) -> UUID | None:
         """The generation retrieval may see for this version, or None.
 
@@ -162,6 +230,14 @@ class GenerationRepository:
             select(Generation.id).where(
                 Generation.document_version_id == document_version_id,
                 Generation.state == STATE_ACTIVE,
+            )
+        ).scalar_one_or_none()
+
+    def document_version_of(self, *, generation_id: UUID) -> UUID | None:
+        """Which version a generation belongs to, or None if it does not exist."""
+        return self._session.execute(
+            select(Generation.document_version_id).where(
+                Generation.id == generation_id
             )
         ).scalar_one_or_none()
 

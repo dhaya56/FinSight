@@ -641,6 +641,40 @@ Not done in the chunking commit because the composition belongs where embedding
 happens, and doing it here would mean storing the enriched string and losing the
 verbatim one.
 
+### Implemented — `src/finsight/indexing/enrichment.py`
+
+The embedded string is now labelled context, a blank line, then the chunk verbatim:
+
+```text
+Issuer: HDFC Bank Limited
+Document: annual report
+Period: FY2024-25
+Basis: both
+Currency: INR
+Section: Directors' Report > Capital Adequacy
+Page: 42
+
+<chunk text, unchanged>
+```
+
+Nothing stores it. It is built, embedded and discarded, so there is no path by
+which it can be quoted back to a reader as evidence.
+
+**Two deliberate omissions, both recorded so they are not read as oversights.**
+
+| Omitted | Why |
+|---|---|
+| `units_as_presented` | §14.6 permits scale, but one corpus entry records it as "INR crore, lakh and million mixed within one document" — a hazard description, not a unit. Embedding that into every chunk of the document would add 60 characters of noise and assert a scale the document does not have. Currency is included; it is a single stable token |
+| A value for an absent field | A missing issuer is omitted, not written as "unknown". "unknown" is a token every incomplete document would share, making them measurably similar to each other for a reason unrelated to content |
+
+**Unmeasured, and the measurement is not available yet.** Whether this improves
+retrieval cannot be answered without a golden question set, which §34 has not
+produced. What is *known* is the asymmetry: documents are embedded with context and
+queries are not, so the context contributes a near-constant component to every
+document vector. Contextual retrieval is well-attested as a net gain and §14.2 asks
+for it, so it is implemented — but the honest status is "required by the blueprint
+and plausible", not "measured to help here".
+
 ---
 
 ## 18. The chunk minimum is a target, not a guarantee
