@@ -113,7 +113,12 @@ python-docx==1.2.0
 python-dotenv==1.2.3
 python-oxmsg==0.0.2
 python-pptx==1.0.2
-pywin32==312
+# Windows-only, and has no distribution on any other platform. docling-parse and
+# mpire both declare it under a sys_platform marker; freezing this file on Windows
+# flattened that condition away, so Linux CI failed to resolve it at install time.
+# The marker restores the condition rather than removing the pin, which would
+# leave the Windows build unpinned.
+pywin32==312 ; sys_platform == "win32"
 PyYAML==6.0.3
 rapidocr==3.9.2
 referencing==0.37.0
