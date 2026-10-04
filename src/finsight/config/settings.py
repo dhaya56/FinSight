@@ -203,6 +203,48 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ------------------------------------------------------------------ Embedding
+
+    ollama_base_url: str = Field(
+        default="http://127.0.0.1:11434",
+        description=(
+            "Host-native Ollama endpoint (§9.8). Loopback by default because "
+            "Ollama is not containerised and is not exposed to the network."
+        ),
+    )
+    embedding_model: str = Field(
+        default="nomic-embed-text",
+        description=(
+            "PROVISIONAL, not selected. ADR-004 adopts it as §22.2's named "
+            "lightweight initial candidate; §22.10 reserves selection for the "
+            "smallest model with acceptable measured quality, and no comparison "
+            "against BGE-M3 has been run."
+        ),
+    )
+    embedding_dimensions: int = Field(
+        default=768,
+        ge=1,
+        description=(
+            "Vector width, measured from the configured model rather than "
+            "assumed. Changing the model almost certainly changes this, and a "
+            "collection is created with a fixed width, so the two must move "
+            "together."
+        ),
+    )
+    embedding_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        description=(
+            "Unmeasured. Generous because a cold model load is slow and a "
+            "timeout mid-batch leaves outbox events pending for no reason."
+        ),
+    )
+    embedding_batch_size: int = Field(
+        default=32,
+        ge=1,
+        description="Unmeasured initial default.",
+    )
+
     # ----------------------------------------------------------------- Ingestion
 
     upload_max_bytes: int = Field(
