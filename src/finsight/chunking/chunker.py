@@ -298,9 +298,8 @@ def _emit_group(
         pending.append(unit)
         pending_tokens += tokens
 
-    # The tail is emitted even when it is under the minimum: dropping it would
-    # lose the blocks, and merging it backwards would push a chunk over budget.
     flush()
+    _absorb_short_tail(out, parent_index + 1, config, count)
 
     parent = _build(
         units,
@@ -327,6 +326,57 @@ def _emit_group(
         return
 
     out[parent_index] = parent
+
+
+def _absorb_short_tail(
+    out: list[Chunk], first: int, config: ChunkingConfig, count: TokenCounter
+) -> None:
+    """Merge a sub-minimum final chunk into the one before it, where it fits.
+
+    ``child_min_tokens`` was declared and never read: the accumulator merged while
+    filling, but whatever remained at the end was emitted regardless of size. On a
+    real filing that left 57 children under the stated 48-token floor and 108 under
+    100 — fragments whose embeddings are ambiguous out of context, which is the
+    failure a minimum exists to prevent.
+
+    Merging backwards rather than dropping, because dropping loses the blocks.
+    When the merge would exceed ``child_max_tokens`` the short chunk stays: an
+    over-budget chunk is truncated by the embedding model, which is worse than a
+    short one.
+    """
+    if len(out) - first < 2:
+        return
+    tail = out[-1]
+    if tail.role is not ChunkRole.CHILD or tail.token_count >= config.child_min_tokens:
+        return
+
+    previous = out[-2]
+    if previous.role is not ChunkRole.CHILD:
+        return
+    merged_text = _JOIN.join([previous.text, tail.text])
+    if count(merged_text) > config.child_max_tokens:
+        return
+
+    out[-2:] = [
+        replace(
+            previous,
+            text=merged_text,
+            source_element_ids=(
+                *previous.source_element_ids,
+                *(
+                    element_id
+                    for element_id in tail.source_element_ids
+                    if element_id not in previous.source_element_ids
+                ),
+            ),
+            page_numbers=tuple(
+                sorted({*previous.page_numbers, *tail.page_numbers})
+            ),
+            token_count=count(merged_text),
+            char_count=len(merged_text),
+            notes=tuple({*previous.notes, *tail.notes, JOINED_FRAGMENTS}),
+        )
+    ]
 
 
 def _placeholder_parent(

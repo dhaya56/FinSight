@@ -588,7 +588,62 @@ the same text. Those parents are no longer emitted; 680 became 153.
 
 ---
 
-## 16. Not implemented, and recorded so absence is not read as a finding
+## 16. Multi-column reading order, and what it does to chunks
+
+**Measured, confirmed, unfixed.** ENV-005 measured positional reading order
+diverging from a column-aware ordering on **195 of 1,403 pages (14%)**. That was
+recorded as a sensitivity figure. Chunking makes the consequence concrete, because
+interleaved blocks are now joined into one embedded string.
+
+A stored chunk from a real filing, pages 19–20:
+
+> `- Insurance Services 2024 in North ■ Recognized as a leader in CapioIT APAC
+> Salesforce SI and Solutions Providers Ecosystem Capture Share Report, 2025 ■
+> Infosys BPM won the Avasant Digital Masters Award 2024 … Assessment 2024
+> Services, Q1 2025 America, A`
+
+"in North" and "America, A" are the two ends of one phrase, separated by a column's
+worth of unrelated text. The chunk reads as prose, embeds as prose, and is not.
+
+**The rate is not 14% of chunks and is not yet known.** A crude detector — any
+chunk whose source blocks start on both halves of the page — flags 67%, but it
+cannot distinguish interleaving from a full-width table, a right-aligned figure or
+a legitimately wide layout. The honest figure remains ENV-005's page-level 14%, and
+a chunk-level rate needs the column-aware comparison §35.4 describes.
+
+**The fix belongs in extraction, not here.** `reading_order_key` returns
+`(y0, x0)` with no column awareness, and `reading_order.py` records why: any
+tolerance band is a threshold, and §4 reserves thresholds for development data.
+Chunking cannot repair an order it is handed. Recorded as the largest known
+quality defect in the retrieval path.
+
+---
+
+## 17. Deterministic enrichment does not reach the embedding
+
+Chunks store `heading_path`, `page_numbers` and `evidence_type` as columns, and
+`text` verbatim. §14.4 requires that — no enriched text may be presented as
+original evidence, and a citation resolves to the source region.
+
+But §14.2 says a retrieval representation "adds deterministic context useful for
+lexical and dense search", and §14.6 permits issuer, document type, heading path,
+page, period, basis, currency, scale and caption. **Today the embedded string is
+the `text` column alone**, so none of that context reaches the vector. A chunk
+reading "This was primarily due to increased cost of goods sold" embeds with no
+indication of which company, filing, period or section it belongs to.
+
+**Decision, recorded here before the indexer is written:** the indexer composes the
+embedded string from the deterministic context *and* the text, while `text` stays
+verbatim in the database for citation. That keeps §14.4 — the enriched form is what
+search matches, never what a citation returns — and satisfies §14.2 and §14.6.
+
+Not done in the chunking commit because the composition belongs where embedding
+happens, and doing it here would mean storing the enriched string and losing the
+verbatim one.
+
+---
+
+## 18. Not implemented, and recorded so absence is not read as a finding
 
 | Gap | Consequence if forgotten |
 |---|---|

@@ -556,3 +556,66 @@ class TestAuditFindings:
 
         with pytest.raises(CoverageError, match="document order"):
             chunk_blocks(source, config=SMALL, count_tokens=words)
+
+
+class TestShortTailAbsorption:
+    """``child_min_tokens`` was declared and never read.
+
+    The accumulator merged while filling, but whatever remained at the end was
+    emitted regardless of size. On a real filing that left 57 children under the
+    stated 48-token floor — fragments whose embeddings are ambiguous out of
+    context, which is the failure a minimum exists to prevent.
+    """
+
+    def test_a_short_tail_is_merged_backwards(self) -> None:
+        config = ChunkingConfig(child_max_tokens=12, child_min_tokens=4)
+        source = blocks("a " * 10, "tail")
+
+        result = chunk_blocks(source, config=config, count_tokens=words)
+
+        assert len(children(result)) == 1
+        assert "tail" in children(result)[0].text
+
+    def test_merging_never_exceeds_the_budget(self) -> None:
+        """An over-budget chunk is truncated by the model, which is worse."""
+        config = ChunkingConfig(child_max_tokens=10, child_min_tokens=8)
+        source = blocks("a " * 10, "b " * 2)
+
+        result = chunk_blocks(source, config=config, count_tokens=words)
+
+        assert all(
+            chunk.token_count <= config.child_max_tokens
+            for chunk in children(result)
+        )
+
+    def test_an_unmergeable_tail_is_kept_rather_than_dropped(self) -> None:
+        """Dropping it would lose the blocks, which coverage forbids."""
+        config = ChunkingConfig(child_max_tokens=10, child_min_tokens=8)
+        source = blocks("a " * 10, "b " * 2)
+
+        result = chunk_blocks(source, config=config, count_tokens=words)
+        placed = {
+            element_id
+            for chunk in children(result)
+            for element_id in chunk.source_element_ids
+        }
+
+        assert placed == {b.element_id for b in source}
+
+    def test_a_merged_chunk_keeps_both_sets_of_sources(self) -> None:
+        config = ChunkingConfig(child_max_tokens=12, child_min_tokens=4)
+        source = blocks("a " * 10, "tail")
+
+        result = chunk_blocks(source, config=config, count_tokens=words)
+
+        assert children(result)[0].source_element_ids == tuple(
+            b.element_id for b in source
+        )
+
+    def test_a_lone_short_chunk_has_nothing_to_merge_into(self) -> None:
+        config = ChunkingConfig(child_max_tokens=10, child_min_tokens=8)
+        source = blocks("tiny")
+
+        result = chunk_blocks(source, config=config, count_tokens=words)
+
+        assert len(children(result)) == 1

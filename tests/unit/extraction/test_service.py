@@ -35,6 +35,8 @@ from finsight.extraction.contracts import (
     derive_state,
 )
 from finsight.extraction.service import (
+    EXTRACTION_CONFIG_VERSION,
+    PRODUCER_POLICY,
     ExtractionPlan,
     ExtractionService,
     VersionForExtraction,
@@ -251,7 +253,9 @@ class TestIdempotence:
 
         service.extract(uuid4())
 
-        assert recorder.configurations == [("pdf-native", "1")]
+        assert recorder.configurations == [
+            (PRODUCER_POLICY, EXTRACTION_CONFIG_VERSION)
+        ]
 
     def test_a_custom_configuration_is_honoured(self) -> None:
         journal: list[str] = []

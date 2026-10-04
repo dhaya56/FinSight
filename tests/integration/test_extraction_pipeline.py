@@ -31,6 +31,7 @@ from finsight.extraction.contracts import (
 from finsight.extraction.pdf.pymupdf_adapter import PyMuPdfProducer
 from finsight.extraction.pdf.quality_signals import NO_TEXT_EXTRACTED
 from finsight.extraction.service import (
+    EXTRACTION_CONFIG_VERSION,
     ExtractionService,
     TransactionalExtractionRecorder,
     build_extraction_service,
@@ -48,6 +49,14 @@ from pdf_fixtures import (
 )
 
 pytestmark = pytest.mark.integration
+
+BUMPED_CONFIG = f"{EXTRACTION_CONFIG_VERSION}-bumped"
+"""A configuration distinct from production's, whatever production's is.
+
+Hardcoding a literal here meant the test silently stopped testing a bump the day
+the real constant caught up with it: the "new" run collided with the default one
+and the assertion compared a run against itself.
+"""
 
 
 
@@ -212,7 +221,7 @@ class TestIdempotence:
             object_store=build_s3_object_store(),
             producer=PyMuPdfProducer(),
             recorder=TransactionalExtractionRecorder(),
-            config_version="2",
+            config_version=BUMPED_CONFIG,
         )
         second = bumped.extract(version_id)
 
@@ -233,7 +242,7 @@ class TestIdempotence:
             object_store=build_s3_object_store(),
             producer=PyMuPdfProducer(),
             recorder=TransactionalExtractionRecorder(),
-            config_version="2",
+            config_version=BUMPED_CONFIG,
         ).extract(version_id)
 
         with session_scope() as session:
