@@ -371,6 +371,20 @@ class TableSemantics:
     member and an unassessed table writes no semantics row at all.
     """
 
+    continuation_of: str | None = None
+    """Title of the statement this table continues, from the document's own
+    "(continued)" heading, or None when no such heading was found (§12.8).
+
+    **None is not evidence that a table is not a continuation.** One development
+    document declares continuations 91 times and another declares none at all, so
+    this records a declaration, never its absence.
+
+    A title rather than a link to the earlier table. The document states what is
+    continued; which stored region holds the earlier part is an inference across
+    regions measured as frequently mis-bounded, and asserting it would dress a
+    guess as provenance.
+    """
+
     verdict_reasons: tuple[str, ...] = ()
     """Why, in machine-readable terms, so a verdict can be re-examined."""
 

@@ -432,7 +432,50 @@ ground truth to separate, and that is ADR-003's measurement, not a rule to tune.
 
 ---
 
-## 12. Not implemented, and recorded so absence is not read as a finding
+## 12. Table continuation
+
+**Rule.** A table is marked as continuing a statement when the nearest heading
+above it on the page contains a *parenthesised* continuation marker — `(contd.)`,
+`(cont'd)`, `(continued)`. The heading text before the marker is stored verbatim
+as `source_tables.continuation_of`.
+
+**Why the brackets are the whole rule.** Scanning the development split for the
+bare word found **215** occurrences, essentially all ordinary prose: "continued to
+mature the technology", "our continued commitment". Requiring the parenthesised
+form found **98**, and every one was a real continuation heading. No false positive
+in either document that carries them.
+
+**A title, not a link.** The document *states* what is continued. Which stored
+region holds the earlier part is an inference across regions ENV-008 §2.5 measured
+as frequently mis-bounded, and a foreign key would present that inference as
+provenance. Joining the content into one logical table is a retrieval
+representation (§18.4), not a source one.
+
+**Known misfires.**
+
+| Misfire | Consequence |
+|---|---|
+| **One development filing declares none at all.** HDFC: 0 markers in 590 pages | NULL is **not** evidence a table stands alone. Whether continuations are declared is a publisher's house style, so recall across issuers is unknown and probably poor |
+| The heading is page-scoped, so every table beneath it on that page takes the same title | Correct for a continued statement split into regions; wrong if an unrelated table shares the page. Unmeasured |
+| Only the nearest marked heading is used | A table under a continued note inside a continued section records the note, losing the section |
+| A continuation declared by a repeated header rather than a marker is invisible | The §12.8 case ENV-006 noted in Ola and never quantified |
+
+**Measured?** The marker's precision, yes — 98 of 98 across two documents. Its
+*recall* against tables that genuinely continue, no: that needs the ground truth.
+
+**Two defects this found in the adjacency scan**, both from real pages:
+
+- **Overlap was measured against the table's width alone.** "Balance Sheet
+  (contd.)" is about a fifth as wide as the statement it heads, so a correct
+  heading failed a test asking it to span a third of the table. Now measured
+  against the narrower of the two boxes.
+- **A heading was required to end above the table's top.** A clipped region can
+  begin partway through its own heading, which is exactly what one real page did.
+  Now the heading only has to *start* above.
+
+---
+
+## 13. Not implemented, and recorded so absence is not read as a finding
 
 | Gap | Consequence if forgotten |
 |---|---|

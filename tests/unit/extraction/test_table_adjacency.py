@@ -11,7 +11,7 @@ alone. The second class is the important one — ENV-008 measured table regions 
 frequently mis-bounded, so "the text just below" is routinely another table's.
 """
 
-from finsight.extraction.tables.adjacency import bind_footnotes
+from finsight.extraction.tables.adjacency import bind_footnotes, continuation_title
 
 TABLE = (50.0, 100.0, 450.0, 200.0)
 
@@ -147,3 +147,94 @@ class TestRefusal:
         notes = bind_footnotes(TABLE, ["a"], [*filler, block(400.0, "(a) Far below.")])
 
         assert notes == ()
+
+
+class TestContinuationTitle:
+    """§12.8: a table that continues one from an earlier page.
+
+    The brackets carry the precision. Scanning the development split for the bare
+    word "continued" found 215 occurrences, almost all ordinary prose; requiring
+    the parenthesised form found 98 and every one was a real heading.
+    """
+
+    def test_a_marked_heading_gives_the_title(self) -> None:
+        notes = continuation_title(TABLE, [block(60.0, "Balance Sheet (contd.)")])
+
+        assert notes == "Balance Sheet"
+
+    def test_the_spelled_out_form_is_recognised(self) -> None:
+        title = continuation_title(TABLE, [block(60.0, "B Other equity (continued)")])
+
+        assert title == "B Other equity"
+
+    def test_prose_about_continuing_is_not_a_heading(self) -> None:
+        """The dominant form in the corpus, and the reason brackets are required."""
+        title = continuation_title(
+            TABLE, [block(60.0, "We continued to mature the technology stack.")]
+        )
+
+        assert title is None
+
+    def test_no_heading_means_none(self) -> None:
+        title = continuation_title(TABLE, [block(60.0, "Balance Sheet")])
+
+        assert title is None
+
+    def test_the_nearest_heading_wins(self) -> None:
+        """Pages nest continuations: a note under a section, both continued."""
+        title = continuation_title(
+            TABLE,
+            [
+                block(20.0, "3 Significant accounting policies (continued)"),
+                block(60.0, "3.2 Property, plant and equipment (continued)"),
+            ],
+        )
+
+        assert title == "3.2 Property, plant and equipment"
+
+    def test_a_heading_below_the_table_is_not_its_own(self) -> None:
+        title = continuation_title(TABLE, [block(260.0, "Balance Sheet (contd.)")])
+
+        assert title is None
+
+    def test_a_narrow_heading_over_a_wide_table_is_found(self) -> None:
+        """The defect that made this fail on real pages.
+
+        "Balance Sheet (contd.)" is about a fifth as wide as the statement it
+        heads. Measuring overlap against the table's width asked the heading to
+        span a third of it, which a correct heading cannot do.
+        """
+        title = continuation_title(
+            TABLE, [block(60.0, "Balance Sheet (contd.)", left=50.0, right=160.0)]
+        )
+
+        assert title == "Balance Sheet"
+
+    def test_a_heading_straddling_the_table_top_still_counts(self) -> None:
+        """A clipped region can begin partway through its own heading.
+
+        Measured on a real page: the region's top edge sat below the heading's,
+        so a rule requiring the heading to *end* above the table missed it.
+        """
+        straddling = ((50.0, 95.0, 450.0, 115.0), "Balance Sheet (contd.)")
+        title = continuation_title(TABLE, [straddling])
+
+        assert title == "Balance Sheet"
+
+    def test_a_heading_in_another_column_is_ignored(self) -> None:
+        title = continuation_title(
+            TABLE, [block(60.0, "Balance Sheet (contd.)", left=600.0, right=760.0)]
+        )
+
+        assert title is None
+
+    def test_a_bare_marker_with_no_title_is_none(self) -> None:
+        """"(continued)" alone identifies nothing to group on."""
+        assert continuation_title(TABLE, [block(60.0, "(continued)")]) is None
+
+    def test_a_degenerate_table_box_yields_none(self) -> None:
+        title = continuation_title(
+            (50.0, 100.0, 50.0, 200.0), [block(60.0, "Balance Sheet (contd.)")]
+        )
+
+        assert title is None

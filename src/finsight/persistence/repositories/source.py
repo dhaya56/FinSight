@@ -366,6 +366,7 @@ def _extension_row(
         return SourceTable, {
             "source_element_id": element_id,
             "caption": semantics.caption,
+            "continuation_of": semantics.continuation_of,
             "verdict": semantics.verdict.value if semantics.verdict else None,
             "verdict_reasons": list(semantics.verdict_reasons),
             "quality_signals": (

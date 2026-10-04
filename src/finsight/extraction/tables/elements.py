@@ -64,6 +64,7 @@ def to_element(
     failure_reason: str | None = None,
     quality: TableQuality | None = None,
     footnotes: Sequence[Footnote] = (),
+    continuation_of: str | None = None,
 ) -> ExtractedElement:
     """Build the table element and its cells.
 
@@ -111,21 +112,26 @@ def to_element(
         extraction_method_version=method_version,
         failure_reason=failure_reason,
         children=(*cells, *notes),
-        semantics=_semantics(quality),
+        semantics=_semantics(quality, continuation_of),
     )
 
 
-def _semantics(quality: TableQuality | None) -> TableSemantics | None:
+def _semantics(
+    quality: TableQuality | None, continuation_of: str | None = None
+) -> TableSemantics | None:
     """Attach the verdict, or nothing at all when none was formed.
 
     None rather than an empty record: a table with no assessment is different from
     one assessed and found clean, and writing a row either way would make the two
     indistinguishable. Caption stays None until caption derivation exists.
     """
-    if quality is None:
+    if quality is None and continuation_of is None:
         return None
+    if quality is None:
+        return TableSemantics(caption=None, continuation_of=continuation_of)
     return TableSemantics(
         caption=None,
+        continuation_of=continuation_of,
         verdict=quality.verdict,
         verdict_reasons=quality.reasons,
         quality_signals={

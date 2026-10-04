@@ -46,12 +46,53 @@ fragment, not a footnote, and binding it would attach an empty qualification.
 """
 
 _HORIZONTAL_OVERLAP: Final = 0.3
-"""Share of a table's width a block must span to count as beneath it.
+"""Overlap a block and a table must share, as a fraction of the **narrower** of
+the two.
 
-Multi-column pages put unrelated text directly below a table in the *other*
-column. Requiring real horizontal overlap is what keeps a neighbouring column's
-paragraph from being read as this table's footnote. Unmeasured against
-human-verified truth: it bounds a search that the marker match then decides.
+Multi-column pages put unrelated text directly beside a table, so some overlap
+must be required. Measuring it against the table's width alone was wrong: a
+heading like "Balance Sheet (contd.)" is a fifth of the width of the statement it
+heads, so a correct heading failed a test asking it to span a third of the table.
+Taking the narrower side makes the rule symmetric — a narrow heading over a wide
+table and a wide paragraph under a narrow one both pass, and a neighbouring column
+still fails because its overlap is negative.
+"""
+
+
+def _overlaps(box: BBox, table_bbox: BBox) -> bool:
+    shared = min(box[2], table_bbox[2]) - max(box[0], table_bbox[0])
+    narrower = min(box[2] - box[0], table_bbox[2] - table_bbox[0])
+    return narrower > 0 and shared > _HORIZONTAL_OVERLAP * narrower
+
+_CONTINUATION: Final = re.compile(
+    r"\(\s*(?:cont'?d\.?|continued)\s*\)", re.IGNORECASE
+)
+"""A heading announcing that the table below continues one from an earlier page.
+
+**The brackets are the whole rule.** Scanning the development split for the bare
+word found 215 occurrences, essentially all of them ordinary prose — "continued to
+mature the technology", "our continued commitment". Requiring the parenthesised
+form found 98, and every one was a real continuation heading: "Balance Sheet
+(contd.)", "B Other equity (continued)", "3.2 Property, plant and equipment
+(continued)". No false positive in either document carrying them.
+
+One document carried **none at all**, so this detects *declared* continuations and
+says nothing about undeclared ones (§12.8).
+"""
+
+_MAX_BLOCKS_ABOVE: Final = 30
+"""How many blocks above a table to search for a continuation heading.
+
+Deliberately generous, and sized by a failure. A continuation heading sits at the
+top of its page while its table may begin far down, and when the region is clipped
+the blocks between are *the table's own rows* — on one real page the eight nearest
+blocks above a region were all its own clipped line items. A tight bound searched
+those and stopped short of the heading.
+
+Affordable because the bracketed marker carries the precision: 98 occurrences
+across the development split, no false positive. Scanning further costs recall
+nothing and risks only picking up a heading that governs the whole page, which on
+a continued statement is the right answer anyway.
 """
 
 _MAX_BLOCKS_BELOW: Final = 8
@@ -123,8 +164,7 @@ def bind_footnotes(
             for box, text in blocks
             if box[1] >= bottom - 1.0
             and box[1] < floor
-            and min(box[2], table_bbox[2]) - max(box[0], table_bbox[0])
-            > _HORIZONTAL_OVERLAP * width
+            and _overlaps(box, table_bbox)
         ),
         key=lambda item: item[0][1],
     )[:max_blocks]
@@ -146,3 +186,49 @@ def bind_footnotes(
 
     return tuple(found[key] for key in sorted(found))
 
+
+def continuation_title(
+    table_bbox: BBox,
+    blocks: Sequence[tuple[BBox, str]],
+    *,
+    max_blocks: int = _MAX_BLOCKS_ABOVE,
+) -> str | None:
+    """The title of the statement this table continues, or None.
+
+    Returns the heading's text with the "(continued)" marker removed — the title
+    identifies *what* is continued, and is what a later layer would group on.
+
+    **The nearest marked heading wins.** Pages carry nested continuations — a note
+    heading continued under a section heading also continued — and the nearer one
+    is the more specific.
+
+    **This records a declaration; it does not link two tables.** Asserting which
+    earlier table this one continues would mean matching on titles the extractor
+    does not reliably have, across regions ENV-008 §2.5 measured as frequently
+    mis-bounded. The document's own statement is evidence; the join inferred from
+    it would not be.
+    """
+    top = table_bbox[1]
+    width = table_bbox[2] - table_bbox[0]
+    if width <= 0:
+        return None
+
+    # Starts above the table, rather than *ends* above it. A clipped region can
+    # begin partway through its own heading, and requiring the heading to finish
+    # before the region starts excluded exactly those cases.
+    above = sorted(
+        (
+            (box, text)
+            for box, text in blocks
+            if box[1] < top and _overlaps(box, table_bbox)
+        ),
+        key=lambda item: -item[0][1],
+    )[:max_blocks]
+
+    for _, text in above:
+        match = _CONTINUATION.search(text)
+        if match is None:
+            continue
+        title = " ".join(text[: match.start()].split())
+        return title or None
+    return None

@@ -68,7 +68,7 @@ from finsight.extraction.pdf.quality_signals import (
     PageSignals,
 )
 from finsight.extraction.pdf.reading_order import reading_order_key
-from finsight.extraction.tables.adjacency import bind_footnotes
+from finsight.extraction.tables.adjacency import bind_footnotes, continuation_title
 from finsight.extraction.tables.contracts import DetectedTable, TableDetector
 from finsight.extraction.tables.elements import to_element
 from finsight.extraction.tables.regions import UNSUPPORTED, review
@@ -266,6 +266,7 @@ class PyMuPdfProducer:
                     method_version=self._tables.method_version,
                     failure_reason=gap,
                     quality=verdict,
+                    continuation_of=continuation_title(derived.bbox, placed),
                     footnotes=bind_footnotes(
                         derived.bbox,
                         sorted(

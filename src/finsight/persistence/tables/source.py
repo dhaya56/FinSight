@@ -280,6 +280,19 @@ class SourceTable(Base):
     lands, no consumer may treat NULL as evidence that a table is uncaptioned.
     """
 
+    continuation_of: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """Title of the statement this table continues, verbatim (§12.8).
+
+    Set only from the document's own "(continued)" heading. NULL means no such
+    heading was found, **never** that the table stands alone: one development
+    filing declares continuations 91 times and another declares none, so absence
+    here is a property of the publisher's house style.
+
+    This is where §12.8's continuation link was always going to attach. It carries
+    a title rather than a foreign key because the join it would encode is an
+    inference, and this column is a quotation.
+    """
+
     verdict: Mapped[str | None] = mapped_column(String(32), nullable=True)
     """Whether this table may be used as evidence.
 
