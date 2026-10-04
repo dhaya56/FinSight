@@ -242,7 +242,25 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(
         default=32,
         ge=1,
-        description="Unmeasured initial default.",
+        description=(
+            "Unmeasured initial default. Ollama serialises embedding work — "
+            "measured at 12.3 texts/s with one client thread and 12.3 with "
+            "eight — so batching reduces round trips rather than adding "
+            "parallelism, and a client-side thread pool would buy nothing."
+        ),
+    )
+    embedding_max_input_chars: int = Field(
+        default=6000,
+        ge=1,
+        description=(
+            "Longest text sent to the model, in characters. MEASURED BOUND: "
+            "Ollama anchors num_ctx to 2,048 tokens for nomic-embed-text and "
+            "silently discards the remainder — appending a sentence to a "
+            "2,048-token passage returned a bit-identical vector. English prose "
+            "runs about 4.4 characters per token, so 2,048 tokens is roughly "
+            "9,000 characters; this sits below that. Exceeding it raises rather "
+            "than truncating, because truncated text is indexed and unfindable."
+        ),
     )
 
     # ----------------------------------------------------------------- Ingestion

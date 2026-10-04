@@ -47,6 +47,21 @@ class EmbeddingShapeError(EmbeddingError):
     """
 
 
+class EmbeddingInputTooLongError(EmbeddingError):
+    """The text exceeds what the model will actually read.
+
+    Raised rather than letting the model truncate. Measured against the running
+    service, Ollama silently discards input past its context window: appending a
+    distinctive sentence to a 2,048-token passage left the returned vector
+    **bit-identical**, with no error and no warning. A chunk half-embedded that way
+    is indexed, searched and trusted, and the half that was dropped is simply
+    unfindable.
+
+    Not a subclass of :class:`EmbeddingUnavailableError`, because retrying cannot
+    help — the input must get shorter.
+    """
+
+
 @runtime_checkable
 class Embedder(Protocol):
     """Turns text into vectors. Structural, so adapters do not subclass it."""

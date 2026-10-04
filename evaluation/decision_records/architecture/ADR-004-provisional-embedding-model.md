@@ -61,6 +61,68 @@ an irrelevant passage (+0.1565 against +0.1519). **That is one example and is no
 evidence of quality**; the reason to apply prefixes is that the model documents
 them, not that a single measurement favoured them.
 
+## Three runtime properties measured against the running service
+
+These are not model-quality questions. They are the ways a local Ollama
+deployment fails without saying so, and each was tested rather than assumed.
+
+### The context window is 2,048 tokens, not 8,192 — and overflow is silent
+
+`nomic-embed-text` is natively an 8,192-token model. **Ollama anchors it to 2,048**,
+and discards the remainder without an error:
+
+| Input | Appending a distinctive sentence changed the vector? |
+|---|---|
+| ~1,300 tokens | yes — cosine 0.997959 |
+| ~1,950 tokens | yes — cosine 0.999788 |
+| **~2,600 tokens** | **no — cosine 1.000000** |
+| ~3,900 tokens | no — cosine 1.000000 |
+
+A binary search put the boundary between **2,015 and 2,062** single-token words,
+i.e. exactly 2,048. A chunk half-embedded this way is indexed, searched and
+trusted, while the discarded half is unfindable — no error, no log line, nothing
+to distinguish it from a document that never contained the text.
+
+Child chunks are bounded at 384 tokens and so sit far clear, but **nothing enforced
+that**, and a configuration change could have crossed the line silently. The
+adapter now refuses over-long input (`EmbeddingInputTooLongError`) rather than
+letting the model truncate. The bound is in characters because the adapter
+deliberately carries no tokenizer; English financial prose measured at ~4.4
+characters per token, so the default of 6,000 sits well below the ~9,000 the window
+allows. Dense numerals tokenize worse and would reach the wall sooner, which is the
+residual risk and why it is configurable.
+
+### Ollama serialises embedding; client concurrency buys nothing
+
+| Client threads | Throughput |
+|---|---|
+| 1 | 12.3 texts/s |
+| 2 | 13.2 texts/s |
+| 4 | 12.8 texts/s |
+| 8 | 12.3 texts/s |
+
+Batching through one request gives the same 12.0–12.5 texts/s. So the adapter
+batches to cut round trips and does **not** thread, and a future attempt to add a
+worker pool would be wasted effort. At this rate a 1,303-chunk filing embeds in
+roughly 105 seconds.
+
+The contention that *does* matter is with generation: §41.11 flags a shared 15.7 GB
+envelope, and Phase 8 puts `llama3.1:8b` (4.9 GB) on the same host Ollama. That is
+unmeasured and remains an open item.
+
+### Re-embedding must be idempotent, and is not yet
+
+Generations are per *document version*, so changing one filing never re-embeds the
+corpus. But re-running chunking on an unchanged version with an unchanged
+configuration currently produces a new generation and re-embeds every chunk —
+~105 seconds of work for a byte-identical result.
+
+Extraction already solves this: a partial unique index on
+`(document_version_id, producer_policy, config_version)` makes a repeat run a
+recorded no-op. **Chunking needs the same**, keyed on the chunking configuration
+version. Recorded here as a requirement for the chunking service rather than left
+to be rediscovered as an operational surprise.
+
 ## What keeps it reversible
 
 - **`Embedder` protocol.** No HTTP client or model runtime crosses it.
@@ -90,7 +152,11 @@ them, not that a single measurement favoured them.
 - **Long-context behaviour is untested** (§22.7), and §22.7 cautions that "large
   chunks are not preferred by default" in any case.
 - **Peak memory is unmeasured** against §41.11's shared envelope, now with Qdrant
-  arriving alongside.
+  arriving alongside and `llama3.1:8b` due in Phase 8.
+- **Dense retrieval alone will miss exact identifiers.** A dense model matches
+  meaning, not strings, so a query naming a specific figure, clause or code is
+  precisely where it underperforms. That is why §20.3's lexical path and §20.7's
+  reranker are part of the same phase rather than a later improvement.
 - **No Qdrant storage-footprint or rebuild-time figure** yet (§22.9).
 
 ## What would trigger revisiting

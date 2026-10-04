@@ -30,6 +30,7 @@ import httpx
 
 from finsight.config.settings import Settings, get_settings
 from finsight.embedding.port import (
+    EmbeddingInputTooLongError,
     EmbeddingShapeError,
     EmbeddingUnavailableError,
     Vector,
@@ -59,12 +60,14 @@ class OllamaEmbedder:
         dimensions: int,
         timeout_seconds: float,
         batch_size: int,
+        max_input_chars: int,
         client: httpx.Client | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._dimensions = dimensions
         self._batch_size = batch_size
+        self._max_input_chars = max_input_chars
         self._client = client or httpx.Client(timeout=timeout_seconds)
 
     @property
@@ -90,6 +93,7 @@ class OllamaEmbedder:
         return self._embed([f"{QUERY_PREFIX}{text}"])[0]
 
     def _embed(self, inputs: Sequence[str]) -> list[Vector]:
+        self._refuse_over_long(inputs)
         try:
             response = self._client.post(
                 f"{self._base_url}{_EMBED_PATH}",
@@ -112,6 +116,30 @@ class OllamaEmbedder:
             ) from error
 
         return self._verified(payload, expected=len(inputs))
+
+    def _refuse_over_long(self, inputs: Sequence[str]) -> None:
+        """Reject input the model would silently truncate.
+
+        **Measured, not assumed.** Appending a distinctive sentence to a
+        2,048-token passage returned a bit-identical vector — Ollama anchors
+        ``num_ctx`` to 2,048 for this model rather than its native 8,192, and
+        discards the remainder without an error.
+
+        The bound is in *characters* because this adapter deliberately has no
+        tokenizer: acquiring one would mean carrying a second model's vocabulary
+        to approximate a first model's. Characters are a conservative proxy —
+        English financial prose measured at roughly 4.4 characters per token, so
+        2,048 tokens is around 9,000 characters, and the default sits well below
+        that. Dense numerals tokenize worse and would hit the wall sooner, which
+        is the residual risk and why the bound is configurable.
+        """
+        for text in inputs:
+            if len(text) > self._max_input_chars:
+                raise EmbeddingInputTooLongError(
+                    f"input of {len(text):,} characters exceeds the configured "
+                    f"{self._max_input_chars:,}; the model would truncate it "
+                    "silently and the discarded text would be unfindable"
+                )
 
     def _verified(self, payload: Any, *, expected: int) -> list[Vector]:
         """Check the response before any of it reaches a vector store."""
@@ -169,4 +197,5 @@ def build_embedder(settings: Settings | None = None) -> OllamaEmbedder:
         dimensions=resolved.embedding_dimensions,
         timeout_seconds=resolved.embedding_timeout_seconds,
         batch_size=resolved.embedding_batch_size,
+        max_input_chars=resolved.embedding_max_input_chars,
     )

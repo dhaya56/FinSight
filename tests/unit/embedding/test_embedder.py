@@ -23,6 +23,7 @@ from finsight.embedding.ollama_embedder import (
 )
 from finsight.embedding.port import (
     Embedder,
+    EmbeddingInputTooLongError,
     EmbeddingShapeError,
     EmbeddingUnavailableError,
 )
@@ -48,6 +49,7 @@ def embedder(client: httpx.Client, *, dimensions: int = DIMENSIONS) -> OllamaEmb
         dimensions=dimensions,
         timeout_seconds=5.0,
         batch_size=2,
+        max_input_chars=100,
         client=client,
     )
 
@@ -248,3 +250,53 @@ class TestFakeEmbedder:
 
         similarity = sum(a * b for a, b in zip(one, two, strict=True))
         assert abs(similarity) < 0.3
+
+
+class TestTruncationGuard:
+    """The silent killer: Ollama discards input past num_ctx without saying so.
+
+    Measured against the running service — appending a distinctive sentence to a
+    2,048-token passage returned a **bit-identical** vector. A chunk embedded that
+    way is indexed and searched, and the discarded half is simply unfindable.
+    """
+
+    def test_over_long_input_is_refused_rather_than_truncated(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("the model should never have been called")
+
+        with pytest.raises(EmbeddingInputTooLongError, match="truncate it silently"):
+            embedder(transport(handler)).embed_query("x" * 101)
+
+    def test_the_guard_applies_to_documents_too(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("the model should never have been called")
+
+        with pytest.raises(EmbeddingInputTooLongError):
+            embedder(transport(handler)).embed_documents(["fine", "x" * 200])
+
+    def test_input_within_the_bound_is_accepted(self) -> None:
+        client = responding([UNIT])
+
+        assert embedder(client).embed_query("x" * 50) is not None
+
+    def test_the_bound_counts_the_prefix(self) -> None:
+        """It measures what the *model* receives, not what the caller passed.
+
+        The prefix is part of the input the model truncates, so excluding it would
+        leave a gap exactly the width of the prefix in which text is silently
+        discarded. The cost is that a caller sizing text to the limit exactly is
+        rejected over a prefix it never added — which the error message states.
+        """
+        client = responding([UNIT])
+        at_the_bound = "x" * (100 - len(QUERY_PREFIX))
+        over_by_one = "x" * (100 - len(QUERY_PREFIX) + 1)
+
+        assert embedder(client).embed_query(at_the_bound) is not None
+        with pytest.raises(EmbeddingInputTooLongError):
+            embedder(client).embed_query(over_by_one)
+
+    def test_it_is_not_confused_with_a_retryable_failure(self) -> None:
+        """Retrying cannot help; the input must get shorter."""
+        assert not issubclass(
+            EmbeddingInputTooLongError, EmbeddingUnavailableError
+        )
