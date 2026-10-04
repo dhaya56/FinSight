@@ -17,11 +17,16 @@ from uuid import UUID
 
 from finsight.chunking.service import build_chunking_service
 from finsight.corpus.manifest import MANIFEST_PATH, CorpusError, Split, load_manifest
-from finsight.corpus.service import IngestionReport, build_corpus_ingestion_service
+from finsight.corpus.service import (
+    IngestionReport,
+    build_corpus_chunking_service,
+    build_corpus_ingestion_service,
+)
 from finsight.corpus.store import CorpusStore, digest_of, media_type_for
 from finsight.domain.errors import DomainError
 from finsight.extraction.service import build_extraction_service
 from finsight.object_store.port import ObjectStoreError
+from finsight.persistence.repositories.source import ElementCounts
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -112,6 +117,18 @@ def _add_corpus_commands(subcommands: argparse._SubParsersAction) -> None:  # ty
         help="Record peak Python allocation. Slows extraction and distorts timings.",
     )
     ingest.set_defaults(handler=run_corpus_ingest)
+
+    chunking = commands.add_parser(
+        "chunk", help="Chunk every ingested document in a split."
+    )
+    chunking.add_argument(
+        "--split",
+        type=Split,
+        choices=list(Split),
+        default=Split.DEVELOPMENT,
+        help="Which split to chunk. Defaults to development; held-out is refused.",
+    )
+    chunking.set_defaults(handler=run_corpus_chunk)
 
 
 def _add_split_option(parser: argparse.ArgumentParser) -> None:
@@ -243,22 +260,22 @@ def run_corpus_ingest(args: argparse.Namespace) -> int:
         if outcome.failure is not None:
             print(f"  {outcome.document_id:40} FAILED {outcome.failure}")
             continue
-        counts = outcome.counts
-        state = outcome.state.value if outcome.state else "unknown"
-        detail = (
-            f"pages={counts.pages} blocks={counts.blocks} gaps={counts.coverage_gaps}"
-            if counts
-            else ""
-        )
         memory = (
             f" peak_python_mib={outcome.peak_python_mib:.1f}"
             if outcome.peak_python_mib is not None
             else ""
         )
+        state = outcome.state.value if outcome.state else "unknown"
         print(
-            f"  {outcome.document_id:40} {state:10} {detail} "
-            f"{outcome.seconds:.2f}s{memory}"
+            f"  {outcome.document_id:40} {state:10} {outcome.seconds:.2f}s{memory}"
         )
+        # The version id is what every later stage is addressed by, so a run that
+        # withheld it would leave an operator unable to chunk or index what it had
+        # just ingested without querying the database by hand. An identifier is not
+        # document content (§10).
+        print(f"      version   {outcome.version_id}")
+        if outcome.counts is not None:
+            print(f"      elements  {_element_detail(outcome.counts)}")
 
     failed = len(report.failures)
     print(
@@ -270,6 +287,54 @@ def run_corpus_ingest(args: argparse.Namespace) -> int:
         _write_report(args.report, report)
         print(f"report written to {args.report}")
 
+    return EXIT_FAILED if failed else EXIT_OK
+
+
+def _element_detail(counts: ElementCounts) -> str:
+    """Every element type the producer can emit, including the zeroes.
+
+    Printing only the non-zero types would make "no tables were detected" look
+    identical to "tables are not reported here", which is the confusion that let a
+    table-less extraction go unnoticed for a phase.
+    """
+    return (
+        f"pages={counts.pages} blocks={counts.blocks} tables={counts.tables} "
+        f"cells={counts.cells} footnotes={counts.footnotes} "
+        f"gaps={counts.coverage_gaps}"
+    )
+
+
+def run_corpus_chunk(args: argparse.Namespace) -> int:
+    """Chunk every ingested document in a split and report what each produced.
+
+    Separate from ingest, and defaulting to development for the same reason: a
+    command that processes documents must not reach frozen evidence because a flag
+    was omitted.
+    """
+    entries = _selected(args)
+    if not entries:
+        print("no documents recorded for that selection")
+        return EXIT_OK
+
+    report = build_corpus_chunking_service(_corpus_store()).chunk(entries)
+
+    for outcome in report.outcomes:
+        if outcome.failure is not None:
+            print(f"  {outcome.document_id:40} FAILED {outcome.failure}")
+            continue
+        state = "already recorded" if outcome.already_existed else "recorded"
+        print(f"  {outcome.document_id:40} {state:16} {outcome.seconds:.2f}s")
+        print(f"      generation {outcome.generation_id}")
+        if not outcome.already_existed:
+            print(f"      chunks     {outcome.chunk_count}")
+
+    failed = len(report.failures)
+    print(
+        f"{len(report.outcomes) - failed} succeeded, {failed} failed, "
+        f"{report.total_seconds:.2f}s total"
+    )
+    if failed == 0:
+        print("queued for indexing; run 'index' to make the chunks searchable")
     return EXIT_FAILED if failed else EXIT_OK
 
 
@@ -290,6 +355,9 @@ def _write_report(path: Path, report: IngestionReport) -> None:
                 "already_existed": outcome.already_existed,
                 "pages": outcome.counts.pages if outcome.counts else None,
                 "blocks": outcome.counts.blocks if outcome.counts else None,
+                "tables": outcome.counts.tables if outcome.counts else None,
+                "cells": outcome.counts.cells if outcome.counts else None,
+                "footnotes": outcome.counts.footnotes if outcome.counts else None,
                 "elements": outcome.counts.total if outcome.counts else None,
                 "coverage_gaps": (
                     outcome.counts.coverage_gaps if outcome.counts else None

@@ -643,7 +643,55 @@ verbatim one.
 
 ---
 
-## 18. Not implemented, and recorded so absence is not read as a finding
+## 18. The chunk minimum is a target, not a guarantee
+
+**Measured across all three development filings, with the whole corpus chunked for
+the first time.** 4,816 children; **1,164 (24%) fall below the stated
+`child_min_tokens` floor of 48**, and 427 are under 10 tokens. The smallest hold a
+single token: `held`, `share`, `a`, `Care`, `6`.
+
+| Filing | Children | Under 48 | Under 10 | Of the under-48, their run's only chunk |
+|---|---|---|---|---|
+| Infosys AR FY2025 | 1,301 | 388 (30%) | 175 | 372 |
+| HDFC Bank AR FY2025 | 2,007 | 609 (30%) | 181 | 581 |
+| Ola Electric DRHP | 1,508 | 167 (11%) | 71 | 133 |
+| **Total** | **4,816** | **1,164 (24%)** | **427** | **1,086 (93%)** |
+
+**`_absorb_short_tail` is not failing — it cannot reach these.** It merges the last
+chunk of a run backwards, and 93% of under-floor children *are* their run's only
+chunk, so there is nothing before them to merge into. The remaining 78 have a
+sibling and stayed short because merging would have breached `child_max_tokens`,
+which is the documented and intended trade (an over-budget chunk is silently
+truncated by the embedding model; a short one is not).
+
+**Two upstream causes, both already recorded.**
+
+1. **PyMuPDF emits line fragments, not paragraphs** (§15: median block 38
+   characters). `held` and `share` are pieces of one line — the same fragmentation
+   §16 shows producing interleaved chunk text.
+2. **The table-overlap flag splits a section at single-block granularity.** A lone
+   block overlapping a detected region becomes a one-block `table_derived` run and
+   cuts the narrative run around it in two. 226 of the 1,164 are single-block
+   `table_derived` runs (478 are `table_derived` at any size) — and the detector
+   behind the flag is the one ADR-003 measures at **2 of 6 regions bounded
+   correctly**.
+
+**Why it is not fixed here.** The three available merges are each refused for a
+stated reason: across an evidence-type boundary mixes narrative with table-derived
+text (§18.4); across a section boundary attaches one heading path to two sections;
+dropping the chunk loses its blocks. Changing `table_overlap` (0.5, unmeasured) or
+`child_min_tokens` (48, unmeasured) to reduce the count would be tuning by
+intuition, which §18.12 reserves for a comparison on development data and CLAUDE.md
+§4 reserves for the developer.
+
+**Consequence to carry into retrieval.** A one-token chunk embeds to a vector
+dominated by a single word and will match queries it cannot answer. §20.9's dedup
+and the reranker reduce the damage; neither removes it. This is the second-largest
+known quality defect in the retrieval path, after §16.
+
+---
+
+## 19. Not implemented, and recorded so absence is not read as a finding
 
 | Gap | Consequence if forgotten |
 |---|---|

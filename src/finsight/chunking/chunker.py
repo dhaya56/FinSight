@@ -12,8 +12,9 @@ characters.
 loses a paragraph fails silently — retrieval simply never returns it, and nothing
 distinguishes "no such text" from "the text was dropped":
 
-1. **Every block is placed exactly once.** No block disappears and none is
-   duplicated into two chunks.
+1. **Every block holding text is placed exactly once.** No block disappears and
+   none is duplicated into two chunks. Blank blocks are dropped first and are
+   outside the guarantee — see :func:`chunk_blocks`, which measures them.
 2. **Text is preserved verbatim.** A chunk's text contains its blocks' text
    unmodified; the chunker never rewrites, normalises or summarises (§14.4).
 
@@ -87,6 +88,19 @@ def chunk_blocks(
     ``count_tokens`` is injected rather than imported so the chunker stays free of
     a model dependency and can be tested with an exact, trivial counter instead of
     a tokenizer's approximations.
+
+    **Blank blocks are dropped, and the coverage guarantee is over the rest.** A
+    block whose text is only whitespace has nothing to retrieve and would produce a
+    chunk the ``text_not_blank`` constraint refuses. Across the three development
+    filings this discards 1,557 blocks of 40,476 — 3.8% — carrying 4,455 characters
+    of 4.72 million, so an average of 2.9 whitespace characters each. Verified
+    against the stored corpus: of those 1,557, **zero** hold a non-whitespace
+    character.
+
+    The distinction matters because it is the difference between a filter and a
+    leak, and the test has to be this one: PostgreSQL's ``btrim`` defaults to
+    trimming spaces only, so a SQL check for lost content calls a block of newlines
+    non-empty and reports 1,557 losses that do not exist.
     """
     settings = config or ChunkingConfig()
     usable = [block for block in blocks if block.text.strip()]
@@ -343,6 +357,15 @@ def _absorb_short_tail(
     When the merge would exceed ``child_max_tokens`` the short chunk stays: an
     over-budget chunk is truncated by the embedding model, which is worse than a
     short one.
+
+    **This reaches the tail of one run and no further, which is a smaller guarantee
+    than the floor sounds like.** ``first`` bounds it to the run being emitted, so a
+    run whose entire content is under the floor has nothing to merge into and its
+    single chunk is emitted short. Measured across the development corpus that is
+    1,086 of the 1,164 under-floor children — the dominant case, not the residue.
+    Reaching across runs is refused rather than unimplemented: see
+    ``child_min_tokens`` for why, and §18 of the limitation register for the
+    measurement.
     """
     if len(out) - first < 2:
         return

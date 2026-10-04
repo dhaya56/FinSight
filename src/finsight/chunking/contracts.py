@@ -81,11 +81,27 @@ class ChunkingConfig:
     """
 
     child_min_tokens: int = 48
-    """Below this a chunk is merged forward rather than emitted alone.
+    """Target floor for a child chunk. **Enforced only within a run, not absolutely.**
 
     Blocks in this corpus are tiny — median 38 characters, and 52% under 40 — so
     without a floor the index would fill with fragments like "Sl. No." that match
     everything and mean nothing.
+
+    What is actually enforced: a sub-minimum chunk at the end of a run is merged
+    backwards into the chunk before it when the result stays under
+    ``child_max_tokens``. What cannot be enforced here: a run whose *whole* content
+    is under the floor has nothing to merge into, and merging across runs is refused
+    — across an evidence-type boundary it would mix narrative with table-derived
+    text (§18.4), and across a section boundary it would attach one heading path to
+    two sections.
+
+    Measured across the three development filings, 1,164 of 4,816 children are under
+    this floor and 1,086 of those are their run's only chunk. The cause is upstream:
+    a run of one tiny block exists because PyMuPDF emits line fragments and because
+    the table-overlap flag splits a section wherever a single block overlaps a
+    detected region — a detector ADR-003 measures at 2 of 6 regions bounded
+    correctly. Recorded as §18 of the limitation register; the remedy is a chunking
+    comparison on development data (§18.12), not a value changed here by intuition.
     """
 
     parent_max_tokens: int = 1536

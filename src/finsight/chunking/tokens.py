@@ -61,6 +61,24 @@ def build_token_counter() -> TokenCounter:
         return lambda text: int(len(text) / _FALLBACK_CHARS_PER_TOKEN) + 1
 
     def count(text: str) -> int:
-        return len(tokenizer.encode(text, add_special_tokens=False))  # type: ignore[attr-defined]
+        # ``verbose=False`` silences one warning and only one: "Token indices
+        # sequence length is longer than the specified maximum sequence length for
+        # this model (5396 > 512). Running this sequence through the model will
+        # result in indexing errors." That warning is about running the *model*,
+        # which this never does — it asks the tokenizer for a length and discards
+        # the ids. Left on, it fires for every oversized block the chunker is about
+        # to split, which is the path working correctly, and tells an operator that
+        # chunking is producing indexing errors when it is not.
+        #
+        # What is *not* suppressed, because it is not requested: truncation. No
+        # ``truncation`` argument is passed, so the tokenizer returns the full id
+        # sequence and the count is exact. Passing ``truncation=True`` here would
+        # cap every count at 512 and make a 5,396-token block look as though it fit
+        # the 384-token budget — the chunker would then emit it whole and the
+        # embedding model would silently drop seven eighths of it.
+        ids = tokenizer.encode(  # type: ignore[attr-defined]
+            text, add_special_tokens=False, verbose=False
+        )
+        return len(ids)
 
     return count

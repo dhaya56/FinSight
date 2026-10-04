@@ -74,6 +74,15 @@ class ElementCounts:
     blocks: int
     tables: int
     cells: int
+    footnotes: int
+    """Footnotes bound to a table (§17.2).
+
+    Counted because ``total`` counts them: a breakdown that omits an element type
+    the producer emits makes the parts disagree with the whole, and the gap shows
+    up as an unexplained shortfall in whatever reads the report. Phase 6 began
+    emitting footnotes and this field should have moved with it.
+    """
+
     coverage_gaps: int
     """Elements recording why they hold no text (§11.11), not elements missing."""
 
@@ -337,10 +346,13 @@ class SourceRepository:
             func.count().filter(SourceElement.element_type == ElementType.BLOCK.value),
             func.count().filter(SourceElement.element_type == ElementType.TABLE.value),
             func.count().filter(SourceElement.element_type == ElementType.CELL.value),
+            func.count().filter(
+                SourceElement.element_type == ElementType.FOOTNOTE.value
+            ),
             func.count().filter(SourceElement.failure_reason.is_not(None)),
         ).where(SourceElement.extraction_run_id == run_id)
 
-        total, pages, blocks, tables, cells, gaps = self._session.execute(
+        total, pages, blocks, tables, cells, footnotes, gaps = self._session.execute(
             statement
         ).one()
         return ElementCounts(
@@ -349,6 +361,7 @@ class SourceRepository:
             blocks=blocks,
             tables=tables,
             cells=cells,
+            footnotes=footnotes,
             coverage_gaps=gaps,
         )
 

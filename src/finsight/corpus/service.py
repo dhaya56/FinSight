@@ -1,8 +1,16 @@
-"""Driving intake and extraction over the corpus.
+"""Driving intake, extraction and chunking over the corpus.
 
 This orchestrates services that already exist rather than adding a pipeline. Its
 value is in what it records: the per-document evidence ENV records are written
 from, and which a synthetic fixture cannot supply.
+
+**One driver per stage, not one driver for everything.** Ingestion and chunking are
+separate commands because their idempotency keys differ — ingestion repeats when a
+document's bytes or the extraction configuration change, chunking when the
+extraction run or the chunking configuration does — and because §11.12 makes a
+generation a container that fills as its stages complete. Folding chunking into
+ingestion would re-chunk every document whenever extraction was re-run for an
+unrelated reason, and would leave no way to re-chunk without re-extracting.
 
 **Governance fails fast; documents fail individually.** Every entry is checked
 for readability before any work starts, so a held-out split is refused before the
@@ -25,9 +33,11 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from finsight.corpus.manifest import CorpusEntry
+from finsight.chunking.service import ChunkingError, ChunkingService, build_chunking_service
+from finsight.corpus.manifest import CorpusEntry, CorpusError
 from finsight.corpus.store import CorpusStore
 from finsight.domain.errors import DocumentRejectedError
+from finsight.domain.identifiers import HASH_ALGORITHM
 from finsight.domain.representations.source import ExtractionState
 from finsight.extraction.contracts import ExtractionError
 from finsight.extraction.service import ExtractionService, build_extraction_service
@@ -36,8 +46,19 @@ from finsight.persistence.database import session_scope
 from finsight.persistence.repositories.document_metadata import (
     DocumentMetadataRepository,
 )
+from finsight.persistence.repositories.documents import DocumentRepository
 from finsight.persistence.repositories.source import ElementCounts, SourceRepository
 from finsight.persistence.tables.document_metadata import SOURCE_CORPUS_MANIFEST
+
+
+class NotIngestedError(CorpusError):
+    """The manifest records this document but no stored version holds its bytes.
+
+    A governance failure rather than a document failure: the corpus says the
+    document exists and the database disagrees, which means a stage was run out of
+    order. Distinguished from an extraction or chunking failure so that "never
+    ingested" cannot be mistaken for "ingested and unchunkable".
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +235,115 @@ class CorpusIngestionService:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class ChunkingOutcome:
+    """What happened to one corpus document's chunking stage."""
+
+    document_id: str
+    version_id: UUID | None = None
+    generation_id: UUID | None = None
+    chunk_count: int = 0
+    already_existed: bool = False
+    seconds: float = 0.0
+    failure: str | None = None
+    """Why this document produced no generation, as a short code."""
+
+    @property
+    def succeeded(self) -> bool:
+        return self.failure is None
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkingReport:
+    """The result of chunking a selection of the corpus."""
+
+    outcomes: tuple[ChunkingOutcome, ...]
+
+    @property
+    def total_seconds(self) -> float:
+        return sum(outcome.seconds for outcome in self.outcomes)
+
+    @property
+    def failures(self) -> tuple[ChunkingOutcome, ...]:
+        return tuple(outcome for outcome in self.outcomes if not outcome.succeeded)
+
+
+class CorpusChunkingService:
+    """Chunk every ingested document in a corpus selection.
+
+    Resolves each entry to its stored version through the digest the manifest
+    records, so this stage never opens a document. Chunking reads the source
+    representation, not the file, and a driver that re-hashed the bytes would make
+    a database operation depend on the filesystem for no benefit.
+    """
+
+    def __init__(
+        self,
+        store: CorpusStore,
+        chunking: ChunkingService,
+        session_scope_factory: Callable[[], AbstractContextManager[Session]] = session_scope,
+    ) -> None:
+        self._store = store
+        self._chunking = chunking
+        self._session_scope = session_scope_factory
+
+    def chunk(self, entries: Sequence[CorpusEntry]) -> ChunkingReport:
+        """Chunk each entry, continuing past documents that fail.
+
+        The held-out guard runs across the whole selection first, for the reason
+        given on :meth:`CorpusIngestionService.ingest`. It applies here even though
+        nothing reads a file: chunking a frozen document's stored evidence would
+        expose held-out content to tuning just as surely as parsing it would.
+
+        Raises:
+            HeldOutAccessError: an entry belongs to a frozen split.
+        """
+        for entry in entries:
+            self._store.ensure_readable(entry)
+
+        return ChunkingReport(
+            outcomes=tuple(self._chunk_one(entry) for entry in entries)
+        )
+
+    def _chunk_one(self, entry: CorpusEntry) -> ChunkingOutcome:
+        started = time.perf_counter()
+        try:
+            version_id = self._version_of(entry)
+            recorded = self._chunking.chunk(version_id)
+        except (NotIngestedError, ChunkingError) as error:
+            return ChunkingOutcome(
+                document_id=entry.document_id,
+                seconds=time.perf_counter() - started,
+                failure=type(error).__name__,
+            )
+
+        return ChunkingOutcome(
+            document_id=entry.document_id,
+            version_id=version_id,
+            generation_id=recorded.generation_id,
+            chunk_count=recorded.chunk_count,
+            already_existed=recorded.already_existed,
+            seconds=time.perf_counter() - started,
+        )
+
+    def _version_of(self, entry: CorpusEntry) -> UUID:
+        """The stored version holding this entry's bytes.
+
+        Raises:
+            NotIngestedError: nothing in the database holds them.
+        """
+        with self._session_scope() as session:
+            version = DocumentRepository(session).version_by_content_hash(
+                hash_algorithm=HASH_ALGORITHM, content_hash=entry.sha256
+            )
+            if version is None:
+                raise NotIngestedError(
+                    f"'{entry.document_id}' has not been ingested; run "
+                    "'corpus ingest' before chunking"
+                )
+            return version.id
+
+
 def _peak_mib() -> float:
     if not tracemalloc.is_tracing():
         return 0.0
@@ -228,3 +358,8 @@ def build_corpus_ingestion_service(store: CorpusStore) -> CorpusIngestionService
         intake=build_intake_service(),
         extraction=build_extraction_service(),
     )
+
+
+def build_corpus_chunking_service(store: CorpusStore) -> CorpusChunkingService:
+    """Wire corpus chunking to the configured tokenizer and database."""
+    return CorpusChunkingService(store=store, chunking=build_chunking_service())
