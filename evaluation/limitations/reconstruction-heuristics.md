@@ -547,7 +547,48 @@ and page position are both measured to be insufficient.
 
 ---
 
-## 15. Not implemented, and recorded so absence is not read as a finding
+## 15. Chunk assembly
+
+**Rule.** `src/finsight/chunking/chunker.py`. Blocks are **joined**, not split —
+measured on a development filing the median block is 38 characters and 52% are
+under 40, so a block is a line fragment and accumulation is the main path.
+Splitting is reserved for the rare block over the budget.
+
+Two invariants are enforced on every run by `verify_coverage`, not merely tested:
+**every block reaches exactly one child chunk**, and **text is preserved
+verbatim**. Measured on a 369-page filing: 14,669 blocks → 1,303 children, source
+chars 1,213,915 → chunk chars 1,227,231, a ratio of **1.0110** which is exactly the
+newline join separators.
+
+### Five defects an adversarial audit found after the first pass
+
+All five passed the original suite. Recorded because the pattern matters more than
+the individual bugs: worked examples agreed, invariants did not.
+
+| Defect | Why it was invisible |
+|---|---|
+| **Fabricated adjacency.** Grouping a section by evidence type joined `Intro paragraph` and `Closing paragraph` into one chunk when a table stood between them in the document | The output reads as correct prose. Nothing downstream can detect that the two were not contiguous. Fixed by emitting *runs* of consecutive same-type blocks |
+| **Two adjacent headings both suppressed.** `7. Risk factors` then `8. Other matters` — a section whose body starts on the next page — were read as a list and both lost | List-run suppression needed a threshold of three, not two. Every chunk beneath both sections had lost its heading path |
+| **Parent cap not enforced** when a single line exceeded it: a parent came back at 50 tokens against a cap of 20 | The code kept the first line unconditionally. A section opening with one long paragraph is the common case, not a corner |
+| **A single word longer than the budget** was emitted whole, 500× over | Pathological input only — a URL, an unbroken digit run — and the embedding model truncates it silently, losing the tail |
+| **Unordered input silently scrambled.** The document-order contract was documented and unchecked | A caller reading rows without `ORDER BY` would assemble text that reads as prose and is not. Now refused rather than repaired, so the caller's bug stays visible |
+
+A sixth finding was waste rather than error: **527 of 680 parents were
+byte-identical to their only child**, so §20.8 expanding from that child returned
+the same text. Those parents are no longer emitted; 680 became 153.
+
+### Known limits
+
+| Limit | Consequence |
+|---|---|
+| `page_numbers` is a sorted set | A chunk spanning pages 7, 8 and back to 7 records `(7, 8)`. The excursion is not recoverable |
+| A split block's pieces all cite the **whole** block | Deliberate: the source representation addresses blocks, not sub-blocks, and a narrower citation would name an address §14.9 cannot resolve |
+| `verify_coverage` permits repeats for any chunk marked `split_oversize_block` | An unrelated duplicate involving the same element id would be masked. Narrow, and the alternative is tracking piece identity the source representation does not have |
+| Child and parent sizes are **unmeasured** | §18.12 requires selection on development data. The current values are starting points carried with a config version, not choices |
+
+---
+
+## 16. Not implemented, and recorded so absence is not read as a finding
 
 | Gap | Consequence if forgotten |
 |---|---|

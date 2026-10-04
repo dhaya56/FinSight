@@ -333,12 +333,28 @@ class TestEvidenceType:
 
 class TestParents:
     def test_a_parent_holds_the_whole_section(self) -> None:
-        source = blocks("alpha", "beta", "gamma")
+        """Enough content to need several children, so a parent earns its place."""
+        source = blocks("alpha " * 8, "middle " * 8, "gamma " * 8)
 
         result = chunk_blocks(source, config=SMALL, count_tokens=words)
 
+        assert len(children(result)) > 1
         assert "alpha" in parents(result)[0].text
         assert "gamma" in parents(result)[0].text
+
+    def test_a_parent_identical_to_its_only_child_is_not_emitted(self) -> None:
+        """Pure duplication: §20.8 expanding from that child returns the same text.
+
+        Measured on a development filing, 527 of 680 parents were byte-identical
+        to their only child.
+        """
+        source = blocks("alpha", "beta")
+
+        result = chunk_blocks(source, config=SMALL, count_tokens=words)
+
+        assert parents(result) == []
+        assert len(children(result)) == 1
+        assert children(result)[0].parent_index is None
 
     def test_children_point_at_their_parent(self) -> None:
         source = blocks(*[f"w{n}" for n in range(25)])
@@ -441,3 +457,102 @@ class TestBudgetInvariant:
             for element_id in chunk.source_element_ids
         }
         assert placed == {b.element_id for b in source}
+
+
+class TestAuditFindings:
+    """Regressions for defects an adversarial audit found after the first pass.
+
+    Every one of these passed the original test suite. They are grouped so the
+    class reads as what it is: the gap between "the examples work" and "the
+    invariants hold".
+    """
+
+    def test_a_table_between_two_paragraphs_does_not_join_them(self) -> None:
+        """The worst of the five, because the output looks correct.
+
+        Grouping a whole section by evidence type produced a chunk containing both
+        paragraphs joined by a newline, as though consecutive. The text never
+        appeared that way in the document and a reader could not tell.
+        """
+        source = [
+            block("Intro paragraph", ordinal=0),
+            block("ROW ONE", ordinal=1, table=True),
+            block("Closing paragraph", ordinal=2),
+        ]
+
+        result = chunk_blocks(source, config=SMALL, count_tokens=words)
+        texts = [chunk.text for chunk in children(result)]
+
+        assert "Intro paragraph\nClosing paragraph" not in texts
+        assert "Intro paragraph" in texts
+        assert "Closing paragraph" in texts
+
+    def test_runs_are_emitted_in_document_order(self) -> None:
+        source = [
+            block("Intro", ordinal=0),
+            block("ROW", ordinal=1, table=True),
+            block("Closing", ordinal=2),
+        ]
+
+        result = chunk_blocks(source, config=SMALL, count_tokens=words)
+
+        assert [chunk.text for chunk in children(result)] == [
+            "Intro",
+            "ROW",
+            "Closing",
+        ]
+
+    def test_two_adjacent_headings_both_survive(self) -> None:
+        """A section whose body begins on the next page is ordinary."""
+        source = blocks("7. Risk factors", "8. Other matters", "Body text")
+
+        result = chunk_blocks(source, config=SMALL, count_tokens=words)
+        paths = {chunk.heading_path for chunk in children(result)}
+
+        assert ("7. Risk factors",) in paths
+        assert ("8. Other matters",) in paths
+
+    def test_a_parent_whose_first_line_exceeds_the_cap_is_still_capped(self) -> None:
+        """An earlier version kept the first line unconditionally, cap or not."""
+        tight = ChunkingConfig(
+            child_max_tokens=5, child_min_tokens=1, parent_max_tokens=8
+        )
+        source = blocks("word " * 50)
+
+        result = chunk_blocks(source, config=tight, count_tokens=words)
+
+        assert all(
+            chunk.token_count <= tight.parent_max_tokens for chunk in parents(result)
+        )
+
+    def test_a_parent_is_never_emptied_by_truncation(self) -> None:
+        """An empty parent would violate the text_not_blank constraint."""
+        tight = ChunkingConfig(
+            child_max_tokens=5, child_min_tokens=1, parent_max_tokens=2
+        )
+        source = blocks("word " * 50)
+
+        result = chunk_blocks(source, config=tight, count_tokens=words)
+
+        assert all(chunk.text.strip() for chunk in result)
+
+    def test_a_single_word_longer_than_the_budget_is_divided(self) -> None:
+        """A URL or an unbroken digit run. Emitting it whole loses its tail."""
+        config = ChunkingConfig(child_max_tokens=10, child_min_tokens=1)
+        source = blocks("x" * 200)
+
+        result = chunk_blocks(source, config=config, count_tokens=len)
+
+        assert all(chunk.token_count <= 10 for chunk in children(result))
+        assert "".join(chunk.text for chunk in children(result)) == "x" * 200
+
+    def test_unordered_input_is_refused_rather_than_silently_scrambled(self) -> None:
+        """A caller reading rows without ORDER BY would assemble prose that is not."""
+        source = [
+            block("third", ordinal=2),
+            block("first", ordinal=0),
+            block("second", ordinal=1),
+        ]
+
+        with pytest.raises(CoverageError, match="document order"):
+            chunk_blocks(source, config=SMALL, count_tokens=words)

@@ -187,13 +187,42 @@ def suppress_list_runs(levels: list[int | None]) -> list[int | None]:
 
     Two genuinely adjacent headings differ in level — a section followed by its
     first subsection — so requiring the *same* level keeps that case intact.
+
+    **Three is the threshold, not two.** An earlier version suppressed any adjacent
+    same-level pair, which destroyed a real and ordinary case: ``7. Risk factors``
+    immediately followed by ``8. Other matters``, where a section's body begins on
+    the next page. Both headings vanished and every chunk beneath them lost its
+    path. A list is three or more; two adjacent headings are a layout accident.
     """
     suppressed = list(levels)
-    for index, level in enumerate(levels):
-        if level is None:
-            continue
-        before = levels[index - 1] if index > 0 else None
-        after = levels[index + 1] if index + 1 < len(levels) else None
-        if before == level or after == level:
-            suppressed[index] = None
+    for start, length in _runs(levels):
+        if length >= _LIST_RUN:
+            for index in range(start, start + length):
+                suppressed[index] = None
     return suppressed
+
+
+_LIST_RUN: Final = 3
+"""Consecutive same-level candidates before they are read as a list.
+
+Two is a pair of real headings; three is a numbered list. Measured against a
+development filing, where a CSR projects table runs to seven consecutive rows and
+genuine adjacent sections never exceed two.
+"""
+
+
+def _runs(levels: list[int | None]) -> list[tuple[int, int]]:
+    """Maximal runs of consecutive identical non-None levels, as (start, length)."""
+    found: list[tuple[int, int]] = []
+    index = 0
+    while index < len(levels):
+        level = levels[index]
+        if level is None:
+            index += 1
+            continue
+        end = index
+        while end + 1 < len(levels) and levels[end + 1] == level:
+            end += 1
+        found.append((index, end - index + 1))
+        index = end + 1
+    return found

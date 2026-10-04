@@ -28,6 +28,8 @@ Detection is not reliable here, so nothing is demoted.
 
 import re
 from collections.abc import Callable, Sequence
+from dataclasses import replace
+from itertools import pairwise
 from typing import Final
 from uuid import UUID
 
@@ -90,10 +92,34 @@ def chunk_blocks(
     usable = [block for block in blocks if block.text.strip()]
     if not usable:
         return ()
+    _require_document_order(usable)
 
     chunks = _assemble(usable, settings, count_tokens)
     verify_coverage(usable, chunks)
     return chunks
+
+
+def _require_document_order(blocks: Sequence[SourceBlock]) -> None:
+    """Refuse input that is not in document order.
+
+    The contract was documented and unchecked, and unchecked it fails quietly: a
+    caller that reads blocks without an ORDER BY gets chunks whose text is
+    assembled in whatever order the database returned rows, which reads as prose
+    and is not. Raised rather than sorted here, because silently repairing a
+    caller's bug hides it.
+
+    Raises:
+        CoverageError: the blocks are not ascending by ordinal.
+    """
+    ordinals = [block.ordinal for block in blocks]
+    out_of_order = next(
+        (later for earlier, later in pairwise(ordinals) if later < earlier), None
+    )
+    if out_of_order is not None:
+        raise CoverageError(
+            "blocks must be supplied in document order; "
+            f"ordinal {out_of_order} follows a larger one"
+        )
 
 
 def mark_table_derived(
@@ -170,21 +196,44 @@ def _emit_section(
     count: TokenCounter,
     out: list[Chunk],
 ) -> None:
-    """Emit the children of one section, then the parent that holds them.
+    """Emit one section as contiguous runs, each with its own parent.
 
-    Narrative and table-derived blocks are chunked separately within the section.
-    §18.4 requires the two to stay distinguishable, and a chunk mixing a paragraph
-    with a flattened table row is neither one thing nor the other.
+    §18.4 requires narrative and table-derived content to stay distinguishable, so
+    the two are never mixed inside a chunk. The obvious way to achieve that — group
+    the whole section by type — is wrong, and measurably so: a section reading
+    paragraph, table row, paragraph produced a chunk containing both paragraphs
+    joined by a newline, as though they were consecutive sentences.
+
+    **That fabricates adjacency.** The text never appeared contiguously in the
+    document, and a reader given it has no way to know a table stood between.
+    §14.4 forbids presenting enriched text as evidence, and inventing contiguity is
+    a worse form of the same thing.
+
+    So the section is split into *runs* of consecutive blocks of one type. Order is
+    preserved, each chunk's text appears in the document exactly as assembled, and
+    a section that alternates simply yields more parents — which is the honest
+    shape of a section that alternates.
     """
-    for kind in (EvidenceType.NARRATIVE, EvidenceType.TABLE_DERIVED):
-        wanted = [
-            unit
-            for unit in section
-            if (unit.table_derived) == (kind is EvidenceType.TABLE_DERIVED)
-        ]
-        if not wanted:
-            continue
-        _emit_group(wanted, path, kind, config, count, out)
+    for kind, run in _runs(section):
+        _emit_group(run, path, kind, config, count, out)
+
+
+def _runs(
+    section: Sequence[SourceBlock],
+) -> list[tuple[EvidenceType, list[SourceBlock]]]:
+    """Split a section into maximal runs of consecutive same-type blocks."""
+    grouped: list[tuple[EvidenceType, list[SourceBlock]]] = []
+    for unit in section:
+        kind = (
+            EvidenceType.TABLE_DERIVED
+            if unit.table_derived
+            else EvidenceType.NARRATIVE
+        )
+        if grouped and grouped[-1][0] is kind:
+            grouped[-1][1].append(unit)
+        else:
+            grouped.append((kind, [unit]))
+    return grouped
 
 
 def _emit_group(
@@ -253,7 +302,7 @@ def _emit_group(
     # lose the blocks, and merging it backwards would push a chunk over budget.
     flush()
 
-    out[parent_index] = _build(
+    parent = _build(
         units,
         path,
         kind,
@@ -265,6 +314,19 @@ def _emit_group(
         notes=(),
         cap=config.parent_max_tokens,
     )
+
+    if children == 1 and out[parent_index + 1].text == parent.text:
+        # A parent identical to its only child is pure duplication: §20.8 would
+        # expand from that child and return the same text. Measured on a
+        # development filing, 527 of 680 parents were byte-identical to their only
+        # child. Drop the slot and re-point the child at nothing.
+        only_child = out[parent_index + 1]
+        out[parent_index : parent_index + 2] = [
+            replace(only_child, parent_index=None, ordinal=parent_index)
+        ]
+        return
+
+    out[parent_index] = parent
 
 
 def _placeholder_parent(
@@ -321,11 +383,17 @@ def _build(
 
 
 def _truncate(text: str, cap: int, count: TokenCounter) -> str:
-    """Shorten a parent to its budget, on a line boundary.
+    """Shorten a parent to its budget, on a line boundary where one exists.
 
-    Parents are context, not evidence — §14.9 resolves citations to source regions,
-    and a child chunk always carries the exact blocks. So losing the tail of a very
-    long section costs interpretation, not provenance.
+    Parents are context, not evidence — §14.9 resolves citations to source regions
+    and a child always carries the exact blocks — so losing the tail of a very long
+    section costs interpretation, not provenance.
+
+    **The first line may itself exceed the cap**, which an earlier version silently
+    allowed: it kept the first line unconditionally and returned a parent fifty
+    tokens over a cap of twenty. A section whose opening block is one long
+    paragraph is ordinary, so that is the common case, not a corner. When it
+    happens the line is cut on a word boundary rather than kept whole.
     """
     lines = text.split(_JOIN)
     kept: list[str] = []
@@ -334,7 +402,18 @@ def _truncate(text: str, cap: int, count: TokenCounter) -> str:
         if kept and count(candidate) > cap:
             break
         kept.append(line)
-    return _JOIN.join(kept)
+
+    joined = _JOIN.join(kept)
+    if count(joined) <= cap:
+        return joined
+
+    words = joined.split()
+    trimmed: list[str] = []
+    for word in words:
+        if trimmed and count(" ".join([*trimmed, word])) > cap:
+            break
+        trimmed.append(word)
+    return " ".join(trimmed)
 
 
 def _split_block(
@@ -384,6 +463,12 @@ def _hard_split(
     Reached by a block that is one enormous sentence, or a run of text with no
     punctuation at all — a flattened table row, typically. Splits between words so
     a number is never cut in half.
+
+    **A single word can still exceed the budget**: an unbroken identifier, a URL, a
+    long run of digits with no separators. Emitting it whole breaks the budget
+    invariant and the embedding model truncates it silently, losing the tail. So a
+    word that cannot fit alone is divided by characters — which is ugly, and is the
+    only option that keeps every character in the index.
     """
     words = unit.text.split()
     if not words:
@@ -392,6 +477,12 @@ def _hard_split(
     pieces: list[tuple[SourceBlock, bool]] = []
     buffer: list[str] = []
     for word in words:
+        if count(word) > config.child_max_tokens:
+            if buffer:
+                pieces.append((_piece(unit, " ".join(buffer)), True))
+                buffer = []
+            pieces.extend(_split_word(unit, word, config, count))
+            continue
         candidate = " ".join([*buffer, word])
         if buffer and count(candidate) > config.child_max_tokens:
             pieces.append((_piece(unit, " ".join(buffer)), True))
@@ -400,6 +491,28 @@ def _hard_split(
             buffer.append(word)
     if buffer:
         pieces.append((_piece(unit, " ".join(buffer)), True))
+    return pieces
+
+
+def _split_word(
+    unit: SourceBlock, word: str, config: ChunkingConfig, count: TokenCounter
+) -> list[tuple[SourceBlock, bool]]:
+    """Divide a single word that cannot fit the budget, by characters.
+
+    Pathological input only. Grows the piece one character at a time rather than
+    guessing a character-per-token ratio, because the counter is injected and its
+    ratio is not knowable here.
+    """
+    pieces: list[tuple[SourceBlock, bool]] = []
+    buffer = ""
+    for character in word:
+        if buffer and count(buffer + character) > config.child_max_tokens:
+            pieces.append((_piece(unit, buffer), True))
+            buffer = character
+        else:
+            buffer += character
+    if buffer:
+        pieces.append((_piece(unit, buffer), True))
     return pieces
 
 

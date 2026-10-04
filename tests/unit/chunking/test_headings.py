@@ -94,7 +94,7 @@ class TestRejectedCandidates:
 
 
 class TestListRunSuppression:
-    def test_adjacent_same_level_candidates_are_a_list(self) -> None:
+    def test_three_or_more_adjacent_candidates_are_a_list(self) -> None:
         """A CSR projects table numbers its rows 1., 2., 3. with nothing between."""
         assert suppress_list_runs([1, 1, 1, 1]) == [None, None, None, None]
 
@@ -109,8 +109,20 @@ class TestListRunSuppression:
     def test_a_lone_candidate_survives(self) -> None:
         assert suppress_list_runs([None, 1, None]) == [None, 1, None]
 
-    def test_a_run_at_the_start_is_suppressed(self) -> None:
-        assert suppress_list_runs([2, 2, None]) == [None, None, None]
+    def test_two_adjacent_headings_survive(self) -> None:
+        """``7. Risk factors`` then ``8. Other matters``, body on the next page.
+
+        Suppressing a *pair* destroyed this ordinary case and stripped the heading
+        path from every chunk beneath both sections. A list is three or more.
+        """
+        assert suppress_list_runs([1, 1]) == [1, 1]
+
+    def test_a_run_of_three_at_the_start_is_suppressed(self) -> None:
+        assert suppress_list_runs([2, 2, 2, None]) == [None, None, None, None]
+
+    def test_only_the_run_is_suppressed_not_its_neighbours(self) -> None:
+        """A real heading next to a list must survive it."""
+        assert suppress_list_runs([1, None, 2, 2, 2]) == [1, None, None, None, None]
 
     def test_an_empty_document_is_handled(self) -> None:
         assert suppress_list_runs([]) == []
