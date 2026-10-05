@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import text
 
+from db_cleanup import statements as cleanup_statements
 from finsight.domain.representations.source import (
     ElementType,
     ExtractionState,
@@ -30,6 +31,7 @@ from finsight.extraction.contracts import (
 from finsight.extraction.pdf.pymupdf_adapter import PyMuPdfProducer
 from finsight.extraction.pdf.quality_signals import NO_TEXT_EXTRACTED
 from finsight.extraction.service import (
+    EXTRACTION_CONFIG_VERSION,
     ExtractionService,
     TransactionalExtractionRecorder,
     build_extraction_service,
@@ -48,43 +50,15 @@ from pdf_fixtures import (
 
 pytestmark = pytest.mark.integration
 
-_RUNS = """
-    SELECT id FROM extraction_runs WHERE document_version_id IN (
-        SELECT id FROM document_versions WHERE content_hash = ANY(:hashes)
-    )
+BUMPED_CONFIG = f"{EXTRACTION_CONFIG_VERSION}-bumped"
+"""A configuration distinct from production's, whatever production's is.
+
+Hardcoding a literal here meant the test silently stopped testing a bump the day
+the real constant caught up with it: the "new" run collided with the default one
+and the assertion compared a run against itself.
 """
-_ELEMENTS = f"SELECT id FROM source_elements WHERE extraction_run_id IN ({_RUNS})"
 
-CLEANUP = f"""
-    UPDATE document_versions SET current_extraction_run_id = NULL
-    WHERE content_hash = ANY(:hashes);
 
-    DELETE FROM source_tables WHERE source_element_id IN ({_ELEMENTS});
-
-    DELETE FROM source_table_cells WHERE source_element_id IN ({_ELEMENTS});
-
-    DELETE FROM source_elements WHERE extraction_run_id IN ({_RUNS});
-
-    DELETE FROM extraction_runs WHERE document_version_id IN (
-        SELECT id FROM document_versions WHERE content_hash = ANY(:hashes)
-    );
-
-    DELETE FROM document_versions WHERE content_hash = ANY(:hashes);
-
-    DELETE FROM documents
-    WHERE id NOT IN (SELECT document_id FROM document_versions);
-"""
-"""Unwinds a test's rows in dependency order.
-
-The pointer is cleared first: ``document_versions`` references
-``extraction_runs`` and ``extraction_runs`` references ``document_versions``, so
-neither can be deleted while the pointer still stands.
-
-The semantics extensions go before ``source_elements`` they key to. Until a test
-extracted a table there was nothing in them and their absence here was invisible,
-which is the shape of cleanup bug that surfaces as an unrelated test failing on a
-foreign key much later.
-"""
 
 
 @pytest.fixture(scope="module")
@@ -115,7 +89,7 @@ def stored(intake: IntakeService) -> Iterator[Callable[[bytes, str], UUID]]:
 
     if hashes:
         with get_engine().begin() as connection:
-            for statement in filter(None, (s.strip() for s in CLEANUP.split(";"))):
+            for statement in cleanup_statements():
                 query = text(statement)
                 if ":hashes" in statement:
                     query = query.bindparams(hashes=hashes)
@@ -247,7 +221,7 @@ class TestIdempotence:
             object_store=build_s3_object_store(),
             producer=PyMuPdfProducer(),
             recorder=TransactionalExtractionRecorder(),
-            config_version="2",
+            config_version=BUMPED_CONFIG,
         )
         second = bumped.extract(version_id)
 
@@ -268,7 +242,7 @@ class TestIdempotence:
             object_store=build_s3_object_store(),
             producer=PyMuPdfProducer(),
             recorder=TransactionalExtractionRecorder(),
-            config_version="2",
+            config_version=BUMPED_CONFIG,
         ).extract(version_id)
 
         with session_scope() as session:

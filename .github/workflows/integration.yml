@@ -48,6 +48,15 @@ jobs:
           --health-retries 5
           --health-start-period 30s
 
+      qdrant:
+        # Same pinned tag as compose.yaml. No healthcheck options: the image
+        # carries no curl or wget, and a service container cannot run the
+        # bash /dev/tcp check compose uses. ensure_collection fails loudly if
+        # the service is not ready, which is a clearer signal than a hung job.
+        image: qdrant/qdrant:v1.19.1
+        ports:
+          - 6333:6333
+
       objectstore:
         # Same pinned tag as compose.yaml.
         #

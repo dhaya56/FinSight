@@ -46,11 +46,15 @@ filelock==3.32.6
 filetype==1.2.0
 fsspec==2026.7.0
 greenlet==3.5.5
+grpcio==1.84.0
 h11==0.16.0
+h2==4.4.1
 hf-xet==1.6.0
+hpack==4.2.0
 httpcore==1.0.9
 httpx==0.28.1
 huggingface_hub==1.33.0
+hyperframe==6.1.0
 idna==3.19
 iniconfig==2.3.0
 Jinja2==3.1.6
@@ -92,6 +96,8 @@ pip_audit==2.10.1
 platformdirs==4.11.8
 pluggy==1.6.0
 polyfactory==3.3.0
+portalocker==3.2.0
+protobuf==7.36.2
 psutil==7.2.2
 psycopg==3.3.5
 psycopg-binary==3.3.5
@@ -120,6 +126,7 @@ python-pptx==1.0.2
 # leave the Windows build unpinned.
 pywin32==312 ; sys_platform == "win32"
 PyYAML==6.0.3
+qdrant-client==1.19.1
 rapidocr==3.9.2
 referencing==0.37.0
 regex==2026.9.29

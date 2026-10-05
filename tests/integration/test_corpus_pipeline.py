@@ -16,37 +16,33 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from qdrant_client import QdrantClient
 from sqlalchemy import text
 
+from db_cleanup import statements as cleanup_statements
+from finsight.config.settings import get_settings
 from finsight.corpus.manifest import CorpusEntry, Split, load_manifest
-from finsight.corpus.service import CorpusIngestionService, build_corpus_ingestion_service
+from finsight.corpus.service import (
+    CorpusChunkingService,
+    CorpusIndexingService,
+    CorpusIngestionService,
+    build_corpus_chunking_service,
+    build_corpus_ingestion_service,
+)
 from finsight.corpus.store import ChecksumMismatchError, CorpusStore, HeldOutAccessError
 from finsight.domain.representations.source import ExtractionState
+from finsight.embedding.fake import FakeEmbedder
+from finsight.indexing.service import (
+    IndexingService,
+    TransactionalIndexingRecorder,
+)
 from finsight.object_store.s3_store import dispose_s3_client
 from finsight.persistence.database import dispose_engine, get_engine
+from finsight.vector_index.qdrant_index import QdrantVectorIndex
 from pdf_fixtures import PlacedText, build_malformed_pdf, build_pdf
 
 pytestmark = pytest.mark.integration
 
-CLEANUP = """
-    UPDATE document_versions SET current_extraction_run_id = NULL
-    WHERE content_hash = ANY(:hashes);
-
-    DELETE FROM source_elements WHERE extraction_run_id IN (
-        SELECT id FROM extraction_runs WHERE document_version_id IN (
-            SELECT id FROM document_versions WHERE content_hash = ANY(:hashes)
-        )
-    );
-
-    DELETE FROM extraction_runs WHERE document_version_id IN (
-        SELECT id FROM document_versions WHERE content_hash = ANY(:hashes)
-    );
-
-    DELETE FROM document_versions WHERE content_hash = ANY(:hashes);
-
-    DELETE FROM documents
-    WHERE id NOT IN (SELECT document_id FROM document_versions);
-"""
 
 ENTRY = """
 [[document]]
@@ -103,7 +99,7 @@ def corpus(tmp_path: Path) -> Iterator[Path]:
     ]
     if digests:
         with get_engine().begin() as connection:
-            for statement in filter(None, (s.strip() for s in CLEANUP.split(";"))):
+            for statement in cleanup_statements():
                 query = text(statement)
                 if ":hashes" in statement:
                     query = query.bindparams(hashes=digests)
@@ -172,6 +168,43 @@ def service(corpus: Path) -> CorpusIngestionService:
     return build_corpus_ingestion_service(CorpusStore(root=corpus))
 
 
+@pytest.fixture
+def chunker(corpus: Path) -> CorpusChunkingService:
+    return build_corpus_chunking_service(CorpusStore(root=corpus))
+
+
+@pytest.fixture
+def indexer(corpus: Path) -> Iterator[CorpusIndexingService]:
+    """The indexing driver, on the deterministic fake and its own collection.
+
+    Not ``build_corpus_indexing_service``: that wires host-native Ollama, which
+    does not exist in CI. The fake exercises everything except the model, so these
+    tests prove the three stages compose and assert nothing about retrieval quality.
+    """
+    settings = get_settings()
+    client = QdrantClient(url=settings.qdrant_url, timeout=30)
+    index = QdrantVectorIndex(
+        client=client,
+        model=f"test-corpus-{uuid4().hex[:8]}",
+        dimensions=32,
+        config_version="1",
+    )
+    try:
+        yield CorpusIndexingService(
+            store=CorpusStore(root=corpus),
+            indexing=IndexingService(
+                recorder=TransactionalIndexingRecorder(),
+                embedder=FakeEmbedder(dimensions=32),
+                index=index,
+                batch_size=8,
+            ),
+        )
+    finally:
+        if client.collection_exists(index.collection):
+            client.delete_collection(index.collection)
+        client.close()
+
+
 class TestCorpusIngestion:
     def test_a_development_document_is_ingested_end_to_end(
         self,
@@ -201,7 +234,11 @@ class TestCorpusIngestion:
         assert counts.pages == 2
         assert counts.blocks > 0
         assert counts.total == (
-            counts.pages + counts.blocks + counts.tables + counts.cells
+            counts.pages
+            + counts.blocks
+            + counts.tables
+            + counts.cells
+            + counts.footnotes
         )
         assert counts.coverage_gaps == 0
 
@@ -230,6 +267,233 @@ class TestCorpusIngestion:
         assert second.already_existed is True
         assert second.version_id == first.version_id
         assert second.run_id == first.run_id
+
+
+class TestCorpusChunking:
+    """The stage after extraction, driven across a whole split.
+
+    Covered here rather than only per document, because the defect this guards
+    against is a stage that works when pointed at one identifier and is unreachable
+    for the corpus: ingestion reported no version id for a phase, so nothing could
+    be chunked without querying the database by hand.
+    """
+
+    def test_every_ingested_document_in_the_split_is_chunked(
+        self,
+        service: CorpusIngestionService,
+        chunker: CorpusChunkingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        entries = [add(), add()]
+        service.ingest(entries)
+
+        report = chunker.chunk(entries)
+
+        assert report.failures == ()
+        assert len(report.outcomes) == 2
+        for outcome in report.outcomes:
+            assert outcome.generation_id is not None
+            assert outcome.chunk_count > 0
+            assert outcome.already_existed is False
+
+    def test_chunking_follows_the_run_ingestion_recorded(
+        self,
+        service: CorpusIngestionService,
+        chunker: CorpusChunkingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        """The two stages must agree on which version they are working on."""
+        entry = add()
+        ingested = service.ingest([entry]).outcomes[0]
+
+        chunked = chunker.chunk([entry]).outcomes[0]
+
+        assert chunked.version_id == ingested.version_id
+
+    def test_re_chunking_is_a_recorded_no_op(
+        self,
+        service: CorpusIngestionService,
+        chunker: CorpusChunkingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        """Building a second generation would re-embed for an identical result."""
+        entry = add()
+        service.ingest([entry])
+        first = chunker.chunk([entry]).outcomes[0]
+
+        second = chunker.chunk([entry]).outcomes[0]
+
+        assert second.already_existed is True
+        assert second.generation_id == first.generation_id
+
+    def test_a_document_never_ingested_is_reported_not_chunked(
+        self,
+        service: CorpusIngestionService,
+        chunker: CorpusChunkingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        """Distinguished from an unchunkable document, and does not stop the run.
+
+        Running the stages out of order is an operator mistake, not a document
+        fault, and reporting it as a chunking failure would send the investigation
+        to the chunker.
+        """
+        ingested = add()
+        service.ingest([ingested])
+        missing = add()
+
+        report = chunker.chunk([missing, ingested])
+
+        assert report.outcomes[0].failure == "NotIngestedError"
+        assert report.outcomes[0].generation_id is None
+        assert report.outcomes[1].succeeded is True
+
+    def test_a_held_out_document_is_refused_before_any_chunking(
+        self,
+        chunker: CorpusChunkingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        """The guard applies even though chunking opens no file (§34.6).
+
+        Chunking a frozen document's stored evidence exposes held-out content to
+        tuning just as surely as parsing the document would.
+        """
+        entry = add(split=Split.HELD_OUT_PDF_CORE, frozen=True)
+
+        with pytest.raises(HeldOutAccessError):
+            chunker.chunk([entry])
+
+    def test_chunks_cite_the_blocks_extraction_recorded(
+        self,
+        service: CorpusIngestionService,
+        chunker: CorpusChunkingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        """§14.7: a chunk that cannot name its sources cannot be cited.
+
+        Asserted across the join rather than on the service's return value, because
+        the return value would be identical if the sources were never written.
+        """
+        entry = add()
+        service.ingest([entry])
+        outcome = chunker.chunk([entry]).outcomes[0]
+
+        with get_engine().connect() as connection:
+            cited, blocks = connection.execute(
+                text(
+                    """
+                    SELECT
+                      (SELECT count(DISTINCT s.source_element_id)
+                         FROM chunk_sources s
+                         JOIN chunks c ON c.id = s.chunk_id
+                        WHERE c.generation_id = :generation),
+                      (SELECT count(*)
+                         FROM source_elements e
+                         JOIN extraction_runs r ON r.id = e.extraction_run_id
+                        WHERE r.document_version_id = :version
+                          AND e.element_type = 'block'
+                          AND btrim(e.text, E' \\t\\r\\n\\f\\v') <> '')
+                    """
+                ).bindparams(generation=outcome.generation_id, version=outcome.version_id)
+            ).one()
+
+        assert cited == blocks
+
+
+class TestCorpusIndexing:
+    """The third stage driver, and the chain it completes.
+
+    ``corpus ingest`` -> ``corpus chunk`` -> ``corpus index``. What is proved here is
+    that the three compose for a whole split without an identifier being read out of
+    the database by hand, which is the gap that left two of three real filings
+    unchunked for a phase.
+    """
+
+    def test_the_whole_split_is_indexed_and_activated(
+        self,
+        service: CorpusIngestionService,
+        chunker: CorpusChunkingService,
+        indexer: CorpusIndexingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        entries = [add(), add()]
+        service.ingest(entries)
+        chunker.chunk(entries)
+
+        report = indexer.index(entries)
+
+        assert report.failures == ()
+        for outcome in report.outcomes:
+            assert outcome.activated is True
+            assert outcome.indexed > 0
+
+    def test_indexing_activates_the_generation_chunking_built(
+        self,
+        service: CorpusIngestionService,
+        chunker: CorpusChunkingService,
+        indexer: CorpusIndexingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        """The stages must agree on which generation they are working on."""
+        entry = add()
+        service.ingest([entry])
+        chunked = chunker.chunk([entry]).outcomes[0]
+
+        indexed = indexer.index([entry]).outcomes[0]
+
+        assert indexed.generation_id == chunked.generation_id
+
+    def test_a_document_that_was_never_chunked_is_reported_as_such(
+        self,
+        service: CorpusIngestionService,
+        indexer: CorpusIndexingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        """Named for the stage to run, not the stage that complained."""
+        entry = add()
+        service.ingest([entry])
+
+        report = indexer.index([entry])
+
+        assert report.outcomes[0].failure == "NotChunkedError"
+
+    def test_a_document_that_was_never_ingested_is_reported_as_such(
+        self,
+        indexer: CorpusIndexingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        report = indexer.index([add()])
+
+        assert report.outcomes[0].failure == "NotIngestedError"
+
+    def test_a_held_out_document_is_refused_before_any_indexing(
+        self,
+        indexer: CorpusIndexingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        entry = add(split=Split.HELD_OUT_PDF_CORE, frozen=True)
+
+        with pytest.raises(HeldOutAccessError):
+            indexer.index([entry])
+
+    def test_one_failure_does_not_stop_the_rest(
+        self,
+        service: CorpusIngestionService,
+        chunker: CorpusChunkingService,
+        indexer: CorpusIndexingService,
+        add: Callable[..., CorpusEntry],
+    ) -> None:
+        """§11.11's discipline applied to the indexing stage."""
+        ready = add()
+        service.ingest([ready])
+        chunker.chunk([ready])
+        unchunked = add()
+        service.ingest([unchunked])
+
+        report = indexer.index([unchunked, ready])
+
+        assert report.outcomes[0].failure == "NotChunkedError"
+        assert report.outcomes[1].activated is True
 
 
 class TestPreconditions:

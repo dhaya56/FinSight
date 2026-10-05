@@ -66,7 +66,7 @@ before it can still be told apart from the runs made after — which is what mak
 an evaluation across them meaningful.
 """
 
-EXTRACTION_CONFIG_VERSION: Final = "1"
+EXTRACTION_CONFIG_VERSION: Final = "2"
 """The versioned extraction configuration.
 
 Bump this whenever a change would make the same document produce different
@@ -75,6 +75,13 @@ choice about what counts as a coverage gap. Bumping it causes the next run to be
 recorded as new work rather than silently changing what stored citations point
 at. Leaving it unchanged after such a change is the mistake this constant exists
 to prevent.
+
+Bumped to "2" when Phase 6 added tables, cells, footnotes, quality verdicts and
+continuation markers. It should have moved with that work and did not, and the
+consequence was exactly what this docstring warns about: the idempotency index
+made re-extraction a no-op, so a corpus extracted on 2026-09-29 stayed block-only
+and every later stage read Phase 5 output. Chunking ran against 14,686 blocks and
+zero tables while the producer in memory found 87.
 """
 
 

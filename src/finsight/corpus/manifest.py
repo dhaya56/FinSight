@@ -31,6 +31,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 
+from finsight.domain.documents import DocumentType
 from finsight.domain.identifiers import ContentAddress
 
 CORPUS_ROOT: Final = Path("data") / "corpus"
@@ -103,16 +104,6 @@ class Split(StrEnum):
     def is_held_out(self) -> bool:
         """True for any split that must stay unread (§34.6, §34.7, §34.10)."""
         return self is not Split.DEVELOPMENT
-
-
-class DocumentType(StrEnum):
-    """The filing classes §5.1 and §32.2 admit."""
-
-    ANNUAL_REPORT = "annual_report"
-    DRHP = "drhp"
-    RHP = "rhp"
-    QUARTERLY_RESULT = "quarterly_result"
-    FORM_10K = "form_10k"
 
 
 class SourceRepository(StrEnum):

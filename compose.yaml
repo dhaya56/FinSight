@@ -38,10 +38,30 @@ services:
       retries: 5
       start_period: 30s
 
-    # Resource limits are intentionally absent. PROJECT_BLUEPRINT.md §38.11
-    # requires them, but usable memory under the complete stack is unmeasured
-    # (ENV-001 open item), so any value here would be invented. They are added
-    # in the phase where multiple services coexist and memory is measured.
+    # §38.11, now set from measurement rather than deferred. The precondition this
+    # file previously stated — "once the corpus is embedded and peak usage is
+    # measured" — is satisfied: ENV-010 records 259 MiB peak during indexing and
+    # 99.7 MiB under a sustained query workload.
+    #
+    # §38.11's purpose is specific: "Limits prevent parser or infrastructure
+    # workloads from starving local models." That is not hypothetical here. A
+    # corpus re-index failed with Ollama's server crash-looping at 0.8 GB of 15.7 GB
+    # available, and Phase 8 adds llama3.1:8b (4.9 GB) to the same host. So these
+    # limits exist to bound the containers, not to size them.
+    #
+    # 1 GiB is roughly 4x the measured peak. Generous on purpose: a limit should
+    # contain a runaway, and a limit set close to a measured peak turns an ordinary
+    # heavier workload into an OOM kill. Revisit when the corpus grows — three
+    # filings is not a capacity plan.
+    #
+    # **No CPU limit.** Embedding and reranking are CPU-bound and contend with the
+    # containers, so a limit is arguably warranted — but nothing has measured what
+    # value would help, and a CPU cap on PostgreSQL during indexing could slow the
+    # stage that is already the bottleneck. Left out rather than guessed.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
 
   objectstore:
     # SeaweedFS speaks the S3 API; the application knows only S3 and treats this
@@ -81,6 +101,61 @@ services:
       retries: 5
       start_period: 30s
 
+    # The flattest of the three: 231 MiB peak during indexing against 142 MiB under a
+    # query workload, because it serves immutable originals and does no query work.
+    # 512 MiB is ~2.2x the peak — tighter than the others because the ceiling is
+    # better understood, not because the service matters less.
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  qdrant:
+    # Pinned by tag; the resolved digest is recorded in ENV-009. The tag tracks
+    # the pinned qdrant-client version, because the client and server negotiate
+    # API shapes and a silent drift between them surfaces as a schema error on a
+    # collection that worked yesterday.
+    image: qdrant/qdrant:v1.19.1
+    restart: unless-stopped
+    ports:
+      # Loopback only, and only the REST port. gRPC (6334) stays unpublished
+      # because nothing uses it; the client speaks REST by default.
+      - "127.0.0.1:${FINSIGHT_QDRANT_PORT:-6333}:6333"
+    volumes:
+      - finsight-qdrant-data:/qdrant/storage
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # The image carries bash but no curl, wget or nc, so the check speaks HTTP
+      # over bash's /dev/tcp. Verified against this image: /readyz returns 200.
+      # A plain port-open check would report healthy while the collection layer
+      # was still loading.
+      #
+      # CMD rather than CMD-SHELL, and bash named explicitly: CMD-SHELL runs
+      # /bin/sh, which here is dash, and /dev/tcp is a bash feature. Under
+      # CMD-SHELL this check fails with "cannot create /dev/tcp/..." on every
+      # probe and the service never reports healthy.
+      test: ["CMD", "bash", "-c", 'exec 3<>/dev/tcp/127.0.0.1/6333; printf "GET /readyz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" >&3; head -1 <&3 | grep -q "200 OK"']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    # The highest of the three: 267 MiB peak during indexing, 222 MiB under a query
+    # workload, against 14.6 MiB of raw dense vectors — so roughly 5x the vector data
+    # goes on segments, payload indexes, the sparse index and allocator retention
+    # (137.9 MiB retained against 81.1 MiB resident, ENV-010).
+    #
+    # 1 GiB is ~3.8x the peak, and the growth path is the reason for the headroom:
+    # vectors stay in RAM. ENV-009 records disk-backing as available and not worth it
+    # at 4,969 points; that trade changes as the corpus grows, and this limit is what
+    # would make the change necessary rather than optional.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
 volumes:
   finsight-postgres-data:
   finsight-objectstore-data:
+  finsight-qdrant-data:

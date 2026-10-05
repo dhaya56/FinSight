@@ -118,6 +118,20 @@ class DocumentVersion(Base):
     on. This pointer records what exists; it does not make anything queryable.
     """
 
+    active_generation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("generations.id", use_alter=True), nullable=True
+    )
+    """The generation retrieval is permitted to see (§11.13, §20.2).
+
+    The counterpart to the pointer above, and the one that gates evidence. It moves
+    only after indexing and validation succeed, so a document version can have a
+    completed extraction run and still be invisible to a query — which is the
+    correct state while its chunks are being built.
+
+    ``use_alter`` because ``generations`` references ``document_versions`` back,
+    and neither table can be created with its foreign key already in place.
+    """
+
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

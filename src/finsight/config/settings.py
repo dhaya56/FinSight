@@ -188,6 +188,157 @@ class Settings(BaseSettings):
         ),
     )
 
+    text_search_config: str = Field(
+        default="english",
+        description=(
+            "PostgreSQL text-search configuration used to analyse chunk text and "
+            "queries. NOT A SELECTED VALUE. §9.7 requires the configuration, how "
+            "per-document language is determined, the index type and any field "
+            "weighting to be chosen with recorded evidence when the lexical index "
+            "is built. The corpus is India-first with non-Indian supplements, so a "
+            "single hardcoded language is explicitly not a safe default. This is "
+            "the setting that makes the choice visible and changeable; changing it "
+            "requires re-chunking under a new generation, because the stored "
+            "lexemes were analysed with the old one."
+        ),
+    )
+
+    # ------------------------------------------------------------------ Embedding
+
+    ollama_base_url: str = Field(
+        default="http://127.0.0.1:11434",
+        description=(
+            "Host-native Ollama endpoint (§9.8). Loopback by default because "
+            "Ollama is not containerised and is not exposed to the network."
+        ),
+    )
+    embedding_model: str = Field(
+        default="nomic-embed-text",
+        description=(
+            "PROVISIONAL, not selected. ADR-004 adopts it as §22.2's named "
+            "lightweight initial candidate; §22.10 reserves selection for the "
+            "smallest model with acceptable measured quality, and no comparison "
+            "against BGE-M3 has been run."
+        ),
+    )
+    embedding_dimensions: int = Field(
+        default=768,
+        ge=1,
+        description=(
+            "Vector width, measured from the configured model rather than "
+            "assumed. Changing the model almost certainly changes this, and a "
+            "collection is created with a fixed width, so the two must move "
+            "together."
+        ),
+    )
+    embedding_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        description=(
+            "Unmeasured. Generous because a cold model load is slow and a "
+            "timeout mid-batch leaves outbox events pending for no reason."
+        ),
+    )
+    embedding_batch_size: int = Field(
+        default=32,
+        ge=1,
+        description=(
+            "Unmeasured initial default. Ollama serialises embedding work, so "
+            "batching reduces round trips rather than adding parallelism and a "
+            "client-side thread pool would buy nothing — measured at 12.3 texts/s "
+            "with one client thread and 12.3 with eight. Note that rate came from "
+            "34-character probes; real enriched chunks measure 1.68 texts/s, and "
+            "ADR-004 carries the correction. The threading conclusion holds; the "
+            "rate does not."
+        ),
+    )
+    embedding_max_input_chars: int = Field(
+        default=6000,
+        ge=1,
+        description=(
+            "Longest text sent to the model, in characters. MEASURED BOUND: "
+            "Ollama anchors num_ctx to 2,048 tokens for nomic-embed-text and "
+            "silently discards the remainder — appending a sentence to a "
+            "2,048-token passage returned a bit-identical vector. English prose "
+            "runs about 4.4 characters per token, so 2,048 tokens is roughly "
+            "9,000 characters; this sits below that. Exceeding it raises rather "
+            "than truncating, because truncated text is indexed and unfindable."
+        ),
+    )
+
+    # --------------------------------------------------------------- Vector index
+
+    qdrant_url: str = Field(
+        default="http://127.0.0.1:6333",
+        description=(
+            "Qdrant REST endpoint. Loopback, matching how compose publishes it. "
+            "The index is derived and rebuildable from PostgreSQL (§29.2), so "
+            "losing it costs time rather than evidence."
+        ),
+    )
+    qdrant_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="Unmeasured initial default.",
+    )
+    # ------------------------------------------------------------------ Reranking
+
+    rerank_model: str = Field(
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        description=(
+            "PROVISIONAL, not selected. §23.2 names MiniLM the lightweight baseline "
+            "and §23.9 reserves the choice; ADR-006 adopts it on that basis. Loaded "
+            "offline from the local cache, which is also why CI uses the "
+            "deterministic fake."
+        ),
+    )
+    rerank_depth: int = Field(
+        default=25,
+        ge=1,
+        description=(
+            "Fused candidates passed to the reranker. §23.5 leaves input depth "
+            "baseline-driven, and quality is unmeasured — but the latency is not. "
+            "MEASURED on this host's CPU at roughly 87 ms per candidate, batch 8: "
+            "10 candidates 607 ms, 25 candidates 1.70 s, 50 candidates 4.01 s, 100 "
+            "candidates 9.14 s, against 337 ms for the whole hybrid retrieval that "
+            "precedes it. 25 keeps a query near two seconds while giving the "
+            "reranker enough to reorder; 50 would make reranking 92% of the query. "
+            "This is the number to change if interactivity matters more than depth. "
+            "END TO END, steady state, depth 25: a reranked query is 2,544 ms "
+            "against 175 ms with the reranker off, so reranking is 93% of the "
+            "latency at about 95 ms per candidate. §23.4's FlashRank trigger is "
+            "therefore measurably live, and ENV-010 carries the figures."
+        ),
+    )
+    rerank_batch_size: int = Field(
+        default=8,
+        ge=1,
+        description=(
+            "MEASURED, not assumed: 8 beats 16 and 32 at every depth tested, "
+            "because a larger batch pads every sequence to the longest in it and "
+            "the wasted compute outweighs the fewer forward passes."
+        ),
+    )
+    rerank_enabled: bool = Field(
+        default=True,
+        description=(
+            "§23.1 requires the reranker to remain optional under degradation. This "
+            "makes that switchable deliberately rather than only by failure, which "
+            "is what lets the fused and reranked orders be compared on the same "
+            "candidates — the comparison §23.9's selection needs."
+        ),
+    )
+
+    embedding_config_version: str = Field(
+        default="1",
+        description=(
+            "Versions the embedding configuration as a whole (§14.10). It enters "
+            "the deterministic point identifier (§29.9), so bumping it re-indexes "
+            "to new points rather than overwriting ones an active generation may "
+            "still be serving."
+        ),
+    )
+
     # ----------------------------------------------------------------- Ingestion
 
     upload_max_bytes: int = Field(

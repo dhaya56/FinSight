@@ -475,7 +475,705 @@ representation (§18.4), not a source one.
 
 ---
 
-## 13. Not implemented, and recorded so absence is not read as a finding
+## 13. Heading recovery during chunking
+
+**Rule.** `src/finsight/chunking/headings.py`. §18.2 attaches a heading path to
+every chunk, and nothing upstream supplies one — `extraction/contracts.py` states
+that a producer "makes no claim about document structure; a heading is a block that
+happens to be large, not a heading." So sections are recovered at chunking time
+from the numbering filings use. A block is a heading only if **all** of:
+
+1. it matches `N.`, `N.M`, `N.M.K`, or `Item|Note|Annexure|Schedule|Part|Section N`
+2. the number carries a **dot** — `3.` or `3.2`, never a bare `3`
+3. the title begins with a **capital letter**
+4. the collapsed text is **≤120 characters**
+5. it does not sit adjacent to another candidate **at the same level**
+
+**Every one of those came from a measured false positive**, in this order:
+
+| Added | Because the development filing produced | Detections |
+|---|---|---|
+| — | first attempt | 647 |
+| the dot | `3 Infosys`, `4 EdgeVerve`, `5 Infosys Public` — 20 consecutive rows of a **subsidiary table** read as sections | 341 |
+| run suppression | `1. …`, `2. …`, `3. …` in adjacent blocks — a **CSR projects table** | 264 |
+| capitalised title | `7.6 years`, `63.39 64.50`, `4.7 6.1` — **decimal measurements** | **246** |
+
+A separate defect was fixed alongside: the depth formula counted dots, so `7.` and
+`7.2` both resolved to level 2 and 280 of 341 candidates were misfiled as
+subsections. A trailing dot is punctuation, not depth.
+
+**The bias is deliberate and asymmetric.** Missing a heading merges two sections —
+a longer section, slightly less context. Inventing one attaches a *wrong* heading
+path to every chunk after it, and a chunk claiming to come from "Risk Factors" when
+it comes from the notes is worse than one claiming nothing.
+
+**Known misfires.**
+
+| Misfire | Consequence |
+|---|---|
+| **A heading merged into the preceding block is invisible.** PyMuPDF yields `3 Michael Gibbs Member 4 4 3. Web link(s) for composition of C…` — a table row and the next heading sharing one block | No rule on whole blocks can recover it; the block genuinely contains both. The section boundary is lost |
+| A heading written without a dot, or whose title opens with a digit or lowercase brand name | Not detected. Deliberate — see the bias above |
+| An isolated numbered footnote under a table, e.g. `1. Investments exclude investments in subsidiaries` | Still read as a heading. Run suppression needs a neighbour and this has none |
+| Table rows escape the `table_derived` guard whenever the detector missed the table | ADR-003 measures the detector at 2 of 6 regions, so this is the normal case, not the exception |
+
+**Measured?** Precision, no — the 246 detections have not been checked one by one
+against human judgement. What *is* measured is the removal of three specific
+false-positive classes, each against the text that produced it, each pinned by a
+test. Heading-path accuracy belongs with the Phase 7 retrieval ground truth.
+
+---
+
+## 14. Boilerplate demotion — measured and deliberately not implemented
+
+§18.8 permits excluding page furniture from ranking "when detection is reliable".
+On this corpus it is not, and the measurement is unambiguous. The most repeated
+block texts in a 369-page filing are:
+
+| Repeats | Text | What it actually is |
+|---|---|---|
+| **159** | `(In ₹ crore)` | **the units declaration** |
+| 152 | `2025 2024` | column headers |
+| 58 | `Particulars As at March 31,` | table header |
+| 30 | `Total` | a total row label |
+| 29 | `Accounting policy` | a heading |
+
+A repetition rule would demote the **units declaration** — the single value whose
+loss puts every figure in the document out by a factor of ten million (§17.3). A
+position rule fares no better: `taxation(1)` sits in the top margin and is content.
+
+So nothing is demoted, and §18.8's condition is simply not met. Revisit only with a
+signal that separates running headers from repeated financial labels; repetition
+and page position are both measured to be insufficient.
+
+### One case where detection *is* reliable, found later and still not acted on
+
+The argument above is about *repetition*. Measured on the indexed corpus, a different
+signal separates cleanly — how much of a chunk is letters at all:
+
+| Active child chunks | Count | Share |
+|---|---|---|
+| Total | 4,969 | — |
+| Fewer than 50% letters | 760 | **15.3%** |
+| Fewer than 20% letters | 282 | **5.7%** |
+| Containing a run of dot leaders (`.........`) | 100 | **2.0%** |
+
+The 5.7% are flattened numeric tables and table-of-contents lines, and the largest are
+**384-token chunks of nothing but `.` characters** — embedded into 768 dimensions,
+given BM25 weights, and competing in retrieval against real prose. Two verbatim
+examples, both at the chunk-size ceiling:
+
+> `......................................................................`
+>
+> `B Consolidated Balance Sheet..........................................`
+
+Unlike repetition, this signal does not threaten the units declaration: `(In ₹ crore)`
+is 62% letters. A rule demoting chunks that are almost entirely punctuation would
+catch the dot leaders and leave the financial labels alone.
+
+**Not acted on, and the reason is sequencing rather than doubt.** Demotion is a
+*ranking* decision §18.8 governs, the numeric chunks in the same band are real content
+that must stay retrievable (§17.8 wants large-table context recovered, not dropped),
+and separating "dot leaders" from "a dense numeric table" needs a threshold §4 reserves
+for the developer. It is also a re-chunk and a 43-minute re-index. Recorded here with
+the measurement so the decision is available rather than rediscovered.
+
+---
+
+## 15. Chunk assembly
+
+**Rule.** `src/finsight/chunking/chunker.py`. Blocks are **joined**, not split —
+measured on a development filing the median block is 38 characters and 52% are
+under 40, so a block is a line fragment and accumulation is the main path.
+Splitting is reserved for the rare block over the budget.
+
+Two invariants are enforced on every run by `verify_coverage`, not merely tested:
+**every block reaches exactly one child chunk**, and **text is preserved
+verbatim**. Measured on a 369-page filing: 14,669 blocks → 1,303 children, source
+chars 1,213,915 → chunk chars 1,227,231, a ratio of **1.0110** which is exactly the
+newline join separators.
+
+### Five defects an adversarial audit found after the first pass
+
+All five passed the original suite. Recorded because the pattern matters more than
+the individual bugs: worked examples agreed, invariants did not.
+
+| Defect | Why it was invisible |
+|---|---|
+| **Fabricated adjacency.** Grouping a section by evidence type joined `Intro paragraph` and `Closing paragraph` into one chunk when a table stood between them in the document | The output reads as correct prose. Nothing downstream can detect that the two were not contiguous. Fixed by emitting *runs* of consecutive same-type blocks |
+| **Two adjacent headings both suppressed.** `7. Risk factors` then `8. Other matters` — a section whose body starts on the next page — were read as a list and both lost | List-run suppression needed a threshold of three, not two. Every chunk beneath both sections had lost its heading path |
+| **Parent cap not enforced** when a single line exceeded it: a parent came back at 50 tokens against a cap of 20 | The code kept the first line unconditionally. A section opening with one long paragraph is the common case, not a corner |
+| **A single word longer than the budget** was emitted whole, 500× over | Pathological input only — a URL, an unbroken digit run — and the embedding model truncates it silently, losing the tail |
+| **Unordered input silently scrambled.** The document-order contract was documented and unchecked | A caller reading rows without `ORDER BY` would assemble text that reads as prose and is not. Now refused rather than repaired, so the caller's bug stays visible |
+
+A sixth finding was waste rather than error: **527 of 680 parents were
+byte-identical to their only child**, so §20.8 expanding from that child returned
+the same text. Those parents are no longer emitted; 680 became 153.
+
+### Known limits
+
+| Limit | Consequence |
+|---|---|
+| `page_numbers` is a sorted set | A chunk spanning pages 7, 8 and back to 7 records `(7, 8)`. The excursion is not recoverable |
+| A split block's pieces all cite the **whole** block | Deliberate: the source representation addresses blocks, not sub-blocks, and a narrower citation would name an address §14.9 cannot resolve |
+| `verify_coverage` permits repeats for any chunk marked `split_oversize_block` | An unrelated duplicate involving the same element id would be masked. Narrow, and the alternative is tracking piece identity the source representation does not have |
+| Child and parent sizes are **unmeasured** | §18.12 requires selection on development data. The current values are starting points carried with a config version, not choices |
+
+---
+
+## 16. Multi-column reading order, and what it does to chunks
+
+**Measured, confirmed, unfixed.** ENV-005 measured positional reading order
+diverging from a column-aware ordering on **195 of 1,403 pages (14%)**. That was
+recorded as a sensitivity figure. Chunking makes the consequence concrete, because
+interleaved blocks are now joined into one embedded string.
+
+A stored chunk from a real filing, pages 19–20:
+
+> `- Insurance Services 2024 in North ■ Recognized as a leader in CapioIT APAC
+> Salesforce SI and Solutions Providers Ecosystem Capture Share Report, 2025 ■
+> Infosys BPM won the Avasant Digital Masters Award 2024 … Assessment 2024
+> Services, Q1 2025 America, A`
+
+"in North" and "America, A" are the two ends of one phrase, separated by a column's
+worth of unrelated text. The chunk reads as prose, embeds as prose, and is not.
+
+**The rate is not 14% of chunks and is not yet known.** A crude detector — any
+chunk whose source blocks start on both halves of the page — flags 67%, but it
+cannot distinguish interleaving from a full-width table, a right-aligned figure or
+a legitimately wide layout. The honest figure remains ENV-005's page-level 14%, and
+a chunk-level rate needs the column-aware comparison §35.4 describes.
+
+**The fix belongs in extraction, not here.** `reading_order_key` returns
+`(y0, x0)` with no column awareness, and `reading_order.py` records why: any
+tolerance band is a threshold, and §4 reserves thresholds for development data.
+Chunking cannot repair an order it is handed. Recorded as the largest known
+quality defect in the retrieval path.
+
+---
+
+## 17. Deterministic enrichment does not reach the embedding
+
+Chunks store `heading_path`, `page_numbers` and `evidence_type` as columns, and
+`text` verbatim. §14.4 requires that — no enriched text may be presented as
+original evidence, and a citation resolves to the source region.
+
+But §14.2 says a retrieval representation "adds deterministic context useful for
+lexical and dense search", and §14.6 permits issuer, document type, heading path,
+page, period, basis, currency, scale and caption. **Today the embedded string is
+the `text` column alone**, so none of that context reaches the vector. A chunk
+reading "This was primarily due to increased cost of goods sold" embeds with no
+indication of which company, filing, period or section it belongs to.
+
+**Decision, recorded here before the indexer is written:** the indexer composes the
+embedded string from the deterministic context *and* the text, while `text` stays
+verbatim in the database for citation. That keeps §14.4 — the enriched form is what
+search matches, never what a citation returns — and satisfies §14.2 and §14.6.
+
+Not done in the chunking commit because the composition belongs where embedding
+happens, and doing it here would mean storing the enriched string and losing the
+verbatim one.
+
+### Implemented — `src/finsight/indexing/enrichment.py`
+
+The embedded string is now labelled context, a blank line, then the chunk verbatim:
+
+```text
+Issuer: HDFC Bank Limited
+Document: annual report
+Period: FY2024-25
+Basis: both
+Currency: INR
+Section: Directors' Report > Capital Adequacy
+Page: 42
+
+<chunk text, unchanged>
+```
+
+Nothing stores it. It is built, embedded and discarded, so there is no path by
+which it can be quoted back to a reader as evidence.
+
+**Two deliberate omissions, both recorded so they are not read as oversights.**
+
+| Omitted | Why |
+|---|---|
+| `units_as_presented` | §14.6 permits scale, but one corpus entry records it as "INR crore, lakh and million mixed within one document" — a hazard description, not a unit. Embedding that into every chunk of the document would add 60 characters of noise and assert a scale the document does not have. Currency is included; it is a single stable token |
+| A value for an absent field | A missing issuer is omitted, not written as "unknown". "unknown" is a token every incomplete document would share, making them measurably similar to each other for a reason unrelated to content |
+
+**Unmeasured, and the measurement is not available yet.** Whether this improves
+retrieval cannot be answered without a golden question set, which §34 has not
+produced. What is *known* is the asymmetry: documents are embedded with context and
+queries are not, so the context contributes a near-constant component to every
+document vector. Contextual retrieval is well-attested as a net gain and §14.2 asks
+for it, so it is implemented — but the honest status is "required by the blueprint
+and plausible", not "measured to help here".
+
+---
+
+## 18. The chunk minimum is a target, not a guarantee
+
+**Measured across all three development filings, with the whole corpus chunked for
+the first time.** 4,816 children; **1,164 (24%) fall below the stated
+`child_min_tokens` floor of 48**, and 427 are under 10 tokens. The smallest hold a
+single token: `held`, `share`, `a`, `Care`, `6`.
+
+**Re-measured under chunking configuration 2** (the parent fix in §19): 4,969
+children, **1,212 (24%) under the floor**. Unchanged, as expected — the fix changed
+how parents are formed, not how children are accumulated. The two findings are
+independent.
+
+| Filing | Children | Under 48 | Under 10 | Of the under-48, their run's only chunk |
+|---|---|---|---|---|
+| Infosys AR FY2025 | 1,301 | 388 (30%) | 175 | 372 |
+| HDFC Bank AR FY2025 | 2,007 | 609 (30%) | 181 | 581 |
+| Ola Electric DRHP | 1,508 | 167 (11%) | 71 | 133 |
+| **Total** | **4,816** | **1,164 (24%)** | **427** | **1,086 (93%)** |
+
+**`_absorb_short_tail` is not failing — it cannot reach these.** It merges the last
+chunk of a run backwards, and 93% of under-floor children *are* their run's only
+chunk, so there is nothing before them to merge into. The remaining 78 have a
+sibling and stayed short because merging would have breached `child_max_tokens`,
+which is the documented and intended trade (an over-budget chunk is silently
+truncated by the embedding model; a short one is not).
+
+**Two upstream causes, both already recorded.**
+
+1. **PyMuPDF emits line fragments, not paragraphs** (§15: median block 38
+   characters). `held` and `share` are pieces of one line — the same fragmentation
+   §16 shows producing interleaved chunk text.
+2. **The table-overlap flag splits a section at single-block granularity.** A lone
+   block overlapping a detected region becomes a one-block `table_derived` run and
+   cuts the narrative run around it in two. 226 of the 1,164 are single-block
+   `table_derived` runs (478 are `table_derived` at any size) — and the detector
+   behind the flag is the one ADR-003 measures at **2 of 6 regions bounded
+   correctly**.
+
+**Why it is not fixed here.** The three available merges are each refused for a
+stated reason: across an evidence-type boundary mixes narrative with table-derived
+text (§18.4); across a section boundary attaches one heading path to two sections;
+dropping the chunk loses its blocks. Changing `table_overlap` (0.5, unmeasured) or
+`child_min_tokens` (48, unmeasured) to reduce the count would be tuning by
+intuition, which §18.12 reserves for a comparison on development data and CLAUDE.md
+§4 reserves for the developer.
+
+**Consequence to carry into retrieval.** A one-token chunk embeds to a vector
+dominated by a single word and will match queries it cannot answer. §20.9's dedup
+and the reranker reduce the damage; neither removes it. This is the second-largest
+known quality defect in the retrieval path, after §16.
+
+---
+
+## 19. A parent that did not contain its children
+
+**Found by re-auditing against the developer's parent-child research once the
+corpus had been re-extracted and re-chunked. Fixed.** Recorded because the defect
+was invisible to every test that existed, and because the shape of it generalises.
+
+### What was wrong
+
+A parent was capped at `parent_max_tokens` while its children were not
+collectively bounded. One run produced one parent, so a long run produced a parent
+that was a *prefix* of its children.
+
+| Measured on the development corpus, before | |
+|---|---|
+| Parents | 524 |
+| **Truncated parents** | **143** |
+| **Parented children absent from their own parent** | **1,206 of 2,790 (43%)** |
+| Worst parent | 1,535 tokens standing for **50 children totalling 17,498** — 46 of them absent |
+| Children with no parent at all | 2,026 of 4,816 (42%) |
+| **Children with a parent that actually contained them** | **1,584 of 4,816 — 33%** |
+
+§18.5 keeps parents so a retrieved child can be read in context and §20.8 expands
+to them for that reason. Expansion would have returned the opening of a section as
+"context" for a passage from its middle: text that reads like context and does not
+contain the passage. **Worse than returning nothing**, because nothing is visibly
+nothing.
+
+The chunker did record `parent_truncated` in the chunk's notes. What was missing
+was any check that the truncation broke an invariant two later phases depend on.
+
+### What was done
+
+Runs are partitioned into **windows a parent can hold whole**, each with its own
+parent. A wide section now yields several parents instead of one misleading one —
+the same reasoning that made `_emit_section` split a mixed section into runs.
+
+| After, on the same corpus | |
+|---|---|
+| Parents | **790** |
+| Truncated parents | **0** |
+| Children absent from their parent | **0 of 2,918** |
+| Widest parent | exactly 1,536 tokens — the budget held with no overshoot |
+| Widest family | 7 children, parent tokens equal to the sum of its children's |
+| Children with no parent | 2,051 of 4,969 (41%) — **unchanged**, see §18 |
+
+`verify_parents` now asserts containment on **every** chunking call, not only in
+tests, for the same reason `verify_coverage` does.
+
+### A second defect the new invariant immediately found
+
+`_hard_split` and the sentence path divided an oversized block and reassembled the
+pieces with `" ".join(...)`, **collapsing every newline and run of spaces inside
+them**. Blocks from PyMuPDF are full of newlines, so this was the common case, and
+it read identically — the only symptom was that a piece was no longer a substring
+of its own source.
+
+That contradicted the chunker's own stated guarantee that "text is preserved
+verbatim… the chunker never rewrites, normalises or summarises (§14.4)". Citations
+were never wrong — a split piece cites the whole block — but the guarantee was
+false. Pieces are now **slices** of the block.
+
+Then a third, narrower one: `_absorb_short_tail` merged two chunks with a newline,
+which reproduces the source only for whole blocks. Merging a *piece* of a split
+block produced text appearing nowhere in the document. 2 chunks of 2,337 on one
+filing. Split pieces are no longer absorbed.
+
+**All three were found by one invariant, in the order the runs crashed.** None was
+found by a test, and the first two had survived four audits.
+
+---
+
+## 20. Table handling in chunking, measured for the first time
+
+Every earlier audit of table handling in chunking was answered "not applicable
+under ADR-003". That answer was **wrong, and silently so**: `EXTRACTION_CONFIG_VERSION`
+had never been bumped after Phase 6, so the stored corpus held **zero** tables and
+there was nothing to measure. With the corpus re-extracted — 861 tables, 23,613
+cells — the developer's research points become testable. Three were.
+
+### A detected table is often split across chunks
+
+ADR-003 excludes table *cells* from retrieval, but a narrative block overlapping a
+detected table region is flagged `table_derived` and indexed. So a table's text
+*is* retrievable, as whatever PyMuPDF read it as — and the research's "tables as
+atomic units" point applies after all.
+
+| Filing | Tables | In one chunk | **Split across >1** | No overlapping block | Most chunks for one table |
+|---|---|---|---|---|---|
+| HDFC Bank AR | 485 | 413 | **52 (11%)** | 20 | 25 |
+| Infosys AR | 87 | 57 | **23 (26%)** | 7 | 17 |
+| Ola Electric DRHP | 289 | 169 | **91 (31%)** | 29 | 10 |
+| **Total** | **861** | **639** | **166 (19%)** | **56** | **25** |
+
+**19% of detected tables have their text spread over more than one chunk**, one
+across 25. A header row and the figures it labels can therefore land in different
+chunks, which is exactly the failure the research describes — a retrieved row of
+numbers with no column headings.
+
+**Not fixed, and the reason is ADR-003.** Chunking the table as a unit means
+trusting the detector's bounds, and ADR-003 measured those at **2 of 6 regions
+bounded correctly**. Grouping on a wrong boundary would merge unrelated content or
+cut a real table in half with more confidence than the detector has earned. The
+honest state is: table text is searchable, fragmented, and marked
+`table_derived` so retrieval can treat it differently.
+
+The **56 tables with no overlapping block** are a separate gap: a region the
+detector found that no narrative block sits inside above threshold. Their content
+exists as cells, which are not indexed, so those tables are not reachable at all.
+
+### The 0.5 overlap threshold is insensitive — measured, not assumed
+
+`table_overlap` was carried as an unmeasured parameter. It can now be characterised:
+
+| Filing | Blocks touching a region | Flagged | **Within 0.1 of the threshold** | Fully inside (>0.99) |
+|---|---|---|---|---|
+| HDFC Bank AR | 4,598 | 4,511 | **19** | 4,320 |
+| Infosys AR | 962 | 885 | **40** | 788 |
+| Ola Electric DRHP | 3,908 | 3,802 | **58** | 3,678 |
+
+**117 blocks of 9,468 sit within ±0.1 of the line, and 94% are fully inside a
+region.** Overlap is overwhelmingly all-or-nothing, so the exact threshold barely
+matters — moving it from 0.5 to 0.4 or 0.6 would reclassify about 1% of touching
+blocks. This upgrades `table_overlap` from "unmeasured risk" to **measured as
+insensitive**, which is a stronger statement than a tuned value would have been.
+
+### The table flag suppresses some real headings
+
+`_assemble` refuses to treat a `table_derived` block as a heading, so a heading
+inside an over-large detected region is lost — and with it the heading path of
+everything after it in that section.
+
+| Filing | `table_derived` blocks | Of which the heading rule would have fired |
+|---|---|---|
+| HDFC Bank AR | 4,511 | 32 |
+| Infosys AR | 885 | 7 |
+| Ola Electric DRHP | 3,802 | **140** |
+
+**179 potential headings across the corpus.** Ola's 140 is the concerning figure
+and is consistent with ADR-003's finding about region bounds: an over-large region
+swallows the heading above the table. Whether those 179 are real headings or table
+row labels is unknown — the suppression exists precisely because numbered table
+rows look like headings — so this is recorded as a bounded uncertainty, not a
+defect to reverse.
+
+### The enriched embedding string stays clear of the model's bound
+
+| | Characters, including the `search_document: ` prefix |
+|---|---|
+| Mean | 1,173 |
+| p99 | 2,528 |
+| **Max** | **3,982** |
+| Over the 6,000-character bound | **0** |
+
+**2,018 characters of headroom at the largest chunk.** Enrichment cannot push a
+chunk into the silent truncation ADR-004 measured.
+
+---
+
+## 21. What neither retriever can pin: exact figures, fiscal years and scale
+
+**Measured against the running model and the real analysis chain**, prompted by the
+developer's hybrid-search and Nomic research. These are the sharpest numbers in this
+register, and together they say something specific about what this pipeline can and
+cannot be trusted to retrieve.
+
+### The dense model is nearly blind to which number a sentence states
+
+Cosine between unit vectors, from the configured model:
+
+| Pair | Cosine |
+|---|---|
+| `Revenue was 1,234.56 crore` vs `Revenue was 4,321.65 crore` | **0.9863** |
+| `Revenue was 1,234.56 crore` vs `Revenue was 1,234.56 million` | **0.9167** |
+| `What was the PAT in FY2024?` vs `…FY2023?` | **0.9492** |
+| `Consolidated revenue for FY2024` vs `Standalone revenue for FY2024` | **0.8398** |
+| `Revenue for fiscal year 2024` vs `…2015` | 0.7152 |
+| `What was the PAT in FY2024?` vs `What was the EBITDA in FY2024?` | 0.7301 |
+| `What was the PAT in FY2024?` vs `What was profit after tax in FY2024?` | **0.6581** |
+| `What was the PAT in FY2024?` vs `Who are the independent directors?` | 0.4238 |
+
+Three consequences, in order of severity:
+
+1. **Changing the figure barely moves the vector (0.9863).** Dense retrieval cannot
+   be used to find *a particular number*. This is independent support for §7's rule
+   that the model never performs authoritative arithmetic and for §25's `Decimal`
+   path — the retrieval layer cannot even locate a figure reliably, let alone
+   compute with it.
+2. **Changing the year moves the vector less than changing the metric** (0.9492
+   against 0.7301). So the dense side is *more* likely to confuse FY2023 with FY2024
+   than to confuse PAT with EBITDA. Research 3.5's warning, quantified.
+3. **The model does not know that PAT is profit after tax (0.6581)** — lower than
+   two different years of the same metric. An abbreviation and its expansion are
+   further apart than two different periods. Nothing in this project currently
+   resolves financial abbreviations; §19.5's alias table is for issuers, not metrics.
+
+The basis figure (0.8398) is worth noting on its own: consolidated and standalone
+are a hard filter under §20.2, and that is load-bearing rather than tidy — dense
+similarity cannot separate them.
+
+### The lexical side splits every comma-grouped figure
+
+PostgreSQL `english`, which is what analysed both the stored lexemes and the query.
+Confirmed with `ts_debug` as well as through our own parser, so this is PostgreSQL's
+tokenizer and not a bug here:
+
+| Input | Lexemes |
+|---|---|
+| `1,234` | `1`, `234` |
+| `12,345` | `12`, `345` |
+| `1,23,456` (lakh grouping) | `1`, `23`, `456` |
+| `1,234.56` | `1`, `234.56` |
+| `(1,234)` | `1`, `234` |
+| `1234` | `1234` |
+| `45.6%` | `45.6` |
+| **`10,000`** | **`10`, `000`** |
+| **`10000`** | **`10000`** |
+| `(10,000)` | `10`, `000` |
+| `-10,000` | `-10`, `000` |
+| `₹10,000`, `Rs 10,000` | `10`, `000` (+`rs`) |
+| `$10K`, `10K` | `10k` — these two agree |
+
+**Two spellings of the same value share no lexeme at all.** `10,000` analyses to
+`10` and `000`; `10000` analyses to `10000`. A query written one way cannot match a
+document written the other, and financial documents mix both freely.
+
+And `000` is a *pathological* token: it is produced by every thousands group in the
+corpus, so it carries almost no information while looking like a term. `-10,000`
+keeps its sign as `-10` while `(10,000)` loses it entirely, so three ways of writing
+related values produce three disjoint token sets.
+
+#### Fixed — `src/finsight/lexical/normalise.py`, chunking configuration 3
+
+**No text-search configuration can fix this**, which is why it needed code.
+`ts_debug` confirms the parser emits two separate `uint` tokens, and a configuration
+only chooses which dictionary processes tokens the parser has already split. So
+comma-grouped digit groups are joined *before* `to_tsvector` is called, on both the
+indexing and the query side.
+
+| | Chunks carrying `000` | Chunks carrying a joined figure |
+|---|---|---|
+| Configuration 2 | **314** | 0 |
+| Configuration 3 | **28** | 30 |
+
+A 91% reduction in the junk token. One real chunk's lexemes before and after tells
+the story better than the counts: an ESOP table containing `20,00,00,000` analysed to
+`20`, `00`, `00`, `000`, and now analyses to one token.
+
+Three properties the fix is bounded by, each with a test:
+
+- **`chunks.text` is untouched.** The normalised string is built for the analyser and
+  never stored, because §14.9 resolves citations into the verbatim text.
+- **An enumeration keeps its commas.** `notes 1,2,3` must stay three references, so
+  the rule requires a full two- or three-digit group — which covers Indian
+  `1,23,456` and Western `123,456` while leaving single digits alone.
+- **Both sides call the same function.** A query path that skipped it would turn this
+  into a regression, so the rule lives in one place rather than in two SQL
+  expressions.
+
+Still not fixed, and still for the stated reasons: `(10,000)` loses its sign
+(restoring it is an inference), `Ind AS 115` loses `AS` to the stopword list, and
+`ESOS` stems to `eso`. The last two need a different text-search configuration.
+
+**A whole comma-grouped figure becomes two very common tokens.** `1,234` searches as
+`1` and `234`, neither distinctive. A *decimal* figure keeps its fractional part
+(`234.56`) which is rare enough to pin — which is why hybrid works at all here, and
+why it works better for precise amounts than for round ones.
+
+`(1,234)` loses its parentheses. In a financial statement those denote a negative,
+so **a loss and a profit of the same magnitude are lexically identical.** The source
+text is preserved verbatim, so a citation still shows the parentheses and the
+Evidence Gate can still read them; what is lost is the ability to *retrieve* on the
+sign.
+
+### What survives, which was the other half of the question
+
+Most financial shorthand comes through intact, so the research's broader worry about
+the analysis chain is only partly borne out:
+
+`FY2026` → `fy2026` · `FY26` → `fy26` · `Q3 FY26` → `q3`, `fy26` · `YoY` → `yoy` ·
+`QoQ` → `qoq` · `EBITDA`, `PAT`, `CAGR` intact · `200Cr` → `200cr` ·
+`CIN L85110KA1981PLC013115` intact · `Section 404` → `section`, `404`
+
+And two fiscal years **are** lexically distinguishable (one shared term index of two
+for `PAT in FY2024` against `PAT in FY2023`), which is precisely the gap the dense
+side cannot cover.
+
+Three real corruptions beyond the numbers:
+
+| Input | Lexemes | Why it matters |
+|---|---|---|
+| `FY2024-25` | `fy2024`, **`-25`** | Our own `fiscal_period` format. Splits, and emits a junk token |
+| `Ind AS 115` | `ind`, `115` | **`AS` is an English stopword.** The accounting-standard reference loses its middle |
+| `ESOS 54` | **`eso`**, `54` | The English stemmer strips the trailing `s` from an acronym. HDFC's ESOP tables are full of these |
+| `10-K` | `10`, `k` | Relevant to the held-out US filing |
+
+### An acronym cannot reach its own expansion — on either side
+
+The case where both retrievers fail together: BM25 needs a shared lexeme and dense
+needs shared meaning, and an acronym against its expansion offers neither.
+
+| Acronym | Shared lexemes with its expansion | Dense cosine | Corpus chunks: acronym / expansion |
+|---|---|---|---|
+| EBITDA | **0** | 0.5764 | 22 / 2 |
+| PAT | **0** | 0.5476 | **8 / 229** |
+| EPS | **0** | 0.6405 | 39 / 101 |
+| RoNW | **0** | 0.5159 | 3 / 27 |
+| CAGR | **0** | 0.5495 | 14 / 4 |
+| DRHP | **0** | 0.6169 | **14 / 246** |
+| NPA | **0** | 0.6308 | 43 / 51 |
+
+For scale: two *different fiscal years* of the same metric sit at 0.9492, and two
+genuinely unrelated questions at 0.4238. **An acronym and its own expansion
+(0.52–0.64) are closer to "unrelated" than to "the same thing".**
+
+The corpus column is what makes this concrete rather than theoretical. The filings
+mostly write the expansion while a reader would naturally query the acronym: **"PAT"
+reaches 8 chunks where "profit after tax" reaches 229**, and "DRHP" 14 where the
+expansion reaches 246. Querying by acronym reaches roughly 3–25% of the relevant
+chunks.
+
+Nothing in this project resolves financial abbreviations. §19.5's alias table is for
+*issuers*, deliberately — folding "Infosys Limited" into "Infosys" is a different
+problem from folding "PAT" into "profit after tax". A metric-alias layer, or a
+learned sparse model that performs term expansion, would address it; both are
+decisions rather than fixes.
+
+### BM25 prefers shorter chunks, and most where candidates are plentiful
+
+Research warns that without tuning `b`, long chunks are penalised for length alone.
+Length normalisation is *meant* to do that, so the question is whether it dominates.
+Mean child token count of the retrieved set against the matching population:
+
+| Term | Matching children | Population mean | Top-10 mean | Top-10 / population |
+|---|---|---|---|---|
+| `crore` | 578 | 238.5 | 128.5 | **0.54** |
+| `shareholding` | 488 | 279.2 | 129.9 | **0.47** |
+| `depreciation` | 115 | 280.2 | 227.6 | 0.81 |
+| `revenue` | 271 | 287.6 | 255.3 | 0.89 |
+| `credit risk` | 120 | 322.3 | 309.6 | 0.96 |
+
+**The effect tracks candidate count.** Where a term appears in hundreds of chunks,
+the top 10 average about half the population's length — length has become the
+tiebreaker. Where the term is selective, the effect nearly vanishes.
+
+Two honest qualifications. First, **this characterises and does not judge**: calling
+the order wrong needs relevance labels, and a short chunk densely about a term may
+genuinely be the better match. Second, the worst cases here are the least realistic
+queries — nobody searches for `crore` alone, and a multi-term query's IDF-weighted
+sum leaves less room for length to decide. This is the measurement that should inform
+`b`, not a verdict on it.
+
+### Neither can the reranker tell a claim from its denial
+
+Added once a cross-encoder existed to test, and it belongs here rather than only in a
+measurement record because it is a correctness property, not a performance one.
+
+| Query | Affirmative passage | Negated passage | Separation |
+|---|---|---|---|
+| "is the company expected to lose market share" | 9.63 | 9.32 | **0.32** |
+| "is the company protected from losing market share" | 3.74 | **4.13** | **0.39** |
+
+The two passages differ by one word — *not*. Against a score range spanning roughly 20
+points, 0.3 is noise, and on the second query the affirmative **outscores** the negated
+passage, which is the wrong way round.
+
+Production practice asserts that cross-encoders excel at negation. **On MiniLM-L-6-v2
+they do not**, and the claim was measured rather than accepted.
+
+**The lexical side is worse than "poor at negation" — it is blind by construction.**
+Measured through the real analysis chain:
+
+| Sentence | Lexemes |
+|---|---|
+| "Company X is **not** expected to lose market share" | `compani, expect, lose, market, share, x` |
+| "Company X is expected to lose market share" | `compani, expect, lose, market, share, x` |
+
+**Identical.** `not` is an English stopword, so the two sentences are not merely hard to
+tell apart — they are *the same document* to BM25 and to the full-text fallback. The same
+holds for the commonest financial construction of all: `no material impact` analyses to
+`impact, materi`, exactly as `material impact` does. (Not every negator goes: `without`
+survives.)
+
+So for "The Company is not expected to breach its covenants" against "The Company is
+expected to breach its covenants" — opposite facts with opposite consequences — **all
+three stages are blind to polarity.** Dense similarity barely moves, BM25 sees one
+document, and the reranker separates them by 0.3 of a 20-point range.
+
+What follows from it: rank is not evidence of polarity, and nothing downstream may treat
+a highly ranked passage as supporting the direction of a claim. §27's Evidence Gate
+checks that a cited region *contains* what is asserted, which is the right place for this
+to be caught — and it makes that check load-bearing rather than belt-and-braces.
+
+### The decision this is evidence for, and why it is not taken here
+
+§9.7 says the text-search configuration is to be "chosen with recorded evidence when
+the lexical index is built, not assumed when it is first written", and
+`settings.py` already carries it marked **NOT A SELECTED VALUE**. The measurements
+above are that evidence, and they point at a configuration that does **not** apply
+English stemming or stopwords to alphanumeric and numeric tokens.
+
+Changing it is an architecture decision reserved to the developer (CLAUDE.md §4),
+and it is not cheap: the stored lexemes were analysed with the current
+configuration, so changing it is a re-chunk and a full re-index under a new
+generation — measured at roughly 50 minutes for this corpus. Recorded, not acted on.
+
+**What does *not* follow from this**: that the reranker will fix it. A cross-encoder
+reorders candidates it is given. If neither retriever surfaced the chunk holding the
+figure, there is nothing to reorder.
+
+---
+
+## 22. Not implemented, and recorded so absence is not read as a finding
 
 | Gap | Consequence if forgotten |
 |---|---|
