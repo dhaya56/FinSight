@@ -18,7 +18,7 @@ must never omit.
 """
 
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from uuid import UUID
 
@@ -37,11 +37,14 @@ from finsight.persistence.repositories.chunks import ChunkRepository
 from finsight.persistence.repositories.documents import DocumentRepository
 from finsight.persistence.repositories.generations import GenerationRepository
 from finsight.retrieval.contracts import (
+    DEGRADED_DENSE_UNAVAILABLE,
     DEGRADED_LEXICAL_FALLBACK,
     Candidate,
     RetrievalFilters,
     Retriever,
 )
+from finsight.retrieval.dense import DenseRetriever
+from finsight.retrieval.hybrid import HybridRetrievalService
 from finsight.retrieval.lexical import BM25Retriever, FullTextRetriever
 from finsight.retrieval.service import LexicalRetrievalService
 from finsight.vector_index.port import Span, VectorIndexUnavailableError
@@ -115,7 +118,12 @@ def indexed(
         *,
         issuer: str = "Probe Retrieval Limited",
         period_end: str = "2025-03-31",
+        types: Sequence[EvidenceType] | None = None,
     ) -> tuple[UUID, UUID]:
+        # Evidence type is assigned before indexing, never after: the Qdrant payload
+        # is written once at index time, so updating the column afterwards would leave
+        # the filter looking at a stale value and the test would prove nothing.
+        kinds = tuple(types or (EvidenceType.NARRATIVE for _ in BODIES))
         content_hash = f"{uuid.uuid4().hex}{uuid.uuid4().hex}"
         version_id = DocumentRepository(session).record_version(
             hash_algorithm="sha256",
@@ -168,7 +176,7 @@ def indexed(
                     source_element_ids=(elements[n],),
                     page_numbers=(n + 1,),
                     heading_path=("7. Risk factors",),
-                    evidence_type=EvidenceType.NARRATIVE,
+                    evidence_type=kinds[n],
                     role=ChunkRole.CHILD,
                     token_count=len(body.split()),
                     char_count=len(body),
@@ -202,6 +210,22 @@ def bm25(
 @pytest.fixture
 def fts(scope: Callable[[], Iterator[Session]]) -> FullTextRetriever:
     return FullTextRetriever(text_search_config=CONFIG, session_scope_factory=scope)
+
+
+@pytest.fixture
+def dense(
+    index: QdrantVectorIndex, scope: Callable[[], Iterator[Session]]
+) -> DenseRetriever:
+    """On the deterministic fake, which carries no semantics by design.
+
+    So nothing here asserts that dense retrieval is *good* — only that it runs, is
+    filtered, and fuses. Quality belongs to §22.6's comparison against real queries.
+    """
+    return DenseRetriever(
+        embedder=FakeEmbedder(dimensions=DIMENSIONS),
+        index=index,
+        session_scope_factory=scope,
+    )
 
 
 def texts_of(session: Session, candidates: tuple[Candidate, ...]) -> list[str]:
@@ -467,6 +491,162 @@ class TestFullTextFallback:
 
         assert len(found) == 1
         assert "10,000 crore" in texts_of(session, found)[0]
+
+
+class TestDenseAndHybrid:
+    def test_dense_retrieval_answers_under_the_same_filters(
+        self,
+        dense: DenseRetriever,
+        indexed: Callable[..., tuple[UUID, UUID]],
+    ) -> None:
+        """§20.4, with §20.2's filters enforced in the engine.
+
+        The fake embedder carries no semantics by design, so this asserts that dense
+        search *runs and is bounded*, never that it ranks well.
+        """
+        version_id, _generation_id = indexed()
+
+        found = dense.search(
+            "credit risk",
+            filters=RetrievalFilters(document_version_id=version_id),
+            limit=10,
+        )
+
+        assert len(found) == len(BODIES)
+        assert all(c.retriever == Retriever.DENSE for c in found)
+        assert [c.rank for c in found] == [1, 2, 3]
+
+    def test_dense_respects_the_generation_bound(
+        self,
+        dense: DenseRetriever,
+        session: Session,
+        indexed: Callable[..., tuple[UUID, UUID]],
+    ) -> None:
+        version_id, generation_id = indexed()
+        session.execute(
+            text(
+                "UPDATE generations SET state = 'superseded', activated_at = NULL"
+                " WHERE id = :g"
+            ).bindparams(g=generation_id)
+        )
+
+        assert dense.search(
+            "credit risk",
+            filters=RetrievalFilters(document_version_id=version_id),
+            limit=10,
+        ) == ()
+
+    def test_hybrid_fuses_both_retrievers(
+        self,
+        bm25: BM25Retriever,
+        fts: FullTextRetriever,
+        dense: DenseRetriever,
+        indexed: Callable[..., tuple[UUID, UUID]],
+    ) -> None:
+        version_id, _generation_id = indexed()
+        service = HybridRetrievalService(
+            lexical=LexicalRetrievalService(primary=bm25, fallback=fts),
+            dense=dense,
+        )
+
+        result = service.search(
+            "credit risk lending",
+            filters=RetrievalFilters(document_version_id=version_id),
+            limit=10,
+        )
+
+        assert result.is_degraded is False
+        assert result.candidates
+        contributors = {
+            retriever
+            for candidate in result.candidates
+            for retriever in candidate.retrievers
+        }
+        assert Retriever.DENSE in contributors
+
+    def test_hybrid_degrades_to_lexical_when_dense_is_down(
+        self,
+        bm25: BM25Retriever,
+        fts: FullTextRetriever,
+        session: Session,
+        indexed: Callable[..., tuple[UUID, UUID]],
+    ) -> None:
+        """§20.12, with the real lexical path still answering."""
+        version_id, _generation_id = indexed()
+
+        class DownDense:
+            name = Retriever.DENSE
+
+            def search(
+                self, query: str, *, filters: RetrievalFilters, limit: int
+            ) -> tuple[Candidate, ...]:
+                raise VectorIndexUnavailableError("qdrant is unreachable")
+
+        service = HybridRetrievalService(
+            lexical=LexicalRetrievalService(primary=bm25, fallback=fts),
+            dense=DownDense(),  # type: ignore[arg-type]
+        )
+
+        result = service.search(
+            "lending",
+            filters=RetrievalFilters(document_version_id=version_id),
+            limit=10,
+        )
+
+        assert result.degraded == (DEGRADED_DENSE_UNAVAILABLE,)
+        assert result.dense_used is False
+        assert len(result.candidates) == 1
+        assert "lends" in texts_of(
+            session,
+            tuple(
+                Candidate(
+                    chunk_id=c.chunk_id, score=c.score, rank=c.rank, retriever="fused"
+                )
+                for c in result.candidates
+            ),
+        )[0]
+
+    def test_a_table_derived_chunk_is_not_crowded_out(
+        self,
+        bm25: BM25Retriever,
+        fts: FullTextRetriever,
+        dense: DenseRetriever,
+        session: Session,
+        indexed: Callable[..., tuple[UUID, UUID]],
+    ) -> None:
+        """§20.5's floor, against a corpus where narrative outnumbers tables.
+
+        Three narrative chunks all mentioning the query term and one table-derived
+        chunk mentioning it once. With a budget of two and no allocation the narrative
+        side would take both slots.
+        """
+        version_id, _generation_id = indexed(
+            types=(
+                EvidenceType.NARRATIVE,
+                EvidenceType.TABLE_DERIVED,
+                EvidenceType.NARRATIVE,
+            )
+        )
+        service = HybridRetrievalService(
+            lexical=LexicalRetrievalService(primary=bm25, fallback=fts),
+            dense=dense,
+        )
+
+        result = service.search(
+            "crore borrowings credit risk customers",
+            filters=RetrievalFilters(document_version_id=version_id),
+            limit=2,
+        )
+
+        kinds = {
+            session.execute(
+                text("SELECT evidence_type FROM chunks WHERE id = :c").bindparams(
+                    c=candidate.chunk_id
+                )
+            ).scalar_one()
+            for candidate in result.candidates
+        }
+        assert "table_derived" in kinds
 
 
 class TestServiceDegradation:
