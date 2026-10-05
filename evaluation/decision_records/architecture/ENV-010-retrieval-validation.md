@@ -166,6 +166,119 @@ degradation flags.
 
 ---
 
+## RRF audited against production practice (commit 9)
+
+Four claims from two production-practice reviews, each checked against the live index
+rather than reasoned about. Two are confirmed, one is confirmed with a **correction to
+the prescribed fix**, and one does not arise here.
+
+### 1. "Score oblivion" is real — and the prescribed floor would break retrieval
+
+**The diagnosis is right.** RRF uses rank only, so a dense rank 1 at cosine 0.49 and a
+dense rank 1 at cosine 0.77 contribute identically. The prescribed fix is an absolute
+floor before fusion, "e.g. < 0.65".
+
+**Measured, that floor would be a disaster on this model and corpus.** Top-20 dense
+cosines, five queries, 100 scores pooled:
+
+| Query | Top | Median | Min |
+|---|---|---|---|
+| "what does the company say about credit risk" | 0.7713 | 0.7161 | 0.7052 |
+| "total deposits" | 0.6657 | 0.6301 | 0.6236 |
+| "EBITDA margin" | 0.7184 | 0.5847 | 0.5733 |
+| "PAT" | 0.5391 | 0.5044 | 0.5014 |
+| "RoNW" | 0.4888 | 0.4587 | 0.4539 |
+
+| Floor | Dense results dropped |
+|---|---|
+| 0.50 | 20% |
+| 0.55 | 40% |
+| 0.60 | 51% |
+| **0.65** | **77%** |
+| 0.70 | 79% |
+
+A floor at 0.65 removes **every** dense result for `PAT`, `RoNW` and most for
+`EBITDA margin` — precisely the acronym queries where the same research says dense is
+weakest and most needs help. It would silently disable dense retrieval for the hardest
+cases while appearing to improve precision on the easy ones.
+
+**The reason is that the distribution is query-dependent, not corpus-dependent.** A
+natural-language question sits at 0.70–0.77 and a bare acronym at 0.45–0.54, because
+cosine against a short query is systematically lower. An absolute floor therefore
+encodes "how verbose was the question", not "how good is the match". If a floor is
+ever adopted it has to be **relative to the top score for that query**, and that is a
+threshold requiring a golden set (§22.6) and developer approval (§4). Nothing is
+implemented, and the figure 0.65 is recorded here as **measured wrong for this
+deployment** rather than as a pending task.
+
+### 2. Consensus always outranks exclusivity — confirmed, and k=20–30 does not fix it
+
+Measured on `"what does the company say about credit risk"`, limit 20: candidates with
+two contributing retrievers occupy ranks 1–9, and **the best single-retriever candidate
+is rank 10.** Nine dual, eleven single, cleanly separated.
+
+That is not an accident of the data, it is arithmetic. A chunk found by both retrievers
+at rank *r* each scores `2/(k+r)`; a chunk found by one retriever at rank 1 scores
+`1/(k+1)`. Consensus wins whenever
+
+```text
+2/(k+r) > 1/(k+1)   ⟺   r < k + 2
+```
+
+With **k = 60 and a depth of 20, every r satisfies that** — so a chunk agreed on by
+both retrievers *anywhere* in the top 20 outranks a chunk either retriever ranked
+first exclusively. That is exactly the "overshadowed acronym" the research describes,
+in exact form.
+
+**The prescribed fix is insufficient**, and this is the correction worth carrying: the
+research suggests lowering k to 20–30 "for high-precision financial lookups". At depth
+20, `r < k + 2` still holds for every rank at k = 20 or 30. Making an exclusive rank-1
+able to beat deep consensus needs **k < depth − 2**, i.e. below about 18 at this depth.
+
+The research's own worked example does flip, because its weak document is still found
+by the second retriever at rank 100:
+
+| | k = 60 | k = 20 |
+|---|---|---|
+| #20 by both | 2/80 = **0.0250** | 2/40 = 0.0500 |
+| #1 by dense, #100 by sparse | 0.0226 | **0.0559** |
+
+So k genuinely matters, and the direction of the advice is right — but the specific
+range does not address the pure-exclusive case it was offered for.
+
+**Nothing is changed.** k is a threshold, §20.6 does not specify one, and choosing it
+needs the golden set. `retrieval/fusion.py` carries the crossover condition so the
+next person does not re-derive it.
+
+### 3. Tie-breaking non-determinism does not arise
+
+The concern is that a search engine returning tied scores in arbitrary order makes RRF
+inputs differ per call, producing flaky answers. Measured over 5 repeated calls each:
+
+| Retriever | Query | Identical order |
+|---|---|---|
+| BM25 | "credit risk" | **yes** |
+| dense | "credit risk" | **yes** |
+| BM25 | "total deposits" | **yes** |
+| dense | "total deposits" | **yes** |
+
+Input order is stable. The fallback also orders by `score DESC, c.ordinal`, and fusion
+breaks its own ties by `(−score, best rank, chunk id)` with a test asserting two runs
+agree. So determinism holds at all three stages — measured at the input, enforced at
+the output.
+
+### 4. Retrieval depth is not yet separable from the final limit
+
+The research asks for a wide retrieval window narrowed by fusion and then by a
+reranker — "top-100 each, RRF to top-50, rerank to top-5". Today `limit` bounds both
+retrieval depth and fused output, so asking for 5 results retrieves only 5 per type.
+
+That is a real gap and it belongs to the reranker commit, where the three numbers
+become meaningful together. Noted here because the crossover arithmetic above depends
+on depth: a wider retrieval window makes consensus dominance *stronger*, not weaker.
+
+---
+
 ## Store state after indexing (commits 7–9)
 
 | | |

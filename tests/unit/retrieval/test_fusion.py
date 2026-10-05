@@ -159,6 +159,53 @@ class TestBoundaries:
         contribution = next(c for c in fused if c.chunk_id == chunk)
         assert contribution.contributions == {Retriever.BM25: 1}
 
+    def test_consensus_outranks_exclusivity_at_the_default_k(self) -> None:
+        """The property the default k implies, pinned so a change surfaces it.
+
+        A chunk both retrievers put *last* in a depth-20 window outranks a chunk one
+        retriever put first exclusively, because consensus wins whenever
+        ``r < k + 2`` and k is 60. Usually what fusion is for; wrong for an
+        exact-identifier query only the lexical side can answer. ENV-010 measures it
+        on the corpus.
+        """
+        agreed, exclusive = uuid4(), uuid4()
+        # ``agreed`` is last in *both* lists; ``exclusive`` is first in one and absent
+        # from the other. Putting it in only one list would make it exclusive too,
+        # which is the mistake this comment exists to stop being repeated.
+        lexical = (exclusive, *[uuid4() for _ in range(18)], agreed)
+        dense = (*[uuid4() for _ in range(19)], agreed)
+
+        fused = reciprocal_rank_fusion(
+            [
+                ranked(Retriever.BM25, *lexical),
+                ranked(Retriever.DENSE, *dense),
+            ]
+        )
+
+        by_id = {candidate.chunk_id: candidate.rank for candidate in fused}
+        assert by_id[agreed] < by_id[exclusive]
+
+    def test_a_small_enough_k_lets_an_exclusive_first_place_win(self) -> None:
+        """The crossover is real: ``k < depth - 2`` flips it.
+
+        Pinned alongside the default so the trade-off is visible rather than needing
+        to be re-derived. Not a recommendation — k stays unmeasured.
+        """
+        agreed, exclusive = uuid4(), uuid4()
+        lexical = (exclusive, *[uuid4() for _ in range(18)], agreed)
+        dense = (*[uuid4() for _ in range(19)], agreed)
+
+        fused = reciprocal_rank_fusion(
+            [
+                ranked(Retriever.BM25, *lexical),
+                ranked(Retriever.DENSE, *dense),
+            ],
+            config=FusionConfig(k=5),
+        )
+
+        by_id = {candidate.chunk_id: candidate.rank for candidate in fused}
+        assert by_id[exclusive] < by_id[agreed]
+
     def test_k_must_be_at_least_one(self) -> None:
         """k=0 divides by the rank alone and k<0 can divide by zero."""
         with pytest.raises(ValueError, match="k must be at least 1"):

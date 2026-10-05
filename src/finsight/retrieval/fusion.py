@@ -12,6 +12,16 @@ type cannot crowd out the other", which is a guarantee that each type *reaches* 
 candidate set — not a cap that leaves slots empty when a type has nothing to offer.
 So an unfilled allocation spills to the other type: a question whose answer is
 entirely narrative still gets a full candidate set.
+
+**No absolute score floor is applied before fusion, and that is measured rather than
+overlooked.** Production practice recommends dropping dense results below a fixed
+cosine — "e.g. < 0.65" — to stop a weak rank 1 being promoted. Measured on this model
+and corpus, a floor at 0.65 would discard **77% of dense results**, including every
+result for `PAT` and `RoNW`: dense cosine against a *short* query sits at 0.45-0.54
+while a natural-language question sits at 0.70-0.77, so an absolute floor encodes how
+verbose the question was rather than how good the match is. A floor relative to each
+query's own top score would be the defensible shape, and it is a threshold §4 reserves
+for the developer. ENV-010 carries the distribution.
 """
 
 from collections.abc import Mapping, Sequence
@@ -55,6 +65,19 @@ class FusionConfig:
 
     Adopted as the standard default rather than chosen, and carried in versioned
     config so a later comparison can move it and say so.
+
+    **The one consequence worth knowing before changing it.** A chunk found by both
+    retrievers at rank *r* each scores ``2/(k+r)``; a chunk found by one retriever at
+    rank 1 scores ``1/(k+1)``. Consensus wins whenever ``r < k + 2``. With ``k=60``
+    and a retrieval depth of 20 that holds for *every* rank, so **a chunk both
+    retrievers agree on anywhere in the top 20 outranks a chunk either ranked first
+    exclusively** — measured on the corpus as dual-retriever candidates taking ranks
+    1-9 and the best exclusive one landing at rank 10.
+
+    That is usually the behaviour wanted from fusion, and it is the wrong behaviour
+    for an exact-identifier query where only the lexical side can be right. Making an
+    exclusive rank 1 competitive needs ``k < depth - 2``. ENV-010 has the measurement
+    and the arithmetic; §22.6's golden set is what would settle the value.
     """
 
     version: str = FUSION_CONFIG_VERSION
