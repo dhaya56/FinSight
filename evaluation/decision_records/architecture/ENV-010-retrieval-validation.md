@@ -1,7 +1,7 @@
 # ENV-010 — Retrieval Validation
 
-- **Status:** **in progress.** Opened at commit 9 and completed at commit 12.
-- **Opened:** 2026-10-05
+- **Status:** complete for Phase 7, with the gaps named rather than closed.
+- **Opened:** 2026-10-05 (commit 9) · **Completed:** 2026-10-05 (commit 12)
 - **Phase:** 7 — narrative retrieval
 
 ## What this is
@@ -11,17 +11,17 @@ deliberately: the figures below were taken while building commits 7 through 9, a
 record created at the end of the phase would have been written from memory or not at
 all. Each section says which commit produced it.
 
-**What is still owed at commit 12**, so an incomplete record is not mistaken for a
-complete one:
+**What was owed, and where it landed:**
 
-| Owed | Why it is not here yet |
+| Owed | Outcome |
 |---|---|
-| ~~Reranker latency and its degradation path~~ | **Measured at commit 10; see below and ADR-006** |
-| Peak reranker memory against §41.11 | Latency was the binding constraint and was measured first |
-| End-to-end `search` cost with QueryTrace persisted | Commit 11 |
-| Peak container memory, and the compose resource limits derived from it | Needs a sampled peak, not the spot samples below |
-| Index storage footprint on disk | Not yet measured |
-| Any statement about retrieval **quality** | No golden question set exists (§22.6, §34). Nothing in this record is a quality claim |
+| Reranker latency and its degradation path | **Measured** at commit 10 — see below and ADR-006 |
+| End-to-end `search` cost | **Measured** at commit 12 — 16 searches, median 2,273 ms |
+| Peak container memory | **Measured** at commit 12, and the compose limits set from it |
+| Index storage footprint on disk | **Measured** at commit 12 |
+| QueryTrace persisted (§31.9) | **Deferred by the developer.** The table, its migration and the question of whether to store the query text were all set aside to reach a working end-to-end pipeline first. The retrieval path is printed by `search` instead, which satisfies nothing in §31.9 and says so in its own output |
+| Peak **reranker process** memory against §41.11 | **Still owed.** Latency was the binding constraint and was measured; the model is 22.7M parameters, but its resident cost alongside `llama3.1:8b` in Phase 8 is unmeasured |
+| Any statement about retrieval **quality** | **Out of scope and will stay so until §34 produces a golden question set.** Nothing in this record is a quality claim |
 
 ---
 
@@ -490,6 +490,130 @@ register records it under not-implemented.
 can attend across rows and columns. Tables are flattened text, and ADR-003 is why: no
 detector bounds them well enough to restructure. Register §20 measures 19% of detected
 tables split across chunks.
+
+---
+
+## Storage footprint (commit 12)
+
+§22.9 asks for it, and the two stores answer different questions: PostgreSQL is what
+must be backed up, Qdrant is what a rebuild would have to regenerate (§29.2).
+
+### PostgreSQL — 127.44 MiB for the whole database
+
+| Table | Total MiB | Heap | Indexes | Rows |
+|---|---|---|---|---|
+| `source_elements` | **52.59** | 37.56 | 14.87 | 108,268 |
+| `chunks` | **39.05** | 16.40 | 12.73 | 5,759 |
+| `chunk_sources` | 18.55 | 4.50 | **14.02** | 66,928 |
+| `source_table_cells` | 6.34 | 3.79 | 2.44 | 23,613 |
+| `index_outbox` | 1.30 | 0.59 | 0.69 | 4,969 |
+| `source_tables` | 0.30 | 0.23 | 0.05 | 861 |
+
+Two things worth noting. **`chunk_sources` is 76% index** — it exists to be traversed
+from both ends (§14.7 asks "which regions is this chunk from", the Evidence Gate will
+ask "which chunks cite this region"), so that is the cost of the relation being
+bidirectional, not waste.
+
+And **the lexemes cost more than the text they derive from**: 7.12 MiB of `tsvector`
+against 5.36 MiB of chunk text, a ratio of 1.33. Positions are the reason — BM25 needs
+them, and they are most of the vector. It is a cheap price for the lexical path, and
+it is the opposite of what one would guess.
+
+### Qdrant — 81.1 MiB resident for 14.6 MiB of vectors
+
+| | |
+|---|---|
+| Points | 4,969 |
+| Dense vectors, raw | **14.56 MiB** (4,969 × 768 × 4 bytes) |
+| `memory_resident_bytes` | **81.1 MiB** |
+| `memory_retained_bytes` | 137.9 MiB |
+| `memory_active_bytes` | 64.7 MiB |
+| Segments | 4 |
+
+**Roughly 5.6x the raw vector data**, spent on four segments, ten payload indexes, the
+sparse index and allocator retention. At this scale that overhead dominates, and it is
+the figure to project from rather than the vector arithmetic — a capacity estimate
+built on 768 × 4 bytes would be wrong by a factor of five.
+
+---
+
+## Peak memory, and the resource limits derived from it (commit 12)
+
+`compose.yaml` deferred §38.11's limits until "the corpus is embedded and peak usage is
+measured". Both now hold.
+
+**Sampled** by polling `docker stats` every ~1.2 s through a sustained retrieval
+workload: 16 reranked hybrid searches plus the full-text fallback at depth 500 across
+every active generation, 29 samples per container.
+
+| Container | Query workload peak | Indexing (spot samples) | Limit set |
+|---|---|---|---|
+| `qdrant` | 221.9 MiB | **267 MiB** | **1 GiB** (~3.8x) |
+| `postgres` | 99.7 MiB | **259 MiB** | **1 GiB** (~3.9x) |
+| `objectstore` | 142.4 MiB | **231 MiB** | **512 MiB** (~2.2x) |
+
+**Indexing is the heavier stage on every container**, by 1.6x to 2.6x — which is why
+the limits are set from the indexing figures and not from the workload actually
+sampled. Those indexing numbers remain **spot samples, not a sampled peak**: a proper
+peak would need a 43-minute re-index, and the honest statement is that the limits have
+headroom chosen to absorb that uncertainty rather than measurement that removes it.
+
+**Why generous.** §38.11's purpose is "Limits prevent parser or infrastructure
+workloads from starving local models", and that failure is not hypothetical here — a
+re-index died with Ollama crash-looping at 0.8 GB of 15.7 GB available, and Phase 8
+adds `llama3.1:8b` (4.9 GB) to the same host. A limit close to a measured peak converts
+an ordinary heavier workload into an OOM kill, so these bound a runaway rather than
+sizing the services. Total 2.5 GiB of the 7.6 GiB Docker Desktop allocates.
+
+**No CPU limits.** Embedding and reranking are CPU-bound and do contend with the
+containers, so a limit is arguably warranted — but nothing has measured what value
+would help, and capping PostgreSQL during indexing could slow the stage that is already
+the bottleneck. Left out rather than guessed.
+
+---
+
+## End-to-end search (commit 12)
+
+16 reranked searches over eight distinct questions, warm, depth 25, limit 5:
+
+| | |
+|---|---|
+| Median | **2,273 ms** |
+| p90 | 2,469 ms |
+| Max | 2,699 ms |
+
+Consistent with commit 10's isolated figure of 2,544 ms, and still ~93% reranking. The
+dedup and citation reads added in commit 11 are not measurable against that noise.
+
+### Citations resolve, verified against the database
+
+The phase agenda is passages "each citing the exact source elements it was built from",
+and a citation that resolved to nothing would look identical in the output. Over three
+queries and 15 passages:
+
+| | |
+|---|---|
+| Citations returned | **239** |
+| Unresolved | **0** |
+| Page mismatches (cited element's page not among the passage's pages) | **0** |
+| Cited elements that are text-bearing blocks | **239 of 239** |
+
+### Deduplication is implemented and **unexercised on real queries**
+
+§20.9 collapses candidates sharing a source region. The condition exists in the corpus —
+**197 of 4,969 children (4.0%)** share a source element with another, across 87
+elements, up to 4 chunks per element, all of them siblings of a block split for
+exceeding the chunk budget.
+
+But it did not fire. Across the 16-search workload, **`collapsed=0` every time.** Three
+further probes aimed deliberately at the worst families — four siblings each, queried
+with distinctive words from the first sibling — returned **one** family member each.
+
+The reason is that split siblings hold different text: different runs of numbers, so
+BM25 and dense both separate them widely and they do not co-occur in a top-25. So dedup
+is a correct guard against a real condition that **retrieval does not currently
+surface**. Recorded plainly because the alternative is a reader assuming it is doing
+work. It becomes load-bearing as the corpus grows and candidate sets crowd.
 
 ---
 

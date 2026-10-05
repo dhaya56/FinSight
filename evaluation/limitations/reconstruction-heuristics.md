@@ -545,6 +545,38 @@ So nothing is demoted, and §18.8's condition is simply not met. Revisit only wi
 signal that separates running headers from repeated financial labels; repetition
 and page position are both measured to be insufficient.
 
+### One case where detection *is* reliable, found later and still not acted on
+
+The argument above is about *repetition*. Measured on the indexed corpus, a different
+signal separates cleanly — how much of a chunk is letters at all:
+
+| Active child chunks | Count | Share |
+|---|---|---|
+| Total | 4,969 | — |
+| Fewer than 50% letters | 760 | **15.3%** |
+| Fewer than 20% letters | 282 | **5.7%** |
+| Containing a run of dot leaders (`.........`) | 100 | **2.0%** |
+
+The 5.7% are flattened numeric tables and table-of-contents lines, and the largest are
+**384-token chunks of nothing but `.` characters** — embedded into 768 dimensions,
+given BM25 weights, and competing in retrieval against real prose. Two verbatim
+examples, both at the chunk-size ceiling:
+
+> `......................................................................`
+>
+> `B Consolidated Balance Sheet..........................................`
+
+Unlike repetition, this signal does not threaten the units declaration: `(In ₹ crore)`
+is 62% letters. A rule demoting chunks that are almost entirely punctuation would
+catch the dot leaders and leave the financial labels alone.
+
+**Not acted on, and the reason is sequencing rather than doubt.** Demotion is a
+*ranking* decision §18.8 governs, the numeric chunks in the same band are real content
+that must stay retrievable (§17.8 wants large-table context recovered, not dropped),
+and separating "dot leaders" from "a dense numeric table" needs a threshold §4 reserves
+for the developer. It is also a re-chunk and a 43-minute re-index. Recorded here with
+the measurement so the decision is available rather than rediscovered.
+
 ---
 
 ## 15. Chunk assembly
