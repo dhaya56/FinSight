@@ -128,19 +128,41 @@ corpus changes materially.
 GIN index, and it is not vestigial — it is the source of the sparse weights *and* a
 complete independent lexical index.
 
-**It is not yet a retriever, and this record must not be read as saying otherwise.**
-Nothing queries the GIN index: as of this record there is no `ts_rank` or
-`plainto_tsquery` anywhere in `src/`. So the honest statement of §20.12 compliance is
-that the fallback is **one query away rather than available** — the index exists, is
-populated, and is maintained on every chunking run, and the code path that would use
-it arrives with the retrieval commit that needs it.
+**It is now a retriever.** `ChunkRepository.search_full_text` ranks with
+`ts_rank_cd` over the GIN index, applies the same §20.2 filters **in SQL** rather
+than after ranking, and is reached automatically when Qdrant is unavailable —
+`LexicalRetrievalService` catches `VectorIndexUnavailableError` and flags the result
+with `lexical_fallback_postgres_fts`. So §20.12 is satisfied in code rather than in
+principle, and Qdrant's `DEGRADABLE` classification (§10.9) is now accurate for both
+halves of the lexical path.
 
-That matters because the objection it answers is real: consolidating lexical
-retrieval into Qdrant means losing Qdrant costs dense retrieval **and** BM25
-together. Until the FTS path is written, that loss is total rather than degraded, and
-Qdrant's `DEGRADABLE` classification in the readiness probe (§10.9) is therefore
-optimistic for the lexical half. Either the FTS retriever lands with the first
-retrieval commit, or the probe classification should be revisited.
+An earlier version of this record called it "a working independent lexical retriever"
+while no query code existed. That was corrected to say so, and this paragraph
+replaces the correction.
+
+**It is deliberately invocable, not only reachable through a failure**, because §9.7
+still owes a recorded comparison between the two and an unreachable retriever cannot
+be compared.
+
+### Measured on the real corpus, both paths, same query
+
+`"credit risk management"`, unfiltered, top 5:
+
+| | BM25 (Qdrant sparse) | PostgreSQL FTS |
+|---|---|---|
+| Latency | 158 ms | **15 ms** |
+| Top score | 12.02 | 0.23 |
+| Ranks 1–2 | identical to FTS | identical to BM25 |
+| Ranks 3–5 | diverge | diverge |
+
+Three things to carry forward. **The fallback is ten times faster**, because it is one
+indexed query against a local GIN index rather than a network round trip plus sparse
+scoring — so "degraded" here means *less well ranked*, never slower. **The score
+scales differ by two orders of magnitude**, which is the concrete form of the
+apples-to-oranges problem and the reason §20.6 fuses on rank rather than on score.
+And **the two agree on the strongest results and diverge on the weaker ones**, which
+is the shape a fallback should have: it loses ordering quality at the margin rather
+than missing the obvious answer.
 
 ## Verified against the running service
 

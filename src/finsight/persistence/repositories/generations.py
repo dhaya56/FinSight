@@ -241,6 +241,26 @@ class GenerationRepository:
             )
         ).scalar_one_or_none()
 
+    def active_ids(self) -> list[UUID]:
+        """Every generation a reader may currently see (§20.2, §11.13).
+
+        Read from ``generations.state`` rather than from the pointers on
+        ``document_versions``, for the reason :meth:`active_for` gives: a pointer left
+        stale by a defect would silently widen what retrieval is allowed to return,
+        and the state column is what the partial unique index actually constrains.
+
+        An empty list is a real answer — nothing has been indexed and activated yet —
+        and callers must treat it as "nothing may be returned" rather than as "do not
+        filter".
+        """
+        return list(
+            self._session.execute(
+                select(Generation.id)
+                .where(Generation.state == STATE_ACTIVE)
+                .order_by(Generation.activated_at)
+            ).scalars()
+        )
+
     def state_of(self, *, generation_id: UUID) -> str | None:
         return self._session.execute(
             select(Generation.state).where(Generation.id == generation_id)

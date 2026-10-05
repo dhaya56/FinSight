@@ -241,6 +241,115 @@ class ChunkRepository:
             ).scalar_one()
         )
 
+    def search_full_text(
+        self,
+        *,
+        query: str,
+        text_search_config: str,
+        generations: Sequence[UUID],
+        limit: int,
+        issuer_name: str | None = None,
+        document_type: str | None = None,
+        fiscal_period: str | None = None,
+        reporting_basis: str | None = None,
+        evidence_type: str | None = None,
+        section: str | None = None,
+        document_version_id: UUID | None = None,
+        fiscal_year_low: int | None = None,
+        fiscal_year_high: int | None = None,
+    ) -> list[tuple[UUID, float]]:
+        """§20.12's degradation path: lexical retrieval without Qdrant.
+
+        ADR-005 makes BM25 the primary lexical route and keeps this one so that
+        losing Qdrant costs dense retrieval rather than *all* retrieval. Until this
+        existed the claim was aspirational — the GIN index was populated and nothing
+        queried it.
+
+        **This is not BM25 and must not be presented as it.** ``ts_rank_cd`` weights
+        by term position and cover density: no term-frequency saturation, no document
+        length normalisation, no inverse document frequency. On the same corpus it
+        will order results differently, which is why the result carries a degradation
+        flag rather than passing silently as an equivalent.
+
+        **The filters are applied in SQL, not afterwards.** Filtering a top-k list
+        after ranking is the post-filtering anti-pattern: a query restricted to one
+        issuer would rank across the whole corpus, then discard most of what it
+        found, and return far fewer than ``limit`` or nothing at all.
+
+        Only children are searched. Parents repeat their children's text and are not
+        indexed by the primary path either, so including them here would make the
+        fallback return a different *population* from the retriever it stands in for.
+
+        ``websearch_to_tsquery`` rather than ``plainto_tsquery``, so a quoted phrase
+        and a negated term behave as a reader expects instead of being flattened to a
+        conjunction of every word.
+        """
+        if not generations:
+            # No active generation means nothing a reader may see (§11.13). An
+            # unbounded query here would serve superseded evidence.
+            return []
+
+        # The predicate is assembled from only the filters that were supplied, from
+        # a fixed set of literal fragments. Two reasons, and the first is not
+        # optional: a ``:param IS NULL OR col = :param`` form leaves PostgreSQL
+        # unable to infer the type of an unbound NULL and the statement fails to
+        # prepare. The second is that an always-true OR per unused filter is
+        # needless work for the planner on every query.
+        conditions = [
+            "c.generation_id = ANY(CAST(:generations AS uuid[]))",
+            "c.role = 'child'",
+            "c.lexemes @@ websearch_to_tsquery(CAST(:cfg AS regconfig), :query)",
+        ]
+        values: dict[str, object] = {
+            "cfg": text_search_config,
+            "query": for_analysis(query),
+            "generations": [str(generation) for generation in generations],
+            "limit": limit,
+        }
+        for fragment, name, value in (
+            ("m.issuer_name = :issuer", "issuer", issuer_name),
+            ("m.document_type = :document_type", "document_type", document_type),
+            ("m.fiscal_period = :fiscal_period", "fiscal_period", fiscal_period),
+            ("m.reporting_basis = :basis", "basis", reporting_basis),
+            ("c.evidence_type = :evidence_type", "evidence_type", evidence_type),
+            ("c.heading_path[1] = :section", "section", section),
+            (
+                "c.document_version_id = CAST(:version AS uuid)",
+                "version",
+                None if document_version_id is None else str(document_version_id),
+            ),
+            (
+                "EXTRACT(YEAR FROM m.period_end) >= :year_low",
+                "year_low",
+                fiscal_year_low,
+            ),
+            (
+                "EXTRACT(YEAR FROM m.period_end) <= :year_high",
+                "year_high",
+                fiscal_year_high,
+            ),
+        ):
+            if value is not None:
+                conditions.append(fragment)
+                values[name] = value
+
+        statement = sql_text(
+            "SELECT c.id,"
+            " ts_rank_cd(c.lexemes,"
+            " websearch_to_tsquery(CAST(:cfg AS regconfig), :query)) AS score"
+            " FROM chunks AS c"
+            " JOIN generations AS g ON g.id = c.generation_id"
+            " LEFT JOIN document_metadata AS m"
+            " ON m.document_version_id = c.document_version_id"
+            f" WHERE {' AND '.join(conditions)}"
+            " ORDER BY score DESC, c.ordinal"
+            " LIMIT :limit"
+        )
+        return [
+            (row.id, float(row.score))
+            for row in self._session.execute(statement, values)
+        ]
+
     def count_for_generation(self, *, generation_id: UUID) -> int:
         return self._session.execute(
             select(func.count())

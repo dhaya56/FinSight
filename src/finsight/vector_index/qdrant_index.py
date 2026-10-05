@@ -24,7 +24,7 @@ import re
 import uuid
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ApiException, UnexpectedResponse
@@ -33,6 +33,7 @@ from finsight.config.settings import Settings, get_settings
 from finsight.vector_index.port import (
     IndexedChunk,
     Match,
+    Span,
     VectorIndexShapeError,
     VectorIndexUnavailableError,
 )
@@ -402,14 +403,44 @@ def _as_filter(filters: Mapping[str, object] | None) -> models.Filter | None:
     retrievers by issuer, period, basis, scope, generation, security state and
     authorization scope — and §7 forbids semantic similarity overriding them, so
     an OR here would let a close vector escape its scope.
+
+    Three value shapes, because one is not enough for §20.2:
+
+    * a scalar matches exactly;
+    * a **sequence** matches any of its members, which is how a search is bounded to
+      the *set* of active generations — the one filter retrieval must never omit;
+    * a :class:`Span` matches a range, which is how a period becomes orderable.
+
+    An **empty sequence matches nothing**, and that is deliberate rather than an edge
+    case to smooth over. It arises when no generation is active, and returning
+    everything there would serve chunks from superseded or still-building
+    generations — the precise failure §11.13's activation machinery exists to
+    prevent.
     """
     if not filters:
         return None
-    return models.Filter(
-        must=[
-            models.FieldCondition(key=key, match=models.MatchValue(value=value))
-            for key, value in filters.items()
-        ]
+    return models.Filter(must=[_condition(key, value) for key, value in filters.items()])
+
+
+def _condition(key: str, value: object) -> models.FieldCondition:
+    if isinstance(value, Span):
+        return models.FieldCondition(
+            key=key, range=models.Range(gte=value.low, lte=value.high)
+        )
+    if isinstance(value, str | bool | int | float):
+        return models.FieldCondition(key=key, match=models.MatchValue(value=value))
+    if isinstance(value, Sequence):
+        members = list(value)
+        if all(isinstance(member, int) and not isinstance(member, bool) for member in members):
+            return models.FieldCondition(
+                key=key, match=models.MatchAny(any=cast("list[int]", members))
+            )
+        return models.FieldCondition(
+            key=key, match=models.MatchAny(any=[str(member) for member in members])
+        )
+    raise VectorIndexShapeError(
+        f"filter {key!r} has value of type {type(value).__name__}, which is not a "
+        "scalar, a sequence or a Span"
     )
 
 

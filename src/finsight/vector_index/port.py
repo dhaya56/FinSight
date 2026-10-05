@@ -20,6 +20,39 @@ from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 
+@dataclass(frozen=True, slots=True)
+class Span:
+    """An inclusive numeric range for a filter value, open at either end.
+
+    The one §20.2 shape a single value cannot express. "The last three years" is a
+    range over ``fiscal_year``, and ``fiscal_period`` — the document's own words, two
+    development filings sharing the string "FY2024-25" — cannot carry it.
+
+    Separate from a plain tuple because a tuple already means "any of these", and the
+    two are not interchangeable: ``(2023, 2025)`` as any-of excludes 2024, while as a
+    span it includes it. Reading one as the other is a silent wrong answer, so the
+    types differ.
+    """
+
+    low: int | None = None
+    high: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.low is None and self.high is None:
+            raise ValueError("a Span needs at least one bound")
+        if self.low is not None and self.high is not None and self.low > self.high:
+            raise ValueError(f"span {self.low}..{self.high} is empty")
+
+
+FilterValue = str | int | bool | Span | Sequence[str] | Sequence[int]
+"""What a filter field may be matched against.
+
+A scalar is an exact match, a sequence is *any of*, and a :class:`Span` is a range.
+Every field is combined with AND — §20.2's filters are hard, and §7 forbids semantic
+similarity overriding them, so there is no OR across fields.
+"""
+
+
 class VectorIndexError(RuntimeError):
     """Base class for failures at the vector-index boundary."""
 
