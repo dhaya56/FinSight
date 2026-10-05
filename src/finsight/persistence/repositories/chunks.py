@@ -350,6 +350,65 @@ class ChunkRepository:
             for row in self._session.execute(statement, values)
         ]
 
+    def load_context(self, *, chunk_ids: Sequence[UUID]) -> list[PendingChunk]:
+        """Chunk text and its deterministic context, for reranking and for display.
+
+        Returns :class:`PendingChunk` rather than a second near-identical type. The
+        indexer needs exactly these fields to build the embedded string and the
+        reranker needs exactly these to build its input — §23.6 permits "heading,
+        period, basis, and table context" and nothing else — so one type keeps the two
+        stages from drifting about what context a chunk has.
+
+        One query for the whole candidate set. Resolving candidates one at a time would
+        add a round trip per candidate to a path already dominated by model latency.
+
+        Order is **not** meaningful: the caller holds the ranking. A missing id is
+        simply absent from the result, which is the honest answer when a chunk was
+        removed between retrieval and resolution.
+        """
+        if not chunk_ids:
+            return []
+        statement = (
+            select(
+                Chunk.id,
+                Chunk.document_version_id,
+                Chunk.text,
+                Chunk.lexemes,
+                Chunk.heading_path,
+                Chunk.page_numbers,
+                Chunk.evidence_type,
+                DocumentMetadata.issuer_name,
+                DocumentMetadata.document_type,
+                DocumentMetadata.fiscal_period,
+                DocumentMetadata.reporting_basis,
+                DocumentMetadata.currency,
+                DocumentMetadata.period_end,
+            )
+            .outerjoin(
+                DocumentMetadata,
+                DocumentMetadata.document_version_id == Chunk.document_version_id,
+            )
+            .where(Chunk.id.in_(list(chunk_ids)))
+        )
+        return [
+            PendingChunk(
+                chunk_id=row.id,
+                document_version_id=row.document_version_id,
+                text=row.text,
+                lexemes=None if row.lexemes is None else str(row.lexemes),
+                heading_path=tuple(row.heading_path or ()),
+                page_numbers=tuple(row.page_numbers or ()),
+                evidence_type=row.evidence_type,
+                issuer_name=row.issuer_name,
+                document_type=row.document_type,
+                fiscal_period=row.fiscal_period,
+                reporting_basis=row.reporting_basis,
+                currency=row.currency,
+                period_end=row.period_end,
+            )
+            for row in self._session.execute(statement)
+        ]
+
     def count_for_generation(self, *, generation_id: UUID) -> int:
         return self._session.execute(
             select(func.count())

@@ -16,7 +16,8 @@ complete one:
 
 | Owed | Why it is not here yet |
 |---|---|
-| Reranker latency and its degradation path | Commit 10 |
+| ~~Reranker latency and its degradation path~~ | **Measured at commit 10; see below and ADR-006** |
+| Peak reranker memory against §41.11 | Latency was the binding constraint and was measured first |
 | End-to-end `search` cost with QueryTrace persisted | Commit 11 |
 | Peak container memory, and the compose resource limits derived from it | Needs a sampled peak, not the spot samples below |
 | Index storage footprint on disk | Not yet measured |
@@ -276,6 +277,87 @@ retrieval depth and fused output, so asking for 5 results retrieves only 5 per t
 That is a real gap and it belongs to the reranker commit, where the three numbers
 become meaningful together. Noted here because the crossover arithmetic above depends
 on depth: a wider retrieval window makes consensus dominance *stronger*, not weaker.
+
+---
+
+## Reranking (commit 10)
+
+§23.7 requires per-query reranking latency and peak resource use. Latency is measured;
+peak memory is owed.
+
+### Latency by depth, isolated
+
+Real chunk text at realistic length, this host's CPU, batch 8, median of 3:
+
+| Candidates | Median | Per candidate |
+|---|---|---|
+| 10 | 607 ms | 61 ms |
+| 25 | 1,700 ms | 68 ms |
+| 50 | **4,005 ms** | 80 ms |
+| 100 | **9,135 ms** | 91 ms |
+
+Batch size was measured too: **8 beats 16 and 32 at every depth.** A larger batch pads
+every sequence to the longest in it, and the wasted compute outweighs the fewer forward
+passes — the opposite of the usual batching intuition, and worth knowing before someone
+"optimises" it upward.
+
+### End to end, steady state, depth 25
+
+| | Median | Min | Max |
+|---|---|---|---|
+| Reranked query | **2,544 ms** | 2,441 | 2,705 |
+| Reranker off | **175 ms** | 169 | 202 |
+| Reranking delta | **2,369 ms** over 25 candidates — 95 ms each | | |
+
+**Reranking is 93% of a query's latency.** That is the single most important figure in
+this record for Phase 9: a Streamlit page issuing this query waits two and a half
+seconds, almost all of it in the cross-encoder.
+
+§23.4 — "FlashRank is tested only if reranker latency prevents interactive use" — is
+therefore **measurably triggered** rather than hypothetical. Whether 2.5 s *prevents*
+interactive use is a product judgement, not a measurement. The levers, cheapest first:
+depth 10 puts a query near 950 ms; ONNX export or quantisation; then FlashRank.
+
+### Input fits the window, worst case measured
+
+Query + deterministic context + chunk text, over the **200 largest chunks** in the
+corpus, tokenized by the model's own tokenizer:
+
+| | Tokens |
+|---|---|
+| Median | 441 |
+| p90 | 453 |
+| **Max** | **461** |
+| Over the 512 window | **0 of 200** |
+
+Nothing is truncated today. Truncation stays enabled as a safety net, and the asymmetry
+with the embedder is deliberate: there, truncation made text permanently unfindable and
+is refused; here, it costs ordering for one candidate in one query.
+
+### What it changes on a real query
+
+`"what does the company say about credit risk"`, identical 25 candidates, reranker off
+then on:
+
+| | Fused order | Reranked |
+|---|---|---|
+| Rank 1 | Ola Electric fair-value **table fragment** | Infosys, "Credit risk on cash and cash equivalents is limited…" |
+| Rank 2 | Infosys credit-loss allowance | Infosys credit-loss allowance |
+| Rank 3 | HDFC transition-risk **table** | HDFC, "Credit Risk is the possibility of losses…" |
+| Positions changed in the top 5 | — | **4 of 5** |
+| Chunks promoted from outside the fused top 5 | — | **2** |
+
+The two promoted chunks are the depth separation earning its cost: without a window
+wider than the final count, neither could have been considered.
+
+Reranked scores on that query were **4.36, 3.62, 1.77, −0.12, −0.47**, with a sign change
+where relevance visibly falls away. A floor at zero would be a far more defensible filter
+than the dense-cosine floor measured above as query-dependent — and it is still a
+threshold §4 reserves for the developer.
+
+**This is an illustration, not evidence of quality.** One query, no relevance labels, and
+the person judging the improvement wrote the code. §22.6's metrics on a golden set are
+what would settle it.
 
 ---
 
