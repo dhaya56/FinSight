@@ -28,10 +28,15 @@ from sqlalchemy.orm import Session
 
 from finsight.indexing.enrichment import ChunkContext, embedded_text
 from finsight.persistence.database import session_scope
-from finsight.persistence.repositories.chunks import ChunkRepository, PendingChunk
+from finsight.persistence.repositories.chunks import (
+    ChunkRepository,
+    Citation,
+    PendingChunk,
+)
 from finsight.reranking.port import Passage, Reranker, RerankUnavailableError
 from finsight.retrieval.contracts import RetrievalFilters
 from finsight.retrieval.hybrid import HybridRetrievalService
+from finsight.retrieval.selection import Collapsed, dedupe
 
 __all__ = [
     "DEGRADED_RERANKER_UNAVAILABLE",
@@ -76,6 +81,14 @@ class RetrievedChunk:
     contributions: Mapping[str, int]
     rerank_score: float | None = None
 
+    citations: tuple[Citation, ...] = ()
+    """The source regions this passage was built from (§14.7, §14.9).
+
+    Not decoration. A chunk is a *retrieval* representation and §14.1 keeps evidence
+    with the source representation, so a result that cannot name its source elements
+    cannot be used as evidence — which is the whole point of the phase.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class Result:
@@ -89,6 +102,12 @@ class Result:
     lexical_retriever: str = ""
     dense_used: bool = True
     fusion_version: str = ""
+    collapsed: tuple[Collapsed, ...] = ()
+    """Candidates removed as duplicate evidence (§20.9), and what absorbed them.
+
+    Reported rather than dropped silently, because "why are there four results when I
+    asked for five" is a question the caller should be able to answer.
+    """
 
     @property
     def is_degraded(self) -> bool:
@@ -140,7 +159,10 @@ class RetrievalPipeline:
 
         order = [candidate.chunk_id for candidate in fused.candidates]
         with self.session_scope_factory() as session:
-            loaded = ChunkRepository(session).load_context(chunk_ids=order)
+            repository = ChunkRepository(session)
+            loaded = repository.load_context(chunk_ids=order)
+            citations = repository.citations_for(chunk_ids=order)
+            regions = repository.source_elements_for(chunk_ids=order)
         by_id = {chunk.chunk_id: chunk for chunk in loaded}
 
         degraded = list(fused.degraded)
@@ -166,9 +188,16 @@ class RetrievalPipeline:
                 reranked = True
                 reranker_model = self.reranker.model
 
+        # §20.9 before the limit, not after: collapsing duplicates afterwards would
+        # return fewer results than asked for, and the whole point is that the budget
+        # is spent on distinct evidence.
+        distinct, collapsed = dedupe(
+            [_Ordered(chunk_id=chunk_id) for chunk_id in ranked], elements=regions
+        )
+
         fused_by_id = {c.chunk_id: c for c in fused.candidates}
         results: list[RetrievedChunk] = []
-        for chunk_id in ranked:
+        for chunk_id in (item.chunk_id for item in distinct):
             chunk = by_id.get(chunk_id)
             if chunk is None:
                 # Resolved to nothing: the chunk was removed between retrieval and
@@ -189,6 +218,7 @@ class RetrievalPipeline:
                     fused_score=candidate.score,
                     contributions=candidate.contributions,
                     rerank_score=scores.get(chunk_id),
+                    citations=citations.get(chunk_id, ()),
                 )
             )
             if len(results) >= limit:
@@ -203,7 +233,20 @@ class RetrievalPipeline:
             lexical_retriever=fused.lexical_retriever,
             dense_used=fused.dense_used,
             fusion_version=fused.fusion_version,
+            collapsed=collapsed,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _Ordered:
+    """A rank-carrying wrapper, so deduplication works on ids alone.
+
+    ``dedupe`` is generic over anything with ``chunk_id``; at this point the ordering is
+    just a list of ids, and wrapping them is cheaper than threading full candidates
+    through a stage that only compares source regions.
+    """
+
+    chunk_id: UUID
 
 
 def _reranker_input(chunk: PendingChunk) -> str:

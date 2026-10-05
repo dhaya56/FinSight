@@ -2,16 +2,29 @@
 
 Run as ``python -m finsight.cli.main <command>``.
 
-Output is deliberately dull: identifiers, states and counts. It never prints
-extracted text, a filename, an object key, a connection string or any part of a
-document (CLAUDE.md §10). An operator running this in a shared terminal, or
+**Operational commands print identifiers, states and counts and nothing else** — no
+extracted text, no filename, no object key, no connection string, no part of a
+document (CLAUDE.md §10). An operator running `corpus ingest` in a shared terminal, or
 piping it into a log, must not thereby disclose the contents of a filing.
+
+**`search` is the one exception, and it is one by design rather than by drift.**
+Showing retrieved passages is the command's entire purpose, and §6.8 makes inspecting
+"exact pages, spans, tables, and cells supporting an answer" a product capability
+rather than a leak. So the rule is narrower than "never print document text": an
+*operational* command must not, and the *evidence view* must. Two consequences follow,
+and both are enforced here rather than assumed:
+
+* nothing `search` prints is logged — it goes to stdout for the operator who typed the
+  query, and no log line carries a passage or a question;
+* passages are truncated to a snippet unless `--full` is asked for, so a careless
+  redirect spills a line rather than a filing.
 """
 
 import argparse
 import json
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from uuid import UUID
 
@@ -30,7 +43,10 @@ from finsight.extraction.service import build_extraction_service
 from finsight.indexing.service import build_indexing_service
 from finsight.object_store.port import ObjectStoreError
 from finsight.persistence.repositories.source import ElementCounts
-from finsight.vector_index.port import VectorIndexError
+from finsight.reranking.port import RerankError
+from finsight.retrieval.contracts import RetrievalFilters
+from finsight.retrieval.pipeline import Result, build_retrieval_pipeline
+from finsight.vector_index.port import Span, VectorIndexError
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -84,9 +100,73 @@ def build_parser() -> argparse.ArgumentParser:
     )
     index.set_defaults(handler=run_index)
 
+    _add_search_command(subcommands)
     _add_corpus_commands(subcommands)
 
     return parser
+
+
+def _add_search_command(subcommands: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    """Attach ``search``: the evidence view (§6.8).
+
+    Every filter is optional and every one is a §20.2 hard filter when given. Optional
+    because a question spanning the corpus wants none, and hard because §7 forbids
+    similarity overriding scope — so a filter that *is* given is never relaxed to find
+    more results.
+    """
+    search = subcommands.add_parser(
+        "search", help="Retrieve passages from the indexed corpus."
+    )
+    search.add_argument("query", help="The question, in quotes.")
+    search.add_argument(
+        "--limit", type=int, default=5, help="Passages to return. Defaults to 5."
+    )
+    search.add_argument(
+        "--issuer", default=None, help="Restrict to one issuer, exactly as recorded."
+    )
+    search.add_argument(
+        "--document-type", default=None, help="annual_report, drhp, form_10k."
+    )
+    search.add_argument(
+        "--basis",
+        default=None,
+        help="consolidated, standalone, both or undetermined (§16.9).",
+    )
+    search.add_argument(
+        "--section", default=None, help="Restrict to one top-level heading."
+    )
+    search.add_argument(
+        "--year",
+        type=int,
+        default=None,
+        help="Period ending in this year. Use --since for a range.",
+    )
+    search.add_argument(
+        "--since",
+        type=int,
+        default=None,
+        help="Period ending in this year or later. Cannot be used with --year.",
+    )
+    search.add_argument(
+        "--evidence-type",
+        choices=["narrative", "table_derived"],
+        default=None,
+        help="Restrict to one evidence type. Allocation covers both by default.",
+    )
+    search.add_argument(
+        "--no-rerank",
+        action="store_true",
+        help=(
+            "Return the fused order. Reranking is 93%% of query latency, and §23.1 "
+            "keeps it optional, so this makes the two orderings comparable."
+        ),
+    )
+    search.add_argument(
+        "--full",
+        action="store_true",
+        help="Print whole passages rather than a snippet.",
+    )
+    search.set_defaults(handler=run_search)
 
 
 def _add_corpus_commands(subcommands: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
@@ -504,6 +584,99 @@ def run_index(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+_SNIPPET = 220
+
+
+def run_search(args: argparse.Namespace) -> int:
+    """Retrieve passages and print them with the source regions behind each.
+
+    The citations are the point. A passage with no resolvable source element is a
+    retrieval representation and not evidence (§14.1, §14.7), so printing the text
+    without the addresses would show something that looks citable and is not.
+    """
+    if args.year is not None and args.since is not None:
+        print("error: use --year or --since, not both", file=sys.stderr)
+        return EXIT_FAILED
+
+    pipeline = build_retrieval_pipeline()
+    if args.no_rerank:
+        pipeline = replace(pipeline, reranker=None)
+
+    result = pipeline.search(
+        args.query,
+        filters=RetrievalFilters(
+            issuer_name=args.issuer,
+            document_type=args.document_type,
+            reporting_basis=args.basis,
+            section=args.section,
+            evidence_type=args.evidence_type,
+            fiscal_year=args.year if args.year is not None
+            else (Span(low=args.since) if args.since is not None else None),
+        ),
+        limit=args.limit,
+    )
+
+    if result.degraded:
+        # First, not last. §20.12 makes degradation a property of the answer, and a
+        # reader who stops at the first result must already know it is degraded.
+        print(f"DEGRADED: {', '.join(result.degraded)}")
+    if not result.candidates:
+        print("no passages matched")
+        _print_search_footer(result)
+        return EXIT_OK
+
+    for candidate in result.candidates:
+        rerank = (
+            f" rerank={candidate.rerank_score:+.4f}"
+            if candidate.rerank_score is not None
+            else ""
+        )
+        print(
+            f"\n[{candidate.rank}] {candidate.issuer_name or 'unknown issuer'}"
+            f"  {candidate.fiscal_period or 'unknown period'}"
+            f"  {candidate.evidence_type}"
+        )
+        print(
+            f"    pages {list(candidate.page_numbers)}"
+            f"  fused={candidate.fused_score:.5f}{rerank}"
+            f"  found_by={dict(candidate.contributions)}"
+        )
+        if candidate.heading_path:
+            print(f"    section: {' > '.join(candidate.heading_path)}")
+        body = " ".join(candidate.text.split())
+        if not args.full and len(body) > _SNIPPET:
+            body = f"{body[:_SNIPPET]}..."
+        print(f"    {body}")
+        print(f"    cites {len(candidate.citations)} source region(s):")
+        for citation in candidate.citations[:4]:
+            print(f"      {citation.locator}  {citation.source_element_id}")
+        if len(candidate.citations) > 4:
+            print(f"      ... and {len(candidate.citations) - 4} more")
+
+    _print_search_footer(result)
+    return EXIT_OK
+
+
+def _print_search_footer(result: Result) -> None:
+    """How the result was produced, which §20.13 wants recorded.
+
+    Printed rather than persisted: the QueryTrace table is deferred, so this is the
+    only place the path is currently visible. Said plainly so nobody mistakes it for
+    §31.9 being satisfied.
+    """
+    print(
+        f"\nretrieved {len(result.candidates)} of depth {result.depth}"
+        f"  lexical={result.lexical_retriever}"
+        f"  dense={'yes' if result.dense_used else 'no'}"
+        f"  reranked={'yes' if result.reranked else 'no'}"
+    )
+    if result.reranker_model:
+        print(f"reranker: {result.reranker_model}")
+    if result.collapsed:
+        print(f"collapsed {len(result.collapsed)} duplicate passage(s) (§20.9)")
+    print(f"fusion config: {result.fusion_version}  (QueryTrace not persisted yet)")
+
+
 def run_extract(args: argparse.Namespace) -> int:
     """Extract one document version and report what was recorded.
 
@@ -548,6 +721,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         CorpusError,
         EmbeddingError,
         VectorIndexError,
+        RerankError,
     ) as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_FAILED

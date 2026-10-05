@@ -33,6 +33,21 @@ from finsight.persistence.tables.chunks import (
     IndexOutbox,
 )
 from finsight.persistence.tables.document_metadata import DocumentMetadata
+from finsight.persistence.tables.source import SourceElement
+
+
+@dataclass(frozen=True, slots=True)
+class Citation:
+    """One source region a chunk was built from (§14.7).
+
+    ``locator`` is the address shown to a reader — ``p. 12``, ``Sheet1!B7``. Stored on
+    the element rather than derived here, so a change to how addresses are rendered
+    cannot silently change what a citation claims.
+    """
+
+    source_element_id: UUID
+    locator: str
+    position: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,6 +423,64 @@ class ChunkRepository:
             )
             for row in self._session.execute(statement)
         ]
+
+    def citations_for(
+        self, *, chunk_ids: Sequence[UUID]
+    ) -> dict[UUID, tuple[Citation, ...]]:
+        """The source regions each chunk was built from, in order (§14.7, §14.9).
+
+        This is what makes a retrieved passage *citable* rather than merely readable: a
+        chunk is a retrieval representation and §14.1 keeps evidence with the source
+        representation, so a result that cannot name its source elements cannot be
+        used. ``locator`` is carried because it is the address a reader is shown —
+        "p. 12" — and §14.9 stores it rather than deriving it so that a rendering
+        change cannot alter a citation.
+
+        One query for the whole result set, ordered so a caller can rely on
+        ``position`` without sorting.
+        """
+        if not chunk_ids:
+            return {}
+        statement = (
+            select(
+                ChunkSource.chunk_id,
+                ChunkSource.source_element_id,
+                ChunkSource.position,
+                SourceElement.locator,
+            )
+            .join(SourceElement, SourceElement.id == ChunkSource.source_element_id)
+            .where(ChunkSource.chunk_id.in_(list(chunk_ids)))
+            .order_by(ChunkSource.chunk_id, ChunkSource.position)
+        )
+        grouped: dict[UUID, list[Citation]] = {}
+        for row in self._session.execute(statement):
+            grouped.setdefault(row.chunk_id, []).append(
+                Citation(
+                    source_element_id=row.source_element_id,
+                    locator=row.locator,
+                    position=row.position,
+                )
+            )
+        return {chunk_id: tuple(items) for chunk_id, items in grouped.items()}
+
+    def source_elements_for(
+        self, *, chunk_ids: Sequence[UUID]
+    ) -> dict[UUID, frozenset[UUID]]:
+        """Which source elements each chunk covers, for §20.9's deduplication.
+
+        A set rather than a sequence, because overlap is the only question being
+        asked: two candidates built from the same blocks are the same evidence
+        presented twice, however differently they were retrieved.
+        """
+        if not chunk_ids:
+            return {}
+        statement = select(ChunkSource.chunk_id, ChunkSource.source_element_id).where(
+            ChunkSource.chunk_id.in_(list(chunk_ids))
+        )
+        grouped: dict[UUID, set[UUID]] = {}
+        for row in self._session.execute(statement):
+            grouped.setdefault(row.chunk_id, set()).add(row.source_element_id)
+        return {chunk_id: frozenset(items) for chunk_id, items in grouped.items()}
 
     def count_for_generation(self, *, generation_id: UUID) -> int:
         return self._session.execute(

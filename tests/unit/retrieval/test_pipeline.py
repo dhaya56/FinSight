@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from finsight.persistence.repositories.chunks import PendingChunk
+from finsight.persistence.repositories.chunks import Citation, PendingChunk
 from finsight.reranking.fake import FakeReranker
 from finsight.retrieval.contracts import (
     DEGRADED_DENSE_UNAVAILABLE,
@@ -84,6 +84,14 @@ both sides of every test so one case cannot leak into the next.
 """
 
 
+_SHARED_ELEMENTS: dict[UUID, frozenset[UUID]] = {}
+"""Source regions per chunk, for the deduplication stage. Empty means "distinct".
+
+Empty by default so most tests see no collapsing, which keeps them about orchestration.
+The deduplication rules themselves are covered in ``test_selection.py``.
+"""
+
+
 class _Repository:
     """Resolves every requested id to a chunk, except those in ``_MISSING``."""
 
@@ -97,6 +105,29 @@ class _Repository:
             if chunk_id not in _MISSING
         ]
 
+    def citations_for(
+        self, *, chunk_ids: Sequence[UUID]
+    ) -> dict[UUID, tuple[Citation, ...]]:
+        return {
+            chunk_id: (
+                Citation(
+                    source_element_id=uuid4(),
+                    locator=f"p. {index + 1}",
+                    position=0,
+                ),
+            )
+            for index, chunk_id in enumerate(chunk_ids)
+        }
+
+    def source_elements_for(
+        self, *, chunk_ids: Sequence[UUID]
+    ) -> dict[UUID, frozenset[UUID]]:
+        return {
+            chunk_id: _SHARED_ELEMENTS[chunk_id]
+            for chunk_id in chunk_ids
+            if chunk_id in _SHARED_ELEMENTS
+        }
+
 
 @pytest.fixture(autouse=True)
 def _patched_repository(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
@@ -107,9 +138,11 @@ def _patched_repository(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     itself as an unrelated failure somewhere else in the suite.
     """
     _MISSING.clear()
+    _SHARED_ELEMENTS.clear()
     monkeypatch.setattr("finsight.retrieval.pipeline.ChunkRepository", _Repository)
     yield
     _MISSING.clear()
+    _SHARED_ELEMENTS.clear()
 
 
 def build(
