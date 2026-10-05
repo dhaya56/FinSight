@@ -409,12 +409,31 @@ def _payload(chunk: PendingChunk, generation_id: UUID) -> dict[str, object]:
     correct behaviour for a document whose issuer was never recorded: a query
     restricted to an issuer must not return a document that might be someone
     else's. Writing a placeholder would make every such document match each other.
+
+    Three fields exist here that the chunk also carries in PostgreSQL, and the
+    duplication is the point — a value only a relational query can see cannot bound
+    a vector search:
+
+    * ``section`` is the outermost heading. Without it §20.2 can report which
+      section a result came from but not exclude one, which is what a question
+      about financial figures needs when a DRHP's boilerplate risk factors run to
+      a hundred pages.
+    * ``fiscal_year`` is derived from ``period_end``, the one date that is reliably
+      orderable. ``fiscal_period`` is the document's own words and two development
+      filings share the string "FY2024-25".
+    * ``page_numbers`` is the list, so a filter can restrict to a page span.
     """
     payload: dict[str, object] = {
         "generation_id": str(generation_id),
         "document_version_id": str(chunk.document_version_id),
         "evidence_type": chunk.evidence_type,
     }
+    if chunk.page_numbers:
+        payload["page_numbers"] = list(chunk.page_numbers)
+    if chunk.heading_path:
+        payload["section"] = chunk.heading_path[0]
+    if chunk.period_end is not None:
+        payload["fiscal_year"] = chunk.period_end.year
     for key, value in (
         ("issuer_name", chunk.issuer_name),
         ("fiscal_period", chunk.fiscal_period),

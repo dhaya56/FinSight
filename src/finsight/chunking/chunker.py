@@ -60,6 +60,9 @@ and only ever applied inside one block, so a mistake costs a boundary rather tha
 a document.
 """
 
+_WORD: Final = re.compile(r"\S+")
+"""One run of non-whitespace, matched for its span so the original can be sliced."""
+
 _JOIN: Final = "\n"
 """How blocks are joined. A newline, because that is the boundary the document drew
 and collapsing it to a space would merge a heading into the line beneath it."""
@@ -110,6 +113,7 @@ def chunk_blocks(
 
     chunks = _assemble(usable, settings, count_tokens)
     verify_coverage(usable, chunks)
+    verify_parents(chunks)
     return chunks
 
 
@@ -258,6 +262,71 @@ def _emit_group(
     count: TokenCounter,
     out: list[Chunk],
 ) -> None:
+    """Emit a run as parent-sized windows, so a parent holds all of its children.
+
+    **One parent per run was wrong, and measurably so.** A parent was capped at
+    ``parent_max_tokens`` while its children were not collectively bounded, so a
+    long run produced a parent that was a *prefix* of its children. Measured on the
+    development corpus: 143 of 524 parents were truncated, and **1,206 of 2,790
+    parented children were not contained in their own parent** — the worst a parent
+    of 1,535 tokens standing for 50 children totalling 17,498.
+
+    That breaks the one thing §18.5 keeps parents for and §20.8 expands to them for.
+    Expansion would have returned the opening of a section as "context" for a
+    passage from its middle: text that looks like context, reads like context, and
+    does not contain the passage. Worse than returning nothing, because nothing is
+    visibly nothing.
+
+    So the run is partitioned into windows that a parent can hold whole, and each
+    window gets its own parent. A wide section now yields several parents instead of
+    one misleading one, which is the honest shape of a wide section — the same
+    reasoning that made ``_emit_section`` split a mixed section into runs.
+    """
+    for window in _parent_windows(units, config, count):
+        _emit_window(window, path, kind, config, count, out)
+
+
+def _parent_windows(
+    units: Sequence[SourceBlock], config: ChunkingConfig, count: TokenCounter
+) -> list[list[SourceBlock]]:
+    """Partition a run into consecutive windows a parent can contain.
+
+    Budgeted on the sum of the units' own token counts, which is not exactly the
+    token count of their joined text — a tokenizer is not quite additive across a
+    newline. The error is a token or two per join and always makes the window
+    *slightly* larger than budgeted, never smaller, so ``parent_max_tokens`` is a
+    windowing target rather than a hard ceiling. Measured overshoot is recorded with
+    the configuration value.
+
+    A single unit larger than the whole parent budget becomes its own window. Its
+    parent is then that one block, over budget, and the children are the pieces
+    ``_split_block`` cut from it — so containment still holds, which is the property
+    worth protecting. Truncating instead is what produced the defect this replaces.
+    """
+    windows: list[list[SourceBlock]] = []
+    current: list[SourceBlock] = []
+    total = 0
+    for unit in units:
+        tokens = count(unit.text)
+        if current and total + tokens > config.parent_max_tokens:
+            windows.append(current)
+            current = []
+            total = 0
+        current.append(unit)
+        total += tokens
+    if current:
+        windows.append(current)
+    return windows
+
+
+def _emit_window(
+    units: Sequence[SourceBlock],
+    path: tuple[str, ...],
+    kind: EvidenceType,
+    config: ChunkingConfig,
+    count: TokenCounter,
+    out: list[Chunk],
+) -> None:
     parent_index = len(out)
     out.append(_placeholder_parent(path, kind, config))
 
@@ -315,6 +384,9 @@ def _emit_group(
     flush()
     _absorb_short_tail(out, parent_index + 1, config, count)
 
+    # No cap. The window was built to fit, and truncating here is exactly the
+    # defect ``_emit_group`` documents: a parent that does not contain its children
+    # is not context.
     parent = _build(
         units,
         path,
@@ -325,7 +397,6 @@ def _emit_group(
         parent_index=None,
         ordinal=parent_index,
         notes=(),
-        cap=config.parent_max_tokens,
     )
 
     if children == 1 and out[parent_index + 1].text == parent.text:
@@ -366,6 +437,16 @@ def _absorb_short_tail(
     Reaching across runs is refused rather than unimplemented: see
     ``child_min_tokens`` for why, and §18 of the limitation register for the
     measurement.
+
+    **A chunk cut out of an oversized block is never merged.** The merge joins two
+    chunks with a newline, which reproduces the source only when the two were whole
+    blocks — blocks are what the parent joins with a newline. A piece of a split
+    block sits inside its block separated by whatever whitespace the document used,
+    so joining it with a newline produces text that appears nowhere in the source,
+    and the chunk stops being contained in its own parent. Measured on a real
+    filing before the guard: 2 chunks of 2,337, both carrying ``split_oversize_block``
+    and ``joined_short_blocks`` together. Caught by ``verify_parents``, which is why
+    that check runs on every call and not only in tests.
     """
     if len(out) - first < 2:
         return
@@ -374,6 +455,8 @@ def _absorb_short_tail(
         return
 
     previous = out[-2]
+    if SPLIT_OVERSIZE in tail.notes or SPLIT_OVERSIZE in previous.notes:
+        return
     if previous.role is not ChunkRole.CHILD:
         return
     merged_text = _JOIN.join([previous.text, tail.text])
@@ -433,12 +516,8 @@ def _build(
     parent_index: int | None,
     ordinal: int,
     notes: tuple[str, ...],
-    cap: int | None = None,
 ) -> Chunk:
     text = _JOIN.join(unit.text for unit in units)
-    if cap is not None and count(text) > cap:
-        text = _truncate(text, cap, count)
-        notes = (*notes, "parent_truncated")
     return Chunk(
         text=text,
         source_element_ids=tuple(unit.element_id for unit in units),
@@ -455,40 +534,6 @@ def _build(
     )
 
 
-def _truncate(text: str, cap: int, count: TokenCounter) -> str:
-    """Shorten a parent to its budget, on a line boundary where one exists.
-
-    Parents are context, not evidence — §14.9 resolves citations to source regions
-    and a child always carries the exact blocks — so losing the tail of a very long
-    section costs interpretation, not provenance.
-
-    **The first line may itself exceed the cap**, which an earlier version silently
-    allowed: it kept the first line unconditionally and returned a parent fifty
-    tokens over a cap of twenty. A section whose opening block is one long
-    paragraph is ordinary, so that is the common case, not a corner. When it
-    happens the line is cut on a word boundary rather than kept whole.
-    """
-    lines = text.split(_JOIN)
-    kept: list[str] = []
-    for line in lines:
-        candidate = _JOIN.join([*kept, line])
-        if kept and count(candidate) > cap:
-            break
-        kept.append(line)
-
-    joined = _JOIN.join(kept)
-    if count(joined) <= cap:
-        return joined
-
-    words = joined.split()
-    trimmed: list[str] = []
-    for word in words:
-        if trimmed and count(" ".join([*trimmed, word])) > cap:
-            break
-        trimmed.append(word)
-    return " ".join(trimmed)
-
-
 def _split_block(
     unit: SourceBlock, config: ChunkingConfig, count: TokenCounter
 ) -> list[tuple[SourceBlock, bool]]:
@@ -501,22 +546,30 @@ def _split_block(
     citation must resolve to the source region, and the region is the whole block —
     claiming otherwise would invent a sub-block address the source representation
     does not have.
+
+    **Pieces are slices of the block, never rejoined text.** An earlier version
+    split on the boundary and reassembled with ``" ".join(...)``, which collapsed
+    every newline and run of spaces inside the piece. The module promises text is
+    preserved verbatim and that promise was false for exactly these chunks —
+    invisibly, because the collapsed form reads identically. ``verify_parents``
+    found it: a rejoined piece is not a substring of its own parent.
     """
-    sentences = _SENTENCE.split(unit.text)
-    if len(sentences) == 1:
+    spans = _sentence_spans(unit.text)
+    if len(spans) == 1:
         return _hard_split(unit, config, count)
 
     pieces: list[tuple[SourceBlock, bool]] = []
-    buffer: list[str] = []
-    for sentence in sentences:
-        candidate = " ".join([*buffer, sentence])
-        if buffer and count(candidate) > config.child_max_tokens:
-            pieces.append((_piece(unit, " ".join(buffer)), True))
-            buffer = [sentence]
+    begin: int | None = None
+    finish = 0
+    for start, end in spans:
+        if begin is not None and count(unit.text[begin:end]) > config.child_max_tokens:
+            pieces.append((_piece(unit, unit.text[begin:finish]), True))
+            begin, finish = start, end
         else:
-            buffer.append(sentence)
-    if buffer:
-        pieces.append((_piece(unit, " ".join(buffer)), True))
+            begin = start if begin is None else begin
+            finish = end
+    if begin is not None:
+        pieces.append((_piece(unit, unit.text[begin:finish]), True))
 
     # A single sentence longer than the budget still needs dividing.
     divided: list[tuple[SourceBlock, bool]] = []
@@ -526,6 +579,23 @@ def _split_block(
         else:
             divided.append((piece, True))
     return divided
+
+
+def _sentence_spans(text: str) -> list[tuple[int, int]]:
+    """Character spans of the sentences in ``text``, as ``_SENTENCE`` divides them.
+
+    Spans rather than substrings so a caller can slice the original and keep its
+    whitespace. The separator the pattern matched is excluded from both neighbours,
+    and a slice spanning several sentences therefore carries the real separators
+    back with it.
+    """
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for match in _SENTENCE.finditer(text):
+        spans.append((cursor, match.start()))
+        cursor = match.end()
+    spans.append((cursor, len(text)))
+    return spans
 
 
 def _hard_split(
@@ -542,28 +612,34 @@ def _hard_split(
     invariant and the embedding model truncates it silently, losing the tail. So a
     word that cannot fit alone is divided by characters — which is ugly, and is the
     only option that keeps every character in the index.
+
+    Like the sentence path, pieces are **slices**. Rejoining words with single
+    spaces is what made a split piece diverge from its source text.
     """
-    words = unit.text.split()
-    if not words:
+    spans = [(match.start(), match.end()) for match in _WORD.finditer(unit.text)]
+    if not spans:
         return [(unit, False)]
 
     pieces: list[tuple[SourceBlock, bool]] = []
-    buffer: list[str] = []
-    for word in words:
-        if count(word) > config.child_max_tokens:
-            if buffer:
-                pieces.append((_piece(unit, " ".join(buffer)), True))
-                buffer = []
-            pieces.extend(_split_word(unit, word, config, count))
+    begin: int | None = None
+    finish = 0
+    for start, end in spans:
+        if count(unit.text[start:end]) > config.child_max_tokens:
+            if begin is not None:
+                pieces.append((_piece(unit, unit.text[begin:finish]), True))
+                begin = None
+            pieces.extend(
+                _split_word(unit, unit.text[start:end], config, count)
+            )
             continue
-        candidate = " ".join([*buffer, word])
-        if buffer and count(candidate) > config.child_max_tokens:
-            pieces.append((_piece(unit, " ".join(buffer)), True))
-            buffer = [word]
+        if begin is not None and count(unit.text[begin:end]) > config.child_max_tokens:
+            pieces.append((_piece(unit, unit.text[begin:finish]), True))
+            begin, finish = start, end
         else:
-            buffer.append(word)
-    if buffer:
-        pieces.append((_piece(unit, " ".join(buffer)), True))
+            begin = start if begin is None else begin
+            finish = end
+    if begin is not None:
+        pieces.append((_piece(unit, unit.text[begin:finish]), True))
     return pieces
 
 
@@ -597,6 +673,45 @@ def _piece(unit: SourceBlock, text: str) -> SourceBlock:
         table_derived=unit.table_derived,
         ordinal=unit.ordinal,
     )
+
+
+def verify_parents(chunks: Sequence[Chunk]) -> None:
+    """Confirm every parent's text contains every one of its children.
+
+    Checked on every run, for the same reason as :func:`verify_coverage`: this
+    invariant broke silently and stayed broken. A parent was capped while its
+    children were not collectively bounded, so 1,206 of 2,790 parented children on
+    the development corpus were absent from their own parent, and nothing noticed
+    because the parent was still a valid chunk of real text from the right section.
+
+    Substring containment rather than a token-count comparison, because containment
+    is what §20.8's expansion actually needs: a count that merely *fits* says
+    nothing about whether the child is in there.
+
+    Raises:
+        CoverageError: a child is not contained in its parent, or points at a chunk
+            that is not a parent.
+    """
+    for index, chunk in enumerate(chunks):
+        if chunk.parent_index is None:
+            continue
+        if not 0 <= chunk.parent_index < len(chunks):
+            raise CoverageError(
+                f"chunk {index} points at parent {chunk.parent_index}, "
+                f"which is outside the {len(chunks)} chunk(s) produced"
+            )
+        parent = chunks[chunk.parent_index]
+        if parent.role is not ChunkRole.PARENT:
+            raise CoverageError(
+                f"chunk {index} points at chunk {chunk.parent_index}, "
+                f"which is a {parent.role.value} rather than a parent"
+            )
+        if chunk.text not in parent.text:
+            raise CoverageError(
+                f"chunk {index} ({chunk.token_count} tokens) is not contained in "
+                f"its parent ({parent.token_count} tokens); expanding to that "
+                "parent would return context that omits the passage"
+            )
 
 
 def verify_coverage(units: Sequence[SourceBlock], chunks: Sequence[Chunk]) -> None:

@@ -41,11 +41,25 @@ from finsight.persistence.repositories.generations import GenerationRepository
 from finsight.persistence.repositories.source import NarrativeBlock, SourceRepository
 from finsight.persistence.tables.documents import DocumentVersion
 
-CHUNKING_CONFIG_VERSION: Final = "1"
-"""Bump when any value in :class:`ChunkingConfig` changes.
+CHUNKING_CONFIG_VERSION: Final = "3"
+"""Bump when any value in :class:`ChunkingConfig` changes, or when the chunker's
+output changes shape for the same values.
 
 It keys the idempotency index, so leaving it alone after a size change would make
 a re-chunk look like a repeat and quietly keep the old chunks.
+
+Bumped to "2" when parents became windows that contain their children. No
+configuration value moved; the *output* did — a long run now yields several parents
+instead of one truncated one — and the index cannot tell those apart by
+configuration alone.
+
+Bumped to "3" when comma-grouped figures began being joined before analysis, which
+changes every chunk's ``lexemes``. §9.7 already states the consequence of changing
+how text is analysed: it "requires re-chunking under a new generation, because the
+stored lexemes were analysed with the old one". The chunk *text* is identical, so the
+dense vectors are rebuilt for nothing — an avoidable cost that would need lexemes
+versioned separately from chunking to avoid, which is not worth a second version
+column for the gain.
 """
 
 

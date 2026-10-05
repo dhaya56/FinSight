@@ -105,7 +105,21 @@ class ChunkingConfig:
     """
 
     parent_max_tokens: int = 1536
-    """Upper bound for a parent. Unmeasured."""
+    """Windowing budget for a parent, not a hard ceiling. Unmeasured.
+
+    A run longer than this is split into several parents rather than producing one
+    truncated parent, because a truncated parent does not contain its later
+    children and §20.8 expands to parents precisely to recover the text around a
+    child. The budget is applied to the sum of the units' own token counts, and a
+    tokenizer need not be additive across the newline that joins them, so a built
+    parent could in principle land a few tokens above this — always above, never
+    below. **Measured across the development corpus the widest parent is exactly
+    1,536**, so the overshoot is nil for this content and this tokenizer.
+
+    A single block larger than the whole budget becomes its own parent and exceeds
+    it outright. That is deliberate: its children are the pieces the block was split
+    into, and a parent that is the whole block contains them all.
+    """
 
     heading_max_chars: int = 120
     """Longer than this is prose, whatever it starts with.

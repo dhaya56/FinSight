@@ -10,6 +10,7 @@ The recorder is a fake that records the order it was called in, so the ordering 
 asserted directly instead of being inferred from the absence of a deadlock.
 """
 
+import datetime
 from collections.abc import Sequence
 from uuid import UUID, uuid4
 
@@ -49,6 +50,7 @@ def chunk(
         "fiscal_period": "FY2024-25",
         "reporting_basis": "both",
         "currency": "INR",
+        "period_end": datetime.date(2025, 3, 31),
     }
     defaults.update(overrides)
     return PendingChunk(**defaults)  # type: ignore[arg-type]
@@ -267,6 +269,57 @@ class TestWhatGetsIndexed:
         assert payload["document_version_id"] == str(VERSION)
         assert payload["issuer_name"] == "Infosys Limited"
         assert payload["evidence_type"] == "narrative"
+
+    def test_the_payload_carries_an_orderable_year(self) -> None:
+        """``fiscal_period`` is the document's own words and two filings share one.
+
+        A year derived from ``period_end`` is what lets a filter express a range.
+        """
+        recorder = FakeRecorder(batches=[[chunk()]])
+        service, _embedder, index = build(recorder)
+
+        service.index(GENERATION)
+
+        assert index.upserted[0].payload["fiscal_year"] == 2025
+
+    def test_the_payload_carries_the_section_and_pages(self) -> None:
+        """Both are recorded on the chunk and were filterable on neither."""
+        recorder = FakeRecorder(batches=[[chunk()]])
+        service, _embedder, index = build(recorder)
+
+        service.index(GENERATION)
+
+        payload = index.upserted[0].payload
+        assert payload["section"] == "Management Discussion"
+        assert payload["page_numbers"] == [42]
+
+    def test_the_section_is_the_outermost_heading(self) -> None:
+        """So a filter excludes a whole section, not a leaf of one."""
+        recorder = FakeRecorder(
+            batches=[[chunk(heading_path=("SECTION II: RISK FACTORS", "Internal"))]]
+        )
+        service, _embedder, index = build(recorder)
+
+        service.index(GENERATION)
+
+        assert index.upserted[0].payload["section"] == "SECTION II: RISK FACTORS"
+
+    def test_an_unrecorded_period_leaves_no_year(self) -> None:
+        """Absent cannot match a range, which is right for an unknown period."""
+        recorder = FakeRecorder(batches=[[chunk(period_end=None)]])
+        service, _embedder, index = build(recorder)
+
+        service.index(GENERATION)
+
+        assert "fiscal_year" not in index.upserted[0].payload
+
+    def test_a_chunk_with_no_heading_carries_no_section(self) -> None:
+        recorder = FakeRecorder(batches=[[chunk(heading_path=())]])
+        service, _embedder, index = build(recorder)
+
+        service.index(GENERATION)
+
+        assert "section" not in index.upserted[0].payload
 
     def test_an_unknown_field_is_absent_from_the_payload(self) -> None:
         """Absent cannot match a filter, which is right for an unknown issuer.

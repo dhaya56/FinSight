@@ -189,6 +189,27 @@ to be rediscovered as an operational surprise.
   chunks are not preferred by default" in any case.
 - **Peak memory is unmeasured** against §41.11's shared envelope, now with Qdrant
   arriving alongside and `llama3.1:8b` due in Phase 8.
+
+  **2026-10-05: the envelope risk stopped being theoretical.** A corpus re-index
+  failed partway with `WinError 10061` — Ollama's server was not listening, and the
+  tray app was respawning a server process that died immediately. The cause was the
+  host, not the model: **0.8 GB of 15.7 GB physical memory available**, while commit
+  was comfortable at 13.3 GB free. Ollama needs the model resident and there was
+  nowhere to put it. The containers were not the cause either, holding 718 MB between
+  PostgreSQL, Qdrant and the object store.
+
+  Two things this says. First, **this is a host-capacity limit that the application
+  cannot engineer around** — a smaller batch does not help, because the pressure is
+  the model's residency rather than our request size. Second, Phase 8 putting
+  `llama3.1:8b` (4.9 GB) on the same host Ollama is now a measured risk rather than a
+  noted one, and §41.11 needs a real figure before that lands.
+
+  **The pipeline handled it correctly**, which is the one good part. The embedding
+  port classifies an unreachable model as transient, so all 4,969 outbox events
+  stayed `pending`, the new generations stayed `shadow`, and the previously active
+  generations stayed active and queryable. Recovery is re-running `corpus index` with
+  no flag and no data loss — the behaviour `_write` was shaped for, exercised by an
+  unplanned outage rather than a test.
 - **Dense retrieval alone will miss exact identifiers.** A dense model matches
   meaning, not strings, so a query naming a specific figure, clause or code is
   precisely where it underperforms. That is why §20.3's lexical path and §20.7's

@@ -37,25 +37,47 @@ from finsight.vector_index.port import (
     VectorIndexUnavailableError,
 )
 
-FILTERED_FIELDS: Final[tuple[str, ...]] = (
-    "generation_id",
-    "document_version_id",
-    "issuer_name",
-    "fiscal_period",
-    "reporting_basis",
-    "document_type",
-    "evidence_type",
-)
-"""Payload fields §20.2 filters on, each of which needs its own index.
+FILTERED_FIELDS: Final[dict[str, models.PayloadSchemaType]] = {
+    "generation_id": models.PayloadSchemaType.KEYWORD,
+    "document_version_id": models.PayloadSchemaType.KEYWORD,
+    "issuer_name": models.PayloadSchemaType.KEYWORD,
+    "fiscal_period": models.PayloadSchemaType.KEYWORD,
+    "reporting_basis": models.PayloadSchemaType.KEYWORD,
+    "document_type": models.PayloadSchemaType.KEYWORD,
+    "evidence_type": models.PayloadSchemaType.KEYWORD,
+    "section": models.PayloadSchemaType.KEYWORD,
+    "fiscal_year": models.PayloadSchemaType.INTEGER,
+    "page_numbers": models.PayloadSchemaType.INTEGER,
+}
+"""Payload fields §20.2 filters on, each with the index type its queries need.
 
 **Measured, not assumed.** Filtering on an unindexed payload field makes Qdrant
 scan every candidate's payload: at 20,000 points a filtered dense search took
 23.5 ms without an index and 11.5 ms with one, a **2.0x difference** that widens
 with the collection because the scan is linear.
 
-They are created immediately after the collection and before any ingest, which is
-the order Qdrant wants — it uses payload indexes to build filterable HNSW links,
-so indexes added afterwards do not retroactively improve the graph.
+Keyword for the identity dimensions, which are only ever matched exactly. **Integer
+for the two that need ordering**, and that is the whole reason they were added:
+
+* ``fiscal_year`` makes a period *orderable*. ``fiscal_period`` is text as the
+  document states it — "FY2024-25", "nine months ended 31 December 2024" — which
+  §16.8 requires and which cannot express "the last three years". Two development
+  filings share one ``fiscal_period`` string, so it is not even a discriminator on
+  its own.
+* ``page_numbers`` is a list, and a Qdrant integer index matches a range against any
+  element, so a filter can restrict to a page span.
+
+``section`` is the first element of the heading path. It exists so §20.2 can exclude
+a section rather than merely report one: a question about financial figures should
+not have to compete with a hundred pages of boilerplate risk factors, and until now
+the heading was recorded on every chunk and filterable on none.
+
+Created after the collection and before any ingest, which is the order Qdrant wants —
+it uses payload indexes to build filterable HNSW links, so indexes added afterwards
+do not retroactively improve the graph. They are also created on an *existing*
+collection, which is how a field added later becomes filterable without rebuilding;
+that path cannot improve links already built, and at this corpus size no graph is
+built at all (ENV-009).
 """
 
 DENSE_VECTOR: Final = "dense"
@@ -124,11 +146,20 @@ class QdrantVectorIndex:
         return self._collection
 
     def ensure_collection(self) -> None:
+        """Create or verify the collection, and ensure every payload index exists.
+
+        The index step runs on **both** paths. An earlier version created them only
+        with the collection, so a field added to ``FILTERED_FIELDS`` later was
+        filterable in a fresh deployment and silently unindexed in an existing one —
+        same code, same configuration, a 2x latency difference and nothing to show
+        why.
+        """
         try:
             if self._client.collection_exists(self._collection):
                 self._verify()
-                return
-            self._create()
+            else:
+                self._create()
+            self._index_payload()
         except (UnexpectedResponse, ApiException) as error:
             raise VectorIndexUnavailableError(
                 f"could not prepare collection {self._collection!r}: {error}"
@@ -183,11 +214,19 @@ class QdrantVectorIndex:
                 # avoid, and §22.6 has measured no recall cost to justify it.
             },
         )
-        for field in FILTERED_FIELDS:
+
+    def _index_payload(self) -> None:
+        """Create each filter field's index, idempotently.
+
+        Qdrant treats re-creating an index with the same schema as a no-op, so this
+        is safe to call on every ``ensure_collection`` rather than being guarded by a
+        read of the existing schema — which would be a second round trip and a race.
+        """
+        for field, schema in FILTERED_FIELDS.items():
             self._client.create_payload_index(
                 collection_name=self._collection,
                 field_name=field,
-                field_schema=models.PayloadSchemaType.KEYWORD,
+                field_schema=schema,
                 wait=True,
             )
 

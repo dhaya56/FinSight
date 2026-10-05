@@ -365,17 +365,55 @@ class TestParents:
             assert chunk.parent_index is not None
             assert result[chunk.parent_index].role is ChunkRole.PARENT
 
-    def test_a_parent_is_capped_and_says_so(self) -> None:
+    def test_a_long_run_yields_several_parents_rather_than_one_truncated_one(
+        self,
+    ) -> None:
+        """The defect this replaces, in miniature.
+
+        Thirty single-token blocks against a parent budget of eight: one parent
+        could hold at most a quarter of them. The old chunker emitted exactly one
+        parent and truncated it, leaving three quarters of the children absent from
+        their own parent.
+        """
         tight = ChunkingConfig(
             child_max_tokens=5, child_min_tokens=1, parent_max_tokens=8
         )
         source = blocks(*[f"w{n}" for n in range(30)])
 
         result = chunk_blocks(source, config=tight, count_tokens=words)
-        parent = parents(result)[0]
 
-        assert parent.token_count <= tight.parent_max_tokens
-        assert "parent_truncated" in parent.notes
+        assert len(parents(result)) >= 4
+        for chunk in children(result):
+            assert chunk.parent_index is not None
+            assert chunk.text in result[chunk.parent_index].text
+
+    def test_every_child_is_contained_in_its_parent(self) -> None:
+        """The invariant ``verify_parents`` enforces, asserted on realistic input."""
+        source = blocks(*[f"sentence number {n} of the section" for n in range(60)])
+
+        result = chunk_blocks(source, config=SMALL, count_tokens=words)
+
+        parented = [
+            chunk for chunk in children(result) if chunk.parent_index is not None
+        ]
+        assert parented
+        for chunk in parented:
+            assert chunk.text in result[chunk.parent_index].text
+
+    def test_a_parent_covers_its_children_contiguously(self) -> None:
+        """A parent is the join of its window, so its children appear in order."""
+        source = blocks(*[f"w{n}" for n in range(25)])
+
+        result = chunk_blocks(source, config=SMALL, count_tokens=words)
+        parent = parents(result)[0]
+        offsets = [
+            parent.text.index(chunk.text)
+            for chunk in children(result)
+            if chunk.parent_index is not None
+            and result[chunk.parent_index] is parent
+        ]
+
+        assert offsets == sorted(offsets)
 
 
 class TestProvenance:
@@ -512,8 +550,14 @@ class TestAuditFindings:
         assert ("7. Risk factors",) in paths
         assert ("8. Other matters",) in paths
 
-    def test_a_parent_whose_first_line_exceeds_the_cap_is_still_capped(self) -> None:
-        """An earlier version kept the first line unconditionally, cap or not."""
+    def test_a_single_block_over_the_parent_budget_is_still_contained(self) -> None:
+        """Its parent is the whole block and exceeds the budget deliberately.
+
+        Replaces a test that asserted the parent was *truncated* to the budget.
+        Truncation is what left 1,206 of 2,790 development children absent from
+        their own parent, so the budget now yields to containment rather than the
+        other way round.
+        """
         tight = ChunkingConfig(
             child_max_tokens=5, child_min_tokens=1, parent_max_tokens=8
         )
@@ -521,20 +565,51 @@ class TestAuditFindings:
 
         result = chunk_blocks(source, config=tight, count_tokens=words)
 
-        assert all(
-            chunk.token_count <= tight.parent_max_tokens for chunk in parents(result)
-        )
-
-    def test_a_parent_is_never_emptied_by_truncation(self) -> None:
-        """An empty parent would violate the text_not_blank constraint."""
-        tight = ChunkingConfig(
-            child_max_tokens=5, child_min_tokens=1, parent_max_tokens=2
-        )
-        source = blocks("word " * 50)
-
-        result = chunk_blocks(source, config=tight, count_tokens=words)
-
         assert all(chunk.text.strip() for chunk in result)
+        for chunk in children(result):
+            if chunk.parent_index is not None:
+                assert chunk.text in result[chunk.parent_index].text
+
+    def test_a_split_piece_is_a_slice_of_its_block(self) -> None:
+        """The verbatim guarantee, for the one path that used to break it.
+
+        An oversized block was divided and its pieces reassembled with
+        ``" ".join(...)``, which collapsed every newline inside them. Blocks from
+        PyMuPDF are full of newlines, so this was the common case rather than a
+        corner, and it read identically — the only symptom was that a piece stopped
+        being a substring of its own source.
+        """
+        body = "\n".join(f"line {n} of the paragraph" for n in range(40))
+        source = blocks(body)
+
+        result = chunk_blocks(source, config=SMALL, count_tokens=words)
+
+        pieces = [chunk for chunk in children(result) if chunk.text != body]
+        assert pieces
+        for chunk in pieces:
+            assert chunk.text in body
+
+    def test_splitting_preserves_the_whitespace_inside_a_piece(self) -> None:
+        """A collapsed newline changes what BM25 and the embedder see."""
+        body = "alpha\n\nbeta\tgamma   delta " + "pad " * 60
+        source = blocks(body)
+
+        result = chunk_blocks(source, config=SMALL, count_tokens=words)
+        first = children(result)[0]
+
+        assert first.text in body
+        assert first.text.startswith("alpha\n\nbeta\tgamma   delta")
+
+    def test_a_split_sentence_piece_is_a_slice_too(self) -> None:
+        """The sentence path rejoined with spaces as well."""
+        body = "First sentence here.\n  Second sentence follows. Third one ends it."
+        config = ChunkingConfig(child_max_tokens=4, child_min_tokens=1)
+        source = blocks(body)
+
+        result = chunk_blocks(source, config=config, count_tokens=words)
+
+        for chunk in children(result):
+            assert chunk.text in body
 
     def test_a_single_word_longer_than_the_budget_is_divided(self) -> None:
         """A URL or an unbroken digit run. Emitting it whole loses its tail."""

@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from uuid import UUID
 
 import pytest
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, models
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -41,7 +41,7 @@ from finsight.persistence.repositories.chunks import ChunkRepository
 from finsight.persistence.repositories.documents import DocumentRepository
 from finsight.persistence.repositories.generations import GenerationRepository
 from finsight.persistence.tables.generations import STATE_ACTIVE
-from finsight.vector_index.qdrant_index import QdrantVectorIndex
+from finsight.vector_index.qdrant_index import FILTERED_FIELDS, QdrantVectorIndex
 
 pytestmark = pytest.mark.integration
 
@@ -155,9 +155,10 @@ def chunked(session: Session) -> Callable[..., tuple[UUID, UUID]]:
         session.execute(
             text(
                 "INSERT INTO document_metadata (document_version_id, issuer_name,"
-                " document_type, fiscal_period, reporting_basis, currency, source)"
-                " VALUES (:v, :issuer, 'annual_report', 'FY2024-25', 'both',"
-                " 'INR', 'corpus_manifest')"
+                " document_type, fiscal_period, period_end, reporting_basis,"
+                " currency, source)"
+                " VALUES (:v, :issuer, 'annual_report', 'FY2024-25', '2025-03-31',"
+                " 'both', 'INR', 'corpus_manifest')"
             ),
             {"v": version_id, "issuer": issuer},
         )
@@ -290,6 +291,100 @@ class TestIndexing:
             service.index(generation_id)
 
 
+class TestFinancialFigures:
+    def test_a_grouped_figure_is_found_by_either_spelling(
+        self,
+        service: IndexingService,
+        session: Session,
+        chunked: Callable[..., tuple[UUID, UUID]],
+        index: QdrantVectorIndex,
+    ) -> None:
+        """The measured defect, end to end.
+
+        PostgreSQL's parser splits ``10,000`` into ``10`` and ``000``, so before
+        normalisation a document written one way could not be found by a query
+        written the other. Both directions are asserted, because the fix has to
+        apply on both sides or it is a regression.
+        """
+        _version_id, generation_id = chunked(
+            "Total borrowings stood at 10,000 crore at the year end.",
+            "Unrelated commentary about brand investment.",
+        )
+        service.index(generation_id)
+
+        for spelling in ("10,000", "10000"):
+            query = query_vector(
+                ChunkRepository(session).analyse_query(
+                    query=spelling, text_search_config=CONFIG
+                )
+            )
+            matches = index.search_sparse(
+                query.indices,
+                query.values,
+                limit=5,
+                filters={"generation_id": str(generation_id)},
+            )
+            assert len(matches) == 1, f"{spelling!r} found {len(matches)}"
+
+    def test_the_pathological_thousands_token_is_gone(
+        self,
+        service: IndexingService,
+        session: Session,
+        chunked: Callable[..., tuple[UUID, UUID]],
+    ) -> None:
+        """``000`` was produced by every thousands group and meant nothing."""
+        _version_id, generation_id = chunked("Borrowings of 10,000 crore")
+        service.index(generation_id)
+
+        lexemes = session.execute(
+            text(
+                "SELECT lexemes::text FROM chunks"
+                " WHERE generation_id = :g AND role = 'child'"
+            ).bindparams(g=generation_id)
+        ).scalar_one()
+
+        assert "'000'" not in lexemes
+        assert "'10000'" in lexemes
+
+    def test_an_enumeration_keeps_its_separate_numbers(
+        self,
+        service: IndexingService,
+        session: Session,
+        chunked: Callable[..., tuple[UUID, UUID]],
+    ) -> None:
+        """Joining must not fuse a list: ``notes 1,2,3`` is three references."""
+        _version_id, generation_id = chunked("Refer to notes 1,2,3 for details")
+        service.index(generation_id)
+
+        lexemes = session.execute(
+            text(
+                "SELECT lexemes::text FROM chunks"
+                " WHERE generation_id = :g AND role = 'child'"
+            ).bindparams(g=generation_id)
+        ).scalar_one()
+
+        assert "'123'" not in lexemes
+
+    def test_the_stored_text_keeps_its_commas(
+        self,
+        service: IndexingService,
+        session: Session,
+        chunked: Callable[..., tuple[UUID, UUID]],
+    ) -> None:
+        """§14.4: normalisation feeds the analyser, never the stored text."""
+        body = "Borrowings of 10,000 crore"
+        _version_id, generation_id = chunked(body)
+        service.index(generation_id)
+
+        stored = session.execute(
+            text(
+                "SELECT text FROM chunks WHERE generation_id = :g AND role = 'child'"
+            ).bindparams(g=generation_id)
+        ).scalar_one()
+
+        assert stored == body
+
+
 class TestPayload:
     def test_a_filter_on_issuer_finds_the_chunk(
         self,
@@ -306,6 +401,95 @@ class TestPayload:
         assert index.count(filters={"issuer_name": "Specific Issuer Limited"}) == 1
         assert index.count(filters={"issuer_name": "Someone Else Limited"}) == 0
 
+    def test_the_year_is_filterable_as_a_value(
+        self,
+        service: IndexingService,
+        chunked: Callable[..., tuple[UUID, UUID]],
+        index: QdrantVectorIndex,
+    ) -> None:
+        """What ``fiscal_period`` could never express.
+
+        The text form is the document's own words and two development filings share
+        the string "FY2024-25", so a period needs a derived numeric field.
+        """
+        _version_id, generation_id = chunked("Revenue rose.")
+        service.index(generation_id)
+
+        assert index.count(filters={"fiscal_year": 2025}) >= 1
+        assert index.count(filters={"fiscal_year": 2019}) == 0
+
+    def test_the_year_index_supports_a_range(
+        self,
+        service: IndexingService,
+        chunked: Callable[..., tuple[UUID, UUID]],
+        index: QdrantVectorIndex,
+    ) -> None:
+        """The reason the index is INTEGER rather than KEYWORD.
+
+        Driven through the client directly, because the port's filter builder only
+        composes exact matches today — range *queries* arrive with the retrieval
+        commit that needs them. This pins the capability the field was added for, so
+        that commit cannot discover the index type was wrong after a 40-minute
+        re-index.
+        """
+        _version_id, generation_id = chunked("Revenue rose.")
+        service.index(generation_id)
+
+        within = models.Filter(
+            must=[
+                models.FieldCondition(key="fiscal_year", range=models.Range(gte=2023)),
+                models.FieldCondition(
+                    key="generation_id",
+                    match=models.MatchValue(value=str(generation_id)),
+                ),
+            ]
+        )
+        outside = models.Filter(
+            must=[
+                models.FieldCondition(key="fiscal_year", range=models.Range(lte=2020)),
+                models.FieldCondition(
+                    key="generation_id",
+                    match=models.MatchValue(value=str(generation_id)),
+                ),
+            ]
+        )
+
+        client = index._client
+        assert client.count(index.collection, count_filter=within, exact=True).count >= 1
+        assert client.count(index.collection, count_filter=outside, exact=True).count == 0
+
+    def test_a_section_filter_can_exclude_a_section(
+        self,
+        service: IndexingService,
+        chunked: Callable[..., tuple[UUID, UUID]],
+        index: QdrantVectorIndex,
+    ) -> None:
+        """Research 1.4: boilerplate has to be excludable, not merely reportable."""
+        _version_id, generation_id = chunked("Revenue rose.")
+        service.index(generation_id)
+
+        assert index.count(filters={"section": "7. Risk factors"}) >= 1
+        assert index.count(filters={"section": "Nonexistent Section"}) == 0
+
+    def test_payload_indexes_exist_on_an_already_created_collection(
+        self,
+        service: IndexingService,
+        chunked: Callable[..., tuple[UUID, UUID]],
+        index: QdrantVectorIndex,
+    ) -> None:
+        """A field added to FILTERED_FIELDS later must still become indexed.
+
+        Creating indexes only alongside the collection left a new field filterable
+        in a fresh deployment and silently unindexed in an existing one.
+        """
+        _version_id, generation_id = chunked("Revenue rose.")
+        service.index(generation_id)
+        index.ensure_collection()
+
+        schema = index._client.get_collection(index.collection).payload_schema
+        for field in FILTERED_FIELDS:
+            assert field in schema, field
+
     def test_a_filter_on_the_wrong_generation_excludes_everything(
         self,
         service: IndexingService,
@@ -317,6 +501,34 @@ class TestPayload:
         service.index(generation_id)
 
         assert index.count(filters={"generation_id": str(uuid.uuid4())}) == 0
+
+
+class TestQueryAnalysis:
+    def test_the_query_path_normalises_exactly_as_indexing_did(
+        self, session: Session
+    ) -> None:
+        """One method produces both sides, because drift here is silent.
+
+        If a query path analysed the raw string, a document holding ``10000`` would
+        become unreachable by a query for ``10,000`` and nothing would report it.
+        """
+        repository = ChunkRepository(session)
+
+        grouped = repository.analyse_query(
+            query="10,000", text_search_config=CONFIG
+        )
+        plain = repository.analyse_query(query="10000", text_search_config=CONFIG)
+
+        assert grouped == plain
+        assert "'10000'" in grouped
+        assert "'000'" not in grouped
+
+    def test_an_unknown_configuration_is_refused(self, session: Session) -> None:
+        """Rather than analysing under a default the corpus was not built with."""
+        with pytest.raises(Exception, match=r"regconfig|does not exist"):
+            ChunkRepository(session).analyse_query(
+                query="revenue", text_search_config="klingon"
+            )
 
 
 class TestLexicalChain:

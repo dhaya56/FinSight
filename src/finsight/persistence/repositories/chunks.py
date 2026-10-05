@@ -12,6 +12,7 @@ vector call. The outbox rows written here are what let the indexer do that work
 outside any transaction.
 """
 
+import datetime
 from collections.abc import Sequence
 from dataclasses import dataclass
 from uuid import UUID
@@ -22,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from finsight.chunking.contracts import Chunk as DerivedChunk
 from finsight.domain.representations.retrieval import ChunkRole
+from finsight.lexical.normalise import for_analysis
 from finsight.persistence.tables.chunks import (
     EVENT_COMPLETED,
     EVENT_FAILED,
@@ -59,6 +61,15 @@ class PendingChunk:
     fiscal_period: str | None = None
     reporting_basis: str | None = None
     currency: str | None = None
+
+    period_end: datetime.date | None = None
+    """The period's closing date, which is what makes periods orderable.
+
+    Carried so the indexer can put a *year* in the filter payload.
+    ``fiscal_period`` is text as the document states it and two filings in the
+    development corpus share one string, so it cannot express "the last three
+    years" or even reliably separate two issuers' filings.
+    """
 
 
 class ChunkRepository:
@@ -144,7 +155,7 @@ class ChunkRepository:
                 )
 
         self._session.execute(insert(Chunk), rows)
-        self._analyse(ids, text_search_config)
+        self._analyse(ids, [chunk.text for chunk in chunks], text_search_config)
         if sources:
             self._session.execute(insert(ChunkSource), sources)
         if events:
@@ -158,7 +169,9 @@ class ChunkRepository:
             self._session.execute(statement.bindparams(count=count)).scalars()
         )
 
-    def _analyse(self, ids: Sequence[UUID], config: str) -> None:
+    def _analyse(
+        self, ids: Sequence[UUID], bodies: Sequence[str], config: str
+    ) -> None:
         """Fill the lexical vector for the rows just written.
 
         A second statement rather than a value in the insert, because the
@@ -166,6 +179,18 @@ class ChunkRepository:
         it as data is the clean way to keep it out of the SQL text. The
         configuration is validated against the catalogue first, so an unknown name
         fails with a clear error instead of a PostgreSQL syntax complaint.
+
+        **The analysed string is not the stored text.** It is the stored text with
+        comma-grouped figures joined (``finsight.lexical.normalise``), because
+        PostgreSQL's parser splits ``10,000`` into ``10`` and ``000`` and no
+        configuration can prevent it. The normalised form is passed in rather than
+        computed in SQL for a plain reason: PostgreSQL's ``regexp_replace`` is POSIX
+        and has no lookaround, so the rule cannot be expressed there — and keeping
+        it in one Python function is what lets the query path apply exactly the same
+        rule.
+
+        One statement for the batch, joining against ``unnest``, so a 2,000-chunk
+        generation costs one round trip rather than one per chunk.
         """
         known = self._session.execute(
             sql_text(
@@ -179,9 +204,41 @@ class ChunkRepository:
 
         self._session.execute(
             sql_text(
-                "UPDATE chunks SET lexemes = to_tsvector(CAST(:cfg AS regconfig), text)"
-                " WHERE id = ANY(:ids)"
-            ).bindparams(cfg=config, ids=list(ids))
+                "UPDATE chunks SET lexemes ="
+                " to_tsvector(CAST(:cfg AS regconfig), source.body)"
+                " FROM unnest(CAST(:ids AS uuid[]), CAST(:bodies AS text[]))"
+                " AS source(id, body)"
+                " WHERE chunks.id = source.id"
+            ).bindparams(
+                cfg=config,
+                ids=list(ids),
+                bodies=[for_analysis(body) for body in bodies],
+            )
+        )
+
+    def analyse_query(self, *, query: str, text_search_config: str) -> str:
+        """Analyse a query exactly as the stored lexemes were analysed.
+
+        **This exists so the two sides cannot drift.** The stored lexemes are
+        ``to_tsvector(config, for_analysis(text))``, and a query analysed any other
+        way silently stops matching: a document holding ``10000`` is unreachable by a
+        query for ``10,000`` unless the same normalisation ran on both. There is no
+        error to raise when that happens — searches simply return less — so the
+        defence is that one method produces both.
+
+        Returns the tsvector's text form, which is what
+        :func:`finsight.lexical.bm25.query_vector` reads.
+
+        The configuration is the caller's explicit choice for the same reason it is
+        in :meth:`record`: §9.7 makes it a recorded decision, and a query analysed
+        under a different configuration than the corpus matches nothing.
+        """
+        return str(
+            self._session.execute(
+                sql_text(
+                    "SELECT to_tsvector(CAST(:cfg AS regconfig), :body)::text"
+                ).bindparams(cfg=text_search_config, body=for_analysis(query))
+            ).scalar_one()
         )
 
     def count_for_generation(self, *, generation_id: UUID) -> int:
@@ -233,6 +290,7 @@ class ChunkRepository:
                 DocumentMetadata.fiscal_period,
                 DocumentMetadata.reporting_basis,
                 DocumentMetadata.currency,
+                DocumentMetadata.period_end,
             )
             .join(IndexOutbox, IndexOutbox.chunk_id == Chunk.id)
             .outerjoin(
@@ -264,6 +322,7 @@ class ChunkRepository:
                 fiscal_period=row.fiscal_period,
                 reporting_basis=row.reporting_basis,
                 currency=row.currency,
+                period_end=row.period_end,
             )
             for row in self._session.execute(statement)
         ]

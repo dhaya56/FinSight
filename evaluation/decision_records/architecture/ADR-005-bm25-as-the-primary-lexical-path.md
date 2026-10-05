@@ -124,15 +124,23 @@ corpus changes materially.
 
 ## What is retained, and why that answers §20.12
 
-**PostgreSQL FTS is kept.** `chunks.lexemes` is a real `tsvector` with a GIN index,
-and it is not vestigial — it is simultaneously the source of the sparse weights and
-a working independent lexical retriever.
+**The data for PostgreSQL FTS is kept.** `chunks.lexemes` is a real `tsvector` with a
+GIN index, and it is not vestigial — it is the source of the sparse weights *and* a
+complete independent lexical index.
 
-This is the answer to the objection that consolidating lexical retrieval into
-Qdrant removes the independent fallback §20.12 mandates. It does not: losing Qdrant
-costs dense retrieval **and** BM25, and degrades to FTS with a flag, rather than
-losing lexical retrieval entirely. Qdrant stays `DEGRADABLE` in the readiness probe
-(§10.9) for the same reason.
+**It is not yet a retriever, and this record must not be read as saying otherwise.**
+Nothing queries the GIN index: as of this record there is no `ts_rank` or
+`plainto_tsquery` anywhere in `src/`. So the honest statement of §20.12 compliance is
+that the fallback is **one query away rather than available** — the index exists, is
+populated, and is maintained on every chunking run, and the code path that would use
+it arrives with the retrieval commit that needs it.
+
+That matters because the objection it answers is real: consolidating lexical
+retrieval into Qdrant means losing Qdrant costs dense retrieval **and** BM25
+together. Until the FTS path is written, that loss is total rather than degraded, and
+Qdrant's `DEGRADABLE` classification in the readiness probe (§10.9) is therefore
+optimistic for the lexical half. Either the FTS retriever lands with the first
+retrieval commit, or the probe classification should be revisited.
 
 ## Verified against the running service
 
