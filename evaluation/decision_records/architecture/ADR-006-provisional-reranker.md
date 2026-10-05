@@ -60,8 +60,29 @@ budget". Measured on this host's CPU with real chunk text:
 | 100 | **9,135 ms** |
 
 Roughly linear at 87 ms per candidate in isolation, and **95 ms per candidate in the
-pipeline** once text resolution and context composition are included. End to end at the
-configured depth of 25:
+pipeline** once text resolution and context composition are included.
+
+**Per-candidate is the wrong unit, which matters for every projection built on it.**
+Same 25 real chunks, same depth, truncated to different lengths:
+
+| Passage length | Mean tokens | Depth-25 median | Per candidate |
+|---|---|---|---|
+| Full | 423 | 1,779 ms | **71.1 ms** |
+| ~256 tokens | 306 | 1,442 ms | 57.7 ms |
+| ~128 tokens | 167 | 770 ms | **30.8 ms** |
+| ~64 tokens | 94 | 402 ms | 16.1 ms |
+
+Cost scales with **token count**, near-linearly: 4.5x shorter input is 4.4x faster. So
+"95 ms per candidate" holds only at *our* chunk length, and any figure quoted without a
+length is unusable.
+
+The consequence is a connection worth stating plainly: **chunk size and the reranker
+budget are the same decision.** Children capped at 128 tokens rather than 384 would cut
+reranking at depth 25 from 1,779 ms to about 770 ms *and* reduce the dilution measured
+below. That is a new argument for the chunking comparison §18.12 already requires, not a
+change to make here.
+
+End to end at the configured depth of 25:
 
 | | Median |
 |---|---|
@@ -100,10 +121,33 @@ and the reader judging the improvement is the author. §22.6's metrics on a gold
 what would settle it.
 
 A useful incidental observation: the reranked scores on that query were **4.36, 3.62,
-1.77, −0.12, −0.47**, with a natural sign change where relevance visibly drops off. A
-score floor at zero would be a far more defensible filter than the dense-cosine floor
-ENV-010 measured as query-dependent — and it is still a threshold §4 reserves for the
-developer.
+1.77, −0.12, −0.47**, with a natural sign change where relevance visibly drops off.
+
+### Correction: the score floor I suggested from that observation is wrong
+
+An earlier version of this record said a floor at zero "would be a far more defensible
+filter than the dense-cosine floor ENV-010 measured as query-dependent". **Measured
+across six queries on a shared candidate pool, that is false**, and for the same reason
+the dense floor was:
+
+| Query | Best score | Sign change at rank |
+|---|---|---|
+| "what was revenue from operations" | 8.96 | 2 |
+| "credit risk concentration" | 1.64 | 2 |
+| "who are the independent directors" | 5.91 | 2 |
+| "total deposits and borrowings" | 3.80 | 2 |
+| "EBITDA margin trend" | 4.71 | 2 |
+| **"revenue for FY2026"** | **−4.53** | **1** |
+
+For the last query **every score is negative**, so a floor at zero would have returned
+*nothing* — a silent empty result for a query the system can partly answer. One query
+in six. The production practice this was audited against says exactly that: static
+cutoffs cause "silent context dropouts", because the distribution moves with the query.
+It was right and the earlier paragraph here was wrong.
+
+Cliff detection — slicing where the largest drop occurs — is better founded, and the
+cliffs here are stark (8.96 to −10.69 on one query). It remains a heuristic needing a
+golden set, and nothing is implemented.
 
 ## What keeps it reversible
 

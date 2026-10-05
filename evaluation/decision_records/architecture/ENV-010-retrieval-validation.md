@@ -361,6 +361,138 @@ what would settle it.
 
 ---
 
+## The reranker audited against production practice (commit 10)
+
+Two reviews were supplied; they are **byte-identical**, so this is one source audited
+once. Five claims, each measured against the real model. Two confirmed, one confirmed
+with a prescribed fix that works, one **measured false**, and one that corrected this
+project's own record.
+
+### Confirmed and working: metadata injection does discriminate by period
+
+The "same table, different year" trap — identically structured statements across years
+scoring alike. The prescribed fix is injecting metadata into the reranker's input string.
+**It works on this model.** Identical body, only the `Period:` line changed:
+
+| Query | `FY2024-25` context | `FY2026-27` context | Favours |
+|---|---|---|---|
+| "revenue for FY2026-27" | 4.52 | **7.20** | the matching year, +2.68 |
+| "revenue for FY2024-25" | **7.22** | 5.79 | the matching year, +1.43 |
+| "revenue" (no year) | −1.46 | −1.43 | neither, 0.03 |
+
+And the context is worth far more than a tie-break: the same year-bearing query scores
+**−4.43 against the bare body** and **+7.20 with matching context** — an 11.6-point
+swing. §23.6's deterministic context is doing real work, not decoration.
+
+**One qualification the research does not make.** Injection is a *soft* signal of about
+2.7 points. The hard guarantee is the `fiscal_year` payload filter, which excludes the
+wrong year before scoring. Relying on injection alone would leave the wrong year
+rankable; relying on the filter alone would lose the ranking benefit. Both are present.
+
+### Confirmed: our own enrichment cuts both ways
+
+Measured on the same body, bare against enriched:
+
+| Query | Bare | Enriched | Delta |
+|---|---|---|---|
+| "revenue for FY2024-25" | −4.03 | **7.22** | **+11.24** |
+| "what was revenue from operations" | **8.96** | 5.20 | **−3.76** |
+| "credit risk concentration" | −11.43 | −11.44 | −0.01 |
+| "who are the independent directors" | −11.29 | −11.37 | −0.08 |
+
+So enrichment is a trade, not a free gain: a large win when the query mentions metadata,
+a **3.8-point cost on a purely topical query**, and neutral on irrelevant passages.
+
+Because every candidate carries a context prefix, most of that cost is a roughly
+constant offset within one query and so affects ranking less than the absolute numbers
+suggest. **Not perfectly constant, though** — context length varies with heading-path
+depth and which metadata exists, so a chunk under a long heading is penalised slightly
+more than one under a short heading. Whether that changes *order* rather than score is
+unmeasured. Recorded as a known bias rather than resolved.
+
+### Confirmed: boilerplate dilutes a relevant sentence, and position matters
+
+| Padding around the relevant sentence | Score | Change |
+|---|---|---|
+| None | **8.96** | — |
+| 1 boilerplate paragraph before | 7.48 | −1.48 |
+| 2 paragraphs before | 5.42 | −3.54 |
+| 3 paragraphs before | 3.99 | **−4.97** |
+| 2 paragraphs **after** | 8.13 | −0.83 |
+
+Dilution is real and substantial — about 1.6 points per boilerplate paragraph — and
+**asymmetric**: content *before* the relevant sentence costs roughly six times more than
+the same content after it. Our children run to 384 tokens, so a long chunk whose answer
+sits late is measurably penalised against a short focused one.
+
+Combined with the length-latency finding in ADR-006, smaller children would reduce
+dilution *and* reranking cost. Both are inputs to §18.12's comparison.
+
+### Measured false: cross-encoders do **not** "excel" at negation
+
+The supplied validation checklist asserts cross-encoders excel at telling a claim from
+its denial. On this model they do not:
+
+| Query | Affirmative | Negated | Separation |
+|---|---|---|---|
+| "is the company expected to lose market share" | 9.63 | 9.32 | **0.32** |
+| "is the company protected from losing market share" | 3.74 | **4.13** | **0.39** |
+
+Against a score range spanning roughly 20 points, a separation of 0.3 is noise — and on
+the second query the **affirmative outscores the negated passage**, which is backwards.
+
+This is the most consequential finding of the audit, and checking the lexical side made
+it worse: the two sentences analyse to **identical lexemes**, because `not` is an English
+stopword. They are the same document to BM25. So does `no material impact` against
+`material impact`.
+
+All three stages are therefore blind to polarity, and nothing downstream may treat rank
+as evidence of the direction of a claim. Recorded in the limitation register with the
+lexeme tables, because it is a correctness property rather than a measurement.
+
+### Corrected this project's own record: no static score floor
+
+ADR-006 previously suggested a floor at zero, from one query whose scores crossed zero
+where relevance fell away. Measured across six queries on a shared pool, **one query's
+best score is −4.53** — every candidate negative — so a zero floor returns nothing for a
+query the system can partly answer. The research's warning about "silent context
+dropouts" from static cutoffs is correct; the earlier suggestion here was not. ADR-006
+carries the table and the correction.
+
+### Partly wrong: the latency diagnosis
+
+The third review infers from 95 ms per candidate that "you are likely running a heavy
+cross-encoder model". **That is not the cause.** The model is MiniLM-L-6-v2 at
+**22,713,601 parameters** — the compact option the same review recommends elsewhere. The
+cost is CPU-only inference over long sequences, and ADR-006's controlled measurement
+shows it tracks token count rather than model size.
+
+Its arithmetic is sound where it checks out — 2,450 / 95 ≈ 25.8, and depth is 25 — but
+its extrapolation is not: "reranking 5 candidates drops your rerank latency to 475 ms"
+assumes a constant per-candidate cost, and the measured rate falls at lower depths
+(61 ms/candidate at depth 10 against 91 ms at depth 100). Depth 5 on real chunks is
+nearer 340 ms.
+
+**Already satisfied** from the same section: hybrid retrieval with RRF feeding the
+reranker rather than a single retriever (the "garbage receptor" anti-pattern), batching
+(8, measured as optimal), and model right-sizing. **Not implemented:** dynamic top-k by
+query class, and GPU inference — there is no accelerator on this host (ENV-001).
+
+### Still open from the checklist
+
+**Footnote association.** The checklist asks whether a table chunk and the footnote it
+references are retrieved together. They cannot be: 36 footnotes are extracted across the
+corpus, `footnote_refs` resolves to nothing, and footnotes are not indexed at all — only
+blocks are. A footnote is therefore unreachable by any retriever, and the limitation
+register records it under not-implemented.
+
+**Table structure for cross-attention.** The review wants markdown or HTML so the model
+can attend across rows and columns. Tables are flattened text, and ADR-003 is why: no
+detector bounds them well enough to restructure. Register §20 measures 19% of detected
+tables split across chunks.
+
+---
+
 ## Store state after indexing (commits 7–9)
 
 | | |

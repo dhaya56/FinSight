@@ -1081,6 +1081,47 @@ queries — nobody searches for `crore` alone, and a multi-term query's IDF-weig
 sum leaves less room for length to decide. This is the measurement that should inform
 `b`, not a verdict on it.
 
+### Neither can the reranker tell a claim from its denial
+
+Added once a cross-encoder existed to test, and it belongs here rather than only in a
+measurement record because it is a correctness property, not a performance one.
+
+| Query | Affirmative passage | Negated passage | Separation |
+|---|---|---|---|
+| "is the company expected to lose market share" | 9.63 | 9.32 | **0.32** |
+| "is the company protected from losing market share" | 3.74 | **4.13** | **0.39** |
+
+The two passages differ by one word — *not*. Against a score range spanning roughly 20
+points, 0.3 is noise, and on the second query the affirmative **outscores** the negated
+passage, which is the wrong way round.
+
+Production practice asserts that cross-encoders excel at negation. **On MiniLM-L-6-v2
+they do not**, and the claim was measured rather than accepted.
+
+**The lexical side is worse than "poor at negation" — it is blind by construction.**
+Measured through the real analysis chain:
+
+| Sentence | Lexemes |
+|---|---|
+| "Company X is **not** expected to lose market share" | `compani, expect, lose, market, share, x` |
+| "Company X is expected to lose market share" | `compani, expect, lose, market, share, x` |
+
+**Identical.** `not` is an English stopword, so the two sentences are not merely hard to
+tell apart — they are *the same document* to BM25 and to the full-text fallback. The same
+holds for the commonest financial construction of all: `no material impact` analyses to
+`impact, materi`, exactly as `material impact` does. (Not every negator goes: `without`
+survives.)
+
+So for "The Company is not expected to breach its covenants" against "The Company is
+expected to breach its covenants" — opposite facts with opposite consequences — **all
+three stages are blind to polarity.** Dense similarity barely moves, BM25 sees one
+document, and the reranker separates them by 0.3 of a 20-point range.
+
+What follows from it: rank is not evidence of polarity, and nothing downstream may treat
+a highly ranked passage as supporting the direction of a claim. §27's Evidence Gate
+checks that a cited region *contains* what is asserted, which is the right place for this
+to be caught — and it makes that check load-bearing rather than belt-and-braces.
+
 ### The decision this is evidence for, and why it is not taken here
 
 §9.7 says the text-search configuration is to be "chosen with recorded evidence when
