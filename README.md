@@ -11,18 +11,28 @@ implemented.
 
 ## Status
 
-Phase 6 — table detection and the completion of the source representation.
+Phase 7 — narrative retrieval. **A question typed at the command line returns ranked passages from
+real filings, each citing the exact source elements it was built from.**
+
+```cmd
+python -m finsight.cli.main search "what does the company say about credit risk"
+```
 
 Implemented: packaging and tooling, application settings, PostgreSQL with Alembic migrations, an
 S3-compatible object store behind a backend-neutral port, health and readiness endpoints, document
 intake — validation, content-addressed preservation of originals, and identity recording — PDF
 extraction into a citable source representation of pages, blocks, tables, cells and footnotes with
-exact coordinates, and a governed development corpus of real filings that the extraction path has
-been measured against.
+exact coordinates, a governed development corpus of real filings the extraction path has been
+measured against, and the retrieval path: structure-aware chunking, local embedding, a Qdrant index
+carrying dense and BM25 sparse vectors, hybrid retrieval under hard metadata filters, reciprocal
+rank fusion, and cross-encoder reranking.
+
+The development corpus is indexed end to end: **1,403 pages → 40,476 blocks → 5,759 chunks → 4,969
+indexed vectors** across three filings.
 
 Intake has no HTTP route yet. PROJECT_BLUEPRINT.md §28.2 requires authentication on every
-non-health route, so upload is exposed in the authentication phase. Extraction is driven from the
-command line in the meantime.
+non-health route, so upload is exposed in the authentication phase. Extraction, chunking, indexing
+and search are driven from the command line in the meantime.
 
 The PDF producer is **provisional**, not selected. No evaluation has compared it against
 alternatives on real filings; see [ADR-002](evaluation/decision_records/architecture/ADR-002-provisional-pdf-producer.md).
@@ -61,9 +71,70 @@ Measured across the 1,403 pages of the development corpus, a column-aware orderi
 Choosing between the two needs a recorded comparison on development data (§35.4), so the limitation
 is measured and asserted by test rather than assumed away.
 
-Not yet implemented: authentication, processing jobs, chunking, the Fact Ledger, retrieval,
-generation, the Evidence Gate, the user interface, and the evaluation harness. The repository grows
-one phase at a time; a directory exists only once its capability is implemented.
+Not yet implemented: authentication, processing jobs, the Fact Ledger, generation, the Evidence
+Gate, the user interface, and the evaluation harness. The repository grows one phase at a time; a
+directory exists only once its capability is implemented.
+
+### The retrieval path
+
+```text
+question
+  → analyse with PostgreSQL's text-search configuration (the same one that built the lexemes)
+  → BM25 over Qdrant sparse vectors  +  dense over Qdrant   [both under §20.2 hard filters]
+  → reciprocal rank fusion on ranks, never on scores
+  → cross-encoder reranking
+  → deduplicate overlapping source regions
+  → passages, each citing source elements
+```
+
+Four properties worth knowing before reading results.
+
+**BM25 is the primary lexical path, which contradicts the blueprint.** §9.7 commits to PostgreSQL
+full-text search and says it is "not described as BM25". BM25 was adopted on the developer's
+direction and recorded in
+[ADR-005](evaluation/decision_records/architecture/ADR-005-bm25-as-the-primary-lexical-path.md).
+Term weights are computed at index time; **Qdrant applies IDF at query time**, because that half
+needs collection-wide statistics a per-chunk writer cannot have. Full-text search is retained as
+§20.12's degradation path and is reached automatically when Qdrant is unavailable, with a flag.
+
+**Fusion is on rank, and that is measured rather than conventional.** On one query BM25's top score
+was 12.02 and full-text search's 0.23 for the same corpus and question; a dense cosine lives in
+[-1, 1]. Combining those scales directly lets whichever happens to be largest decide the ranking.
+
+**The embedding model, the reranker and the PDF producer are all provisional**, each adopted with a
+recorded decision and none selected:
+[ADR-002](evaluation/decision_records/architecture/ADR-002-provisional-pdf-producer.md),
+[ADR-004](evaluation/decision_records/architecture/ADR-004-provisional-embedding-model.md),
+[ADR-006](evaluation/decision_records/architecture/ADR-006-provisional-reranker.md).
+
+**Nothing here claims retrieval quality.** Every figure in
+[ENV-010](evaluation/decision_records/architecture/ENV-010-retrieval-validation.md) is throughput,
+latency, coverage or behaviour. §22.6's Recall@k, MRR and nDCG need a golden question set that §34
+has not produced, so no measurement in this repository is evidence that retrieval returns the right
+passage.
+
+### What is known to be wrong
+
+Measured, recorded, and **not yet fixed**. Listed here because they are spread across seven records
+and a reader deciding whether to trust a result needs them in one place. Severity is this project's
+judgement, not a metric.
+
+| # | Problem | Measured | Where |
+|---|---|---|---|
+| 1 | **All three retrieval stages are blind to negation.** `not` is an English stopword, so "is not expected to lose market share" and "is expected to lose market share" produce **identical lexemes**; the reranker separates them by 0.32 of a ~20-point range. Opposite facts, indistinguishable | identical lexeme sets; 0.32 separation | register §21 |
+| 2 | **Multi-column reading order is positional.** A column-aware ordering would differ on **195 of 1,403 pages (14%)**, and interleaved chunks read as prose while being two columns spliced together | 14% of pages, verbatim example | register §16 |
+| 3 | **Dense retrieval is nearly blind to which number a sentence states.** `1,234.56 crore` against `4,321.65 crore` scores **0.9863**; changing the fiscal year moves the vector *less* than changing the metric | cosine table | register §21 |
+| 4 | **An acronym cannot reach its own expansion.** Zero shared lexemes for all seven pairs tested, dense cosine 0.52–0.64. "PAT" reaches 8 chunks where "profit after tax" reaches 229 | 7 pairs, corpus counts | register §21 |
+| 5 | **19% of detected tables have their text split across chunks**, one across 25, so a header row and its figures can land apart | 166 of 861 tables | register §20 |
+| 6 | **24% of children are under the stated size floor**, 427 under 10 tokens, the smallest a single word | 1,212 of 4,969 | register §18 |
+| 7 | **Reranking is 93% of query latency** — 2,273 ms median against 175 ms with it off. §23.4's FlashRank trigger is live | per-token scaling table | ADR-006, ENV-010 |
+| 8 | **5.7% of the index is near-letterless**, including 384-token chunks of nothing but dot leaders | 282 of 4,969 | register §14 |
+| 9 | **Footnotes are extracted and unreachable.** 36 exist; `footnote_refs` resolves to nothing and footnotes are not indexed | — | register §22 |
+| 10 | **Consensus outranks exclusivity at every rank** while the fusion constant is 60, so a chunk both retrievers agree on beats one either ranked first alone | crossover arithmetic | ENV-010 |
+
+Three more that are deliberate rather than defective: table cells are excluded from retrieval
+(ADR-003), QueryTrace is **not persisted** so §31.9 is unsatisfied, and no query planner derives
+§20.2's filters from a question — they are CLI flags.
 
 ### The extraction architecture
 
@@ -227,6 +298,69 @@ never searched rather than implying it held nothing.
 
 The command prints identifiers, a state and a count. It never prints document content.
 
+## Chunking, indexing and search
+
+The three stages after extraction, each addressable for a whole corpus split so no identifier has to
+be read out of the database by hand:
+
+```cmd
+python -m finsight.cli.main corpus ingest --split development
+python -m finsight.cli.main corpus chunk  --split development
+python -m finsight.cli.main corpus index  --split development
+python -m finsight.cli.main search "what does the company say about credit risk"
+```
+
+Each stage is idempotent and says so. The work it skips, as the commands report it: re-running
+`corpus ingest` on an unchanged corpus is **0.34 s against 251 s**, and `corpus chunk` **0.14 s
+against 34 s**. Wall-clock is a couple of seconds longer either way, because every invocation pays
+Python's start-up and `corpus chunk` loads a tokenizer before discovering it has nothing to do.
+
+A single document can be driven with `chunk <document-version-id>` and `index <generation-id>`.
+
+**Indexing is the slow stage and the cost is the embedding model.** Measured over two full corpus
+runs: **1.93–2.02 chunks/s, 41–43 minutes for 4,969 chunks**, dominated by host-native Ollama. It is
+a per-document one-time cost — a newly uploaded 369-page annual report costs ~57 s to extract, ~8 s
+to chunk and ~13 min to embed — never a per-query cost.
+
+**A full re-index happens only when a configuration version changes** (the embedding model,
+`embedding_config_version`, `CHUNKING_CONFIG_VERSION`, or BM25's measured average document length).
+That is a deliberate operator action, and the **old generation keeps serving queries until the new
+one is indexed and reconciled**, so a re-index is background work rather than downtime (§11.13).
+
+Ollama must be running on the host. If it is not, the events stay `pending`, the new generation stays
+`shadow`, the previously active one stays queryable, and `corpus index` resumes with no flag — a path
+exercised by a real outage, not only by a test.
+
+### Searching
+
+```cmd
+python -m finsight.cli.main search "credit risk concentration" --limit 5
+python -m finsight.cli.main search "revenue" --issuer "Infosys Limited" --since 2024
+python -m finsight.cli.main search "total deposits" --no-rerank --full
+```
+
+Every filter is optional, and every one that is given is a §20.2 **hard** filter — `--issuer`,
+`--document-type`, `--basis`, `--section`, `--year`, `--since`, `--evidence-type`. §7 forbids
+similarity overriding scope, so a filter is never relaxed to find more results. `--no-rerank` returns
+the fused order, which is how the two orderings are compared on identical candidates.
+
+Each result prints the issuer, period, evidence type, pages, heading path, both scores, which
+retrievers found it and at what rank, and **the source elements it cites**.
+
+A query takes roughly **2.3 s** of processing warm, of which about **93% is the cross-encoder**;
+`--no-rerank` returns in about **175 ms**. Those are in-process figures — a one-shot CLI invocation
+adds several seconds loading Python, torch and the model, and the first query after that pays
+Ollama's model load too (measured at 6.2 s cold against 337 ms warm). A long-lived process such as
+the Phase 9 interface pays both once.
+
+`search` is the one command that prints document text, and deliberately so — §6.8 makes inspecting
+the evidence behind an answer a product capability. Nothing it prints is logged, and passages are
+truncated to a snippet unless `--full` is given.
+
+If Qdrant is unavailable the command still answers from PostgreSQL full-text search and prints
+`DEGRADED: lexical_fallback_postgres_fts` **before** the results, so a reader who stops at the first
+passage already knows the ordering is not the intended one.
+
 ## The development corpus
 
 The filings FinSight develops and measures against, governed by PROJECT_BLUEPRINT.md §32 and §34.
@@ -292,6 +426,15 @@ python -m pytest -m integration
 
 They fail rather than skip when the database is unreachable.
 
+Two suites **skip** rather than fail: the real embedding model and the real cross-encoder are loaded
+from the local Hugging Face cache, which does not exist on a fresh machine or in CI. Deterministic
+fakes stand in, so orchestration is covered everywhere and the models are exercised only where they
+are staged. The fakes carry **no semantics** by design — similar sentences get dissimilar vectors —
+so no test can accidentally assert that retrieval is good.
+
+After moving, renaming or deleting a file, run `python -m ruff clean` before `ruff check .`. Ruff
+caches per file, and a cached pass hides an import-order break that CI, which has no cache, fails on.
+
 `check-environment.cmd` and `verify-dependencies.cmd` only inspect and report. They start no
 service, install nothing, and download nothing.
 
@@ -311,6 +454,18 @@ service, install nothing, and download nothing.
 | `artifacts/` | Generated evaluation outputs (not committed) |
 
 Paths appear as their capabilities are implemented.
+
+The retrieval path inside `src/finsight/`, in the order a question travels through it:
+
+| Package | Owns | Must never |
+|---|---|---|
+| `chunking/` | Blocks into parent and child retrieval units | Import a database, a tokenizer or a model |
+| `lexical/` | BM25 term weighting, and the analysis normalisation **both sides share** | Compute IDF — that needs collection statistics Qdrant has |
+| `embedding/` | The embedding port, the Ollama adapter, a deterministic fake | Let a caller cross document and query prefixes |
+| `vector_index/` | The vector-index port and the one module importing a vector SDK | Return text — a search answers with identifiers (§10.7) |
+| `indexing/` | The outbox drain, and the enriched string that gets embedded | Hold a transaction across a model or vector call (§29.7) |
+| `retrieval/` | Filters, both retrievers, fusion, allocation, deduplication, the pipeline | Let similarity override a hard filter (§7) |
+| `reranking/` | The reranking port, the cross-encoder adapter, a deterministic fake | Be required — §23.1 keeps it optional under degradation |
 
 ## Project claims
 
