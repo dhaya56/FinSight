@@ -111,6 +111,23 @@ class Settings(BaseSettings):
         description="Deployment environment: development, test, or production.",
     )
 
+    # ------------------------------------------------------------------------ API
+
+    api_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Shared bearer token required on every non-health route (§28.2). "
+            "Optional *here* and mandatory *at the route*, which is deliberate: the "
+            "CLI, the chunker and the whole test suite construct settings without "
+            "serving HTTP, and making it a required field would add a required "
+            "variable to every one of them. An unset token does not leave the API "
+            "open — the authenticated router refuses to serve at all (503), so the "
+            "failure mode is a closed door rather than an unguarded one. "
+            "One shared secret, not a user system: §28 does not require accounts at "
+            "this stage, and a single-node self-hosted deployment has one operator."
+        ),
+    )
+
     # ---------------------------------------------------------------- PostgreSQL
 
     postgres_host: str = Field(default="localhost", description="PostgreSQL host.")
@@ -375,6 +392,9 @@ class Settings(BaseSettings):
         _reject_known_default(self.postgres_password, "FINSIGHT_POSTGRES_PASSWORD")
         if self.s3_secret_access_key is not None:
             _reject_known_default(self.s3_secret_access_key, "FINSIGHT_S3_SECRET_ACCESS_KEY")
+        if self.api_token is not None:
+            _reject_known_default(self.api_token, "FINSIGHT_API_TOKEN")
+            _require_minimum_length(self.api_token, "FINSIGHT_API_TOKEN")
         self._require_tls_beyond_loopback()
 
     def _require_tls_beyond_loopback(self) -> None:
@@ -421,6 +441,30 @@ def _reject_known_default(secret: SecretStr, variable_name: str) -> None:
         raise SettingsError(f"{variable_name} must not be empty")
     if value.lower() in REJECTED_SECRET_VALUES:
         raise SettingsError(f"{variable_name} matches a known default value and was rejected")
+
+
+MINIMUM_TOKEN_LENGTH: Final = 32
+"""Characters required of a shared bearer token.
+
+Not a measurement and not a cryptographic claim — a floor. A shared token is the
+only thing standing in front of the retrieval route, it never rotates on its own,
+and it is guessable in a way a password behind a login form is not, because there
+is no account to lock and no rate limit yet. 32 characters is what
+``secrets.token_urlsafe(24)`` produces, so the obvious way to generate one already
+clears it. Length is checked rather than entropy because entropy cannot be measured
+from the value, and pretending otherwise would be the kind of invented control
+CLAUDE.md §3 forbids.
+"""
+
+
+def _require_minimum_length(secret: SecretStr, variable_name: str) -> None:
+    """Refuse a token short enough to be worth guessing, revealing only its length."""
+    length = len(secret.get_secret_value().strip())
+    if length < MINIMUM_TOKEN_LENGTH:
+        raise SettingsError(
+            f"{variable_name} must be at least {MINIMUM_TOKEN_LENGTH} characters, "
+            f"got {length}"
+        )
 
 
 @lru_cache(maxsize=1)

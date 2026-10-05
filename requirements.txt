@@ -13,6 +13,7 @@
 
 accelerate==1.15.0
 alembic==1.20.0
+altair==6.3.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
 antlr4-python3-runtime==4.9.3
@@ -52,11 +53,13 @@ h2==4.4.1
 hf-xet==1.6.0
 hpack==4.2.0
 httpcore==1.0.9
+httptools==0.8.0
 httpx==0.28.1
 huggingface_hub==1.33.0
 hyperframe==6.1.0
 idna==3.19
 iniconfig==2.3.0
+itsdangerous==2.2.0
 Jinja2==3.1.6
 jmespath==1.1.0
 jsonref==1.1.0
@@ -79,6 +82,7 @@ msgpack==1.2.2
 multiprocess==0.70.19
 mypy==2.3.1
 mypy_extensions==1.1.0
+narwhals==2.26.0
 networkx==3.6.1
 numpy==2.5.2
 olefile==0.47
@@ -103,10 +107,12 @@ psycopg==3.3.5
 psycopg-binary==3.3.5
 puremagic==2.2.0
 py-serializable==2.1.0
+pyarrow==25.0.1
 pyclipper==1.4.0
 pydantic==2.13.5
 pydantic-settings==2.15.0
 pydantic_core==2.46.5
+pydeck==0.9.3
 Pygments==2.21.0
 pylatexenc==2.11
 pymupdf==1.28.2
@@ -117,6 +123,7 @@ pytest-cov==7.1.0
 python-dateutil==2.9.0.post0
 python-docx==1.2.0
 python-dotenv==1.2.3
+python-multipart==0.0.32
 python-oxmsg==0.0.2
 python-pptx==1.0.2
 # Windows-only, and has no distribution on any other platform. docling-parse and
@@ -148,9 +155,11 @@ sortedcontainers==2.4.0
 soupsieve==2.10
 SQLAlchemy==2.0.52
 starlette==1.6.0
+streamlit==1.65.0
 sympy==1.14.0
 tabulate==0.10.0
 tokenizers==0.23.2
+toml==0.10.2
 tomli==2.4.1
 tomli_w==1.2.0
 torch==2.14.1+cpu
@@ -173,5 +182,6 @@ typing_extensions==4.16.0
 tzdata==2026.4
 urllib3==2.8.0
 uvicorn==0.52.4
+watchdog==6.0.0
 websockets==16.1.1
 xlsxwriter==3.2.9
