@@ -1,0 +1,224 @@
+# ENV-010 — Retrieval Validation
+
+- **Status:** **in progress.** Opened at commit 9 and completed at commit 12.
+- **Opened:** 2026-10-05
+- **Phase:** 7 — narrative retrieval
+
+## What this is
+
+The measurement record for Phase 7's retrieval path. It is opened early and
+deliberately: the figures below were taken while building commits 7 through 9, and a
+record created at the end of the phase would have been written from memory or not at
+all. Each section says which commit produced it.
+
+**What is still owed at commit 12**, so an incomplete record is not mistaken for a
+complete one:
+
+| Owed | Why it is not here yet |
+|---|---|
+| Reranker latency and its degradation path | Commit 10 |
+| End-to-end `search` cost with QueryTrace persisted | Commit 11 |
+| Peak container memory, and the compose resource limits derived from it | Needs a sampled peak, not the spot samples below |
+| Index storage footprint on disk | Not yet measured |
+| Any statement about retrieval **quality** | No golden question set exists (§22.6, §34). Nothing in this record is a quality claim |
+
+---
+
+## Indexing cost, measured twice on the real corpus
+
+Commit 7 built the indexer; commit 8's lexeme change forced a full re-index, which
+gave a second independent measurement of the same work.
+
+### Run 1 — chunking configuration 2
+
+| Filing | Children | Seconds | Rate |
+|---|---|---|---|
+| Infosys AR FY2025 | 1,352 | 613.95 | 2.20/s |
+| HDFC Bank AR FY2025 | 2,069 | 915.84 | 2.26/s |
+| Ola Electric DRHP | 1,548 | 928.13 | 1.67/s |
+| **Total** | **4,969** | **2,457.92** | **2.02/s** |
+
+### Run 2 — chunking configuration 3
+
+| Filing | Children | Seconds | Rate |
+|---|---|---|---|
+| Infosys AR FY2025 | 1,352 | 650.67 | 2.08/s |
+| HDFC Bank AR FY2025 | 2,069 | 960.81 | 2.15/s |
+| Ola Electric DRHP | 1,548 | 964.26 | 1.61/s |
+| **Total** | **4,969** | **2,575.75** | **1.93/s** |
+
+**The two runs agree within 5%**, which is what makes these usable as a baseline
+rather than as one observation. Ola Electric is consistently the slowest per chunk in
+both runs — its chunks are the longest of the three (mean 246 narrative tokens against
+Infosys's 239 and HDFC's 215), and embedding cost scales with sequence length.
+
+### This corrects ADR-004's correction, mildly
+
+ADR-004 records a correction from 12.3 texts/s (measured on 34-character probes) to
+**1.68 texts/s** on real enriched chunks, and projects "~47 minutes" for the corpus.
+The projection was slightly **pessimistic**: the corpus average is **1.93/s** and the
+actual elapsed time was **43 minutes**.
+
+Both figures are real and neither is wrong. 1.68/s came from 64 consecutive chunks of
+one filing; 1.93/s is the average over three filings of differing chunk length. The
+operational figure to plan a re-embed around is **1.93/s**, and the per-filing spread
+is 1.61–2.26/s.
+
+### One failure, and what it cost
+
+Run 2 failed partway with `WinError 10061` — Ollama's server not listening, its tray
+app respawning a process that died immediately, with **0.8 GB of 15.7 GB physical
+memory available**. Recorded in full against ADR-004's §41.11 open item.
+
+What matters for this record is the recovery: **all 4,969 outbox events stayed
+`pending`, the new generations stayed `shadow`, and the previously active generations
+stayed active and queryable.** Re-running `corpus index` with no flag resumed and
+completed. Unplanned, and a better test of the transient-failure path than a test.
+
+---
+
+## Query latency
+
+### Components, measured under indexing load (commit 7)
+
+Load affects these only through contention; none of them embeds.
+
+| Step | Median | Min | Max |
+|---|---|---|---|
+| Analyse the query (PostgreSQL) | 1.6 ms | 1.5 | 5.5 |
+| Build the BM25 query vector | 0.0 ms | 0.0 | 0.1 |
+| BM25 search, filtered (Qdrant) | 13.4 ms | 12.3 | 34.8 |
+| Dense search, filtered (Qdrant) | 10.7 ms | 10.0 | 44.9 |
+| Resolve 10 chunk ids to text | 3.3 ms | 3.3 | 10.4 |
+| **Total, excluding query embedding** | **~29 ms** | | |
+
+Query embedding is the other term: **33 ms** median warm over 8 calls (min 30.8, max
+43.7).
+
+### Whole hybrid search (commit 9)
+
+| | |
+|---|---|
+| Warm, end to end | **337 ms** |
+| Cold, end to end | **6.2 s** |
+
+The cold figure is almost entirely Ollama loading the model on first use, not fusion
+or filtering — the same cold-start pattern the embedding probe showed (11.05 s for a
+first batch against ~5.3 s steady).
+
+**Roughly 10% of the warm figure is redundant**: the query is encoded once per
+evidence type, so the same text is embedded twice at 33 ms each. Left in place with
+the reasoning recorded in `retrieval/hybrid.py`; removing it means the retriever
+protocol accepting a set of filters.
+
+**No reranking is in these figures.** Commit 10 adds a cross-encoder on CPU, which is
+expected to dominate everything above.
+
+---
+
+## BM25 against PostgreSQL full-text search (commit 8)
+
+`"credit risk management"`, unfiltered, top 5, same corpus and same query:
+
+| | BM25 (Qdrant sparse) | PostgreSQL FTS |
+|---|---|---|
+| Latency | 158 ms | **15 ms** |
+| Top score | 12.02 | 0.23 |
+| Ranks 1–2 | identical to FTS | identical to BM25 |
+| Ranks 3–5 | diverge | diverge |
+
+Three findings, also recorded in ADR-005. **The fallback is ten times faster**, being
+one local GIN query rather than a network round trip plus sparse scoring — so
+"degraded" means less well ranked, never slower. **The score scales differ by two
+orders of magnitude**, which is the measured argument for fusing on rank (§20.6)
+rather than on score. And **the two agree on the strongest results and diverge at the
+margin**, which is the shape a fallback should have.
+
+**This is not the comparison §9.7 owes.** That one needs relevance labels and a golden
+question set. This says the paths behave differently and plausibly; it does not say
+which retrieves better.
+
+---
+
+## Fusion behaviour on the real corpus (commit 9)
+
+`"what does the company say about credit risk"`, unfiltered, limit 10:
+
+| Rank | Fused score | Contributions | Evidence type |
+|---|---|---|---|
+| 1 | 0.03202 | `bm25@1, dense@4` | table_derived |
+| 2 | 0.03200 | `bm25@2, dense@3` | narrative |
+| 3 | 0.03200 | `bm25@3, dense@2` | table_derived |
+| 4 | 0.03178 | `bm25@5, dense@1` | narrative |
+| 5 | 0.03154 | `bm25@1, dense@6` | narrative |
+| 6–10 | ~0.0159–0.0164 | one retriever each | mixed |
+
+Two properties visible here that the unit tests assert in miniature:
+
+- **Every one of the top five was found by both retrievers**, and everything below by
+  one. That is RRF rewarding agreement, which is the reason to fuse rather than
+  concatenate.
+- **Both evidence types appear**, so §20.5's allocation floor is reaching the
+  candidate set rather than being a configuration value nothing acts on.
+
+Per-retriever contribution before fusion was 10 from BM25 and 10 from dense, with no
+degradation flags.
+
+---
+
+## Store state after indexing (commits 7–9)
+
+| | |
+|---|---|
+| Qdrant points | 4,969 — exactly the active children |
+| Collection status | green, 4 segments |
+| `indexed_vectors_count` | 4,808 of 4,816 at the time sampled |
+| Payload indexes | 10 fields, all present |
+| Chunks in PostgreSQL | 5,759 (4,969 children + 790 parents) |
+| Chunk sources | 66,928 |
+| Outbox events | 4,969, all `completed` |
+
+Container memory **sampled twice during indexing**, not peak:
+
+| Service | Memory |
+|---|---|
+| postgres | 259 MiB |
+| qdrant | 267 MiB |
+| objectstore | 192 MiB |
+
+**These are spot samples and the compose resource limits must not be set from them.**
+`compose.yaml` defers limits until "the corpus is embedded and peak usage is
+measured"; the corpus is now embedded, so the precondition is satisfied and the peak
+measurement is owed at commit 12. Setting a limit from two samples is the invented
+headroom that comment exists to prevent.
+
+---
+
+## Coverage, re-verified against the PDFs (commit 8)
+
+| | Infosys | HDFC Bank | Ola DRHP |
+|---|---|---|---|
+| PDF pages / page elements recorded | 369 / **369** | 590 / **590** | 444 / **444** |
+| Page numbers | 1..369, no gaps | 1..590, no gaps | 1..444, no gaps |
+| Blocks / blocks reaching a chunk | 14,686 / 14,669 | 16,271 / 16,105 | 9,519 / 8,145 |
+| Pages holding text not reached by any chunk | **0** | **0** | **0** |
+| Chunks with no lexemes, pages or sources | **0** | **0** | **0** |
+
+The 1,557 blocks that reach no chunk are **whitespace only** — verified with Python's
+`str.strip()`, which is what the chunker uses, against 0 holding any non-whitespace
+character. A SQL check with `btrim` reports them as content loss and is wrong, because
+`btrim` trims spaces and not newlines.
+
+---
+
+## What this record does not claim
+
+- **Nothing about retrieval quality.** Every figure here is throughput, latency,
+  coverage or behaviour. §22.6's Recall@k, MRR and nDCG need a golden question set
+  that §34 has not produced, and no number in this document may be read as evidence
+  that retrieval returns the right passage.
+- **Nothing about HNSW at scale.** Recall measured 1.0000 against exact search on 60
+  probes, because `indexing_threshold: 10000` means the graph is not being traversed
+  at this size (ENV-009 open item 6). These latencies are brute-force latencies.
+- **Nothing about a multi-document corpus.** Three filings, two fiscal periods, one
+  jurisdiction-dominant set.

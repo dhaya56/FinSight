@@ -139,6 +139,13 @@ Two figures worth carrying forward:
   re-embed around, and it makes `BM25_CONFIG_VERSION` and
   `embedding_config_version` changes genuinely expensive rather than nominally so.
 
+  **Mildly pessimistic, as it turned out.** Two full corpus re-indexes have since been
+  measured at **2.02/s and 1.93/s** over 4,969 children — 41 and 43 minutes elapsed.
+  The 1.68/s above came from 64 consecutive chunks of one filing; the corpus average is
+  higher because chunk length varies between filings, and the per-filing spread is
+  1.61–2.26/s. ENV-010 carries both runs and the per-filing breakdown. The operational
+  figure is **1.93/s**; nothing about the conclusion changes.
+
 The original table is left in place rather than rewritten, because the error was not
 in the measurement — it was in generalising it to work it never covered.
 

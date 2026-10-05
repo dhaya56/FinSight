@@ -201,7 +201,7 @@ throughput measurement, where the comparison can justify opening a second port.
 | # | Item | Owner |
 |---|---|---|
 | 1 | Peak memory with the corpus indexed, and resource limits derived from it. **The precondition is now satisfied** — `compose.yaml` defers limits until "the corpus is embedded and peak usage is measured", and it is embedded. What exists is two spot samples during indexing (postgres 259 MiB, qdrant 267 MiB, objectstore 192 MiB), not a peak, and setting a limit from two samples is the invented headroom that comment warns against. ENV-010 takes the peak and sets the limits | ENV-010 |
-| 2 | Upsert and search throughput at corpus scale | ENV-010 |
+| 2 | ~~Upsert and search throughput at corpus scale~~ **Measured; see ENV-010.** Indexing 1.93–2.02 chunks/s over two full corpus runs; filtered dense search 10.7 ms and filtered BM25 13.4 ms median; a whole hybrid search 337 ms warm against 6.2 s cold, the difference being Ollama's model load | ENV-010 |
 | 3 | Exact vs approximate search policy (§35.13) | retrieval evaluation |
 | 4 | Administrator-triggered reconciliation between PostgreSQL and Qdrant (§29.11) | later phase |
 | 5 | Qdrant-native RRF and sparse retrieval as §21 alternatives | §21 evaluation |
