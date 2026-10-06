@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 import pytest
 
+from finsight.generation.contract import parse_answer
 from finsight.generation.fake import MODEL, FakeGenerator
 from finsight.generation.ollama_generator import OllamaGenerator
 from finsight.generation.port import (
@@ -265,6 +266,27 @@ class TestTheFake:
         assert len(result.payload["claims"]) == 2  # type: ignore[arg-type]
         assert fake.calls[0].prompt == "the prompt"
         assert result.model == MODEL
+
+    def test_its_payload_satisfies_the_contract(self) -> None:
+        """The guard the fake was missing.
+
+        It omitted ``answerable`` for three commits, which nothing noticed until the answer
+        path ran end to end and ``parse_answer`` rejected every canned response as a shape
+        error. A fake whose payload the parser refuses exercises the error path and nothing
+        else, so the contract is asserted here rather than discovered downstream.
+        """
+        parsed = parse_answer(FakeGenerator(claims=("one.",)).generate(request()).payload)
+
+        assert parsed.answerable is True
+        assert [claim.text for claim in parsed.claims] == ["one."]
+
+    def test_it_can_report_the_passages_do_not_answer(self) -> None:
+        parsed = parse_answer(
+            FakeGenerator(answerable=False, claims=()).generate(request()).payload
+        )
+
+        assert parsed.answerable is False
+        assert parsed.claims == []
 
     def test_it_can_be_asked_to_be_unavailable(self) -> None:
         with pytest.raises(GenerationUnavailableError):

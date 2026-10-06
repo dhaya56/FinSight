@@ -33,6 +33,7 @@ from finsight.generation.validation import Finding, Severity
 __all__ = [
     "REASON_MODEL_REPORTED_UNANSWERABLE",
     "REASON_NOTHING_SURVIVED",
+    "REASON_NO_EVIDENCE",
     "AnswerDecision",
     "Decision",
     "ReleasedClaim",
@@ -50,6 +51,13 @@ apart from an answer the Gate dismantled.
 """
 
 REASON_NOTHING_SURVIVED: Final = "no_claim_survived_validation"
+
+REASON_NO_EVIDENCE: Final = "no_evidence_retrieved"
+"""Retrieval returned nothing, so no claim could have been supported.
+
+Distinct from the model declining: the corpus had nothing to offer, which points at the filters
+or the corpus rather than at the question.
+"""
 
 
 class Decision(StrEnum):

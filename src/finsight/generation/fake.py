@@ -34,6 +34,16 @@ class FakeGenerator:
 
     claims: Sequence[str] = ("The company describes its approach to the matter asked about.",)
     citations: Sequence[int] = (1,)
+
+    answerable: bool = True
+    """Whether the canned response claims the passages answer the question.
+
+    Emitted because the contract requires it: the first version of this fake omitted the field
+    and nothing noticed until the answer path ran end to end, where ``parse_answer`` rejected
+    every response as a shape error. A fake whose payload the parser refuses tests the error
+    path and nothing else.
+    """
+
     fails: bool = False
     """Raise :class:`GenerationUnavailableError`, for §27.9's degradation path."""
 
@@ -82,7 +92,7 @@ class FakeGenerator:
             raise GenerationShapeError("a request carried no schema")
 
         return GenerationResult(
-            payload={"claims": claims},
+            payload={"answerable": self.answerable, "claims": claims},
             model=MODEL,
             prompt_tokens=len(request.prompt) // 4,
             completion_tokens=sum(len(body) for body in bodies) // 4,
