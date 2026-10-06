@@ -4,8 +4,16 @@
 configuration version.
 
 **Deviation.** PROJECT_BLUEPRINT.md §7 requires all successfully extracted filing
-content to remain searchable through Narrative RAG. This withholds 258 blocks from the
+content to remain searchable through Narrative RAG. This withholds 129 blocks from the
 index. The deviation is the point of this record.
+
+**A correction to this record, 2026-10-06.** Every block figure here first read double —
+258 excluded, 264 matching, 60,558 characters — because the count was taken over every
+block in the database, and the database holds two extraction runs per document (80,952
+blocks against the 40,476 that the active runs hold). Chunking reads one run per document,
+so the active-run figures below are the ones that describe the index. The ratios and
+thresholds are unaffected: both runs extract the same documents, so the distributions are
+identical and only the absolute counts were wrong.
 
 ---
 
@@ -37,8 +45,8 @@ none of the answer.
 | Child chunks over 95% dots | 11 of 4,969 | 0.2% |
 | Parent chunks over 80% dots | 13 of 790 | 1.6% |
 | Largest offending parent | 1,515 tokens at 91% dots | — |
-| Blocks matching the rule | 258 (of 264 with a run) | 0.3% of 80,952 |
-| Characters withheld | 60,558 of 9,446,362 | 0.64% |
+| Blocks excluded | 129 (of 132 carrying a run) | 0.32% of 40,476 |
+| Characters withheld | 29,838 of 4,723,181 | 0.63% |
 
 ### Why they win rather than merely exist
 
@@ -99,7 +107,7 @@ financial data. §17.8 requires that stay retrievable. A letters rule deletes ev
 **Share without the run.** `.` is also a decimal point: 250 blocks of 80,688 exceed a 30%
 leader share with no run at all, and they are dense decimal text.
 
-**Run without the share.** Catches signature lines. The six lowest-share matches in the
+**Run without the share.** Catches signature lines. The three lowest-share matches in the
 corpus are `_____ Signed for and on behalf of …` at 0.234–0.236, which carry the
 signatory. The 30% floor sits in the sparse gap between those and the contents
 population (p05 0.384, median 0.852).
@@ -108,7 +116,7 @@ population (p05 0.384, median 0.852).
 
 ## What is lost
 
-The **section-to-page mapping**, for 258 blocks across three filings.
+The **section-to-page mapping**, for 129 blocks across three filings.
 
 Not lost: the sections themselves. In both displacement cases above the real content was
 already being retrieved *behind* the contents line, so excluding it promotes rather than
@@ -124,7 +132,7 @@ the document, not a question about its financial content.
 ## Known limitation
 
 The share guard is a proportion, so a signature line with a long rule and a **short**
-signatory crosses the floor and is withheld. None of the six in this corpus is short
+signatory crosses the floor and is withheld. None of the three in this corpus is short
 enough. Nothing guarantees the next filing's are, and the test
 `test_a_short_signature_rule_is_excluded_and_that_is_a_known_limit` pins the behaviour so
 the limit is visible rather than discovered as a missing signatory.

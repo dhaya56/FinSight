@@ -116,8 +116,13 @@ def chunk_blocks(
 
     **Typographic leader lines are also dropped**, which is a narrower filter and a
     larger decision: it withholds real text from the index rather than discarding
-    whitespace. 258 blocks across the three filings, 60,558 characters of 9.45 million.
+    whitespace. 129 blocks across the three filings, 29,838 characters of 4,723,181.
     See :func:`_is_retrievable` for the measurement and ADR-007 for the §7 deviation.
+
+    Every block is accounted for: of 40,476 blocks carrying text, 1,557 are whitespace,
+    129 are leader lines, and 38,790 reach a chunk. The three sum exactly, which is the
+    check that matters — a reduction in chunk count is expected here, but a block that
+    stops reaching any chunk would not be.
     """
     settings = config or ChunkingConfig()
     usable = [block for block in blocks if _is_retrievable(block.text, settings)]
@@ -157,7 +162,7 @@ def _is_retrievable(text: str, config: ChunkingConfig) -> bool:
     but a near-perfect match that is never the answer.
 
     **This deviates from §7's "keep all extracted content searchable", and ADR-007
-    records it.** What is lost is the section-to-page mapping, for 258 blocks across
+    records it.** What is lost is the section-to-page mapping, for 129 blocks across
     three filings. What is not lost: the sections themselves stay findable — in both
     displacement cases above the real content was already being retrieved behind the
     contents line, so excluding it promotes rather than hides. §7's preservation

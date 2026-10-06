@@ -27,8 +27,8 @@ measured against, and the retrieval path: structure-aware chunking, local embedd
 carrying dense and BM25 sparse vectors, hybrid retrieval under hard metadata filters, reciprocal
 rank fusion, and cross-encoder reranking.
 
-The development corpus is indexed end to end: **1,403 pages → 40,476 blocks → 5,759 chunks → 4,969
-indexed vectors** across three filings.
+The development corpus is indexed end to end: **1,403 pages → 40,476 blocks → 5,637 chunks → 4,867
+indexed vectors** across three filings, under chunking configuration 4.
 
 Intake has no HTTP route yet. PROJECT_BLUEPRINT.md §28.2 requires authentication on every
 non-health route, so upload is exposed in the authentication phase. Extraction, chunking, indexing
@@ -128,7 +128,7 @@ judgement, not a metric.
 | 5 | **19% of detected tables have their text split across chunks**, one across 25, so a header row and its figures can land apart. **128 of those 166 are unavoidable** — the table exceeds the child budget outright (median 734 tokens, max 3,801) and no chunking rule reunites it. Two attempts at the remainder were measured and rejected | 166 of 861; achievable gain measured at 2 | register §20 |
 | 6 | **24% of children are under the stated size floor**, 427 under 10 tokens, the smallest a single word | 1,212 of 4,969 | register §18 |
 | 7 | **Reranking is 93% of query latency** — 2,273 ms median against 175 ms with it off. §23.4's FlashRank trigger is live | per-token scaling table | ADR-006, ENV-010 |
-| 8 | **Fixed in code, pending re-index.** 5.7% of the index was near-letterless, including chunks that were 91% dot leaders and outranked the sections they point at. Typographic leader lines are now withheld from the index | 78 children and 13 parents over 80% dots; rank-1 displacement on 2 of 6 probes | ADR-007 |
+| 8 | **Fixed and verified.** Chunks that were up to 91% dot leaders outranked the sections they point at. Leader lines are now withheld: **zero** dot-dominated chunks remain, and the two probes that returned a table of contents at rank 1 now return the section itself | 78 children and 13 parents over 80% dots → 0; max dot share in results 0.84 → 0.02 | ADR-007, ENV-011 |
 | 9 | **A footnote cannot be reached from the figure it qualifies.** The text is searchable — 34 of 36 bound footnotes are already in the index via the blocks they were read from — but `footnote_refs` resolves to nothing, so a retrieved figure never carries its own exclusion. Indexing the footnote elements would only duplicate text already present | 36 of 36 also stored as blocks, 34 findable | register §24 |
 | 10 | **Consensus outranks exclusivity at every rank** while the fusion constant is 60, so a chunk both retrievers agree on beats one either ranked first alone | crossover arithmetic | ENV-010 |
 | 11 | **A superscript footnote marker is stored as part of the number it annotates.** `get_text("blocks")` discards font size, so `145,000` with a superscript 1 becomes `145,0001`. Three cases in the development split, all glued, one turning a three-digit figure into a four-digit one. A floor, not a count | 3 of 3 glued, 0 separated | register §23 |

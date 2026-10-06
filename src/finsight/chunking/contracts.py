@@ -173,12 +173,18 @@ class ChunkingConfig:
     | Table-of-contents lines (the target)| p05 0.384, median 0.852, max 0.960 |
     | Signature lines (must be kept)      | 0.234 to 0.236          |
 
-    0.30 sits in the sparse gap between them, so all six signature blocks survive and
+    0.30 sits in the sparse gap between them, so all three signature blocks survive and
     every contents line is caught. The share is computed over non-whitespace characters.
 
     **Both conditions are required, and neither is sufficient.** The run alone catches
     signature lines; the share alone catches dense decimal text, because ``.`` is also a
-    decimal point — 250 blocks of 80,688 exceed this share with no leader run at all.
+    decimal point — blocks of dense figures routinely exceed this share with no leader run
+    at all, and a share-only rule would delete a totals row.
+
+    Of the 40,476 blocks the active runs hold, 132 carry a leader run and 129 cross this
+    floor. ADR-007 carries the measurement, and a correction: those counts first read
+    double, because they were taken over every stored extraction run rather than the one
+    per document that chunking reads.
     """
 
 
