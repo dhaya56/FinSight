@@ -167,3 +167,30 @@ class VectorIndex(Protocol):
     def count(self, *, filters: Mapping[str, object] | None = None) -> int:
         """How many points match, for reconciliation against PostgreSQL (§29.11)."""
         ...
+
+    def delete_generations(self, generation_ids: Sequence[UUID]) -> int:
+        """Remove every point belonging to the named generations.
+
+        **The caller names what to remove; this never infers it.** The tempting shape
+        is "delete everything that is not active", and it is the wrong one: a bug that
+        returns an empty active set turns that filter into "delete everything", and the
+        index is derived so nothing would complain until a search returned nothing. An
+        explicit list cannot over-delete — the worst a wrong list does is remove too
+        little, which is visible and repairable.
+
+        An empty sequence removes nothing and returns 0. It must never be read as "no
+        filter", which in Qdrant's own API means every point.
+
+        Removing points is safe in a way removing rows is not: §29.2 makes this index
+        derived and rebuildable from PostgreSQL, so the cost of deleting a generation's
+        points wrongly is a re-index, not lost evidence. That asymmetry is why this
+        method exists here and why ``repositories/documents.py`` still has no delete.
+
+        Returns:
+            How many points were removed, counted before and after, because Qdrant's
+            delete reports an operation status rather than a number.
+
+        Raises:
+            VectorIndexUnavailableError: Qdrant could not be reached.
+        """
+        ...

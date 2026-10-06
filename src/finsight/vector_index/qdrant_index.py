@@ -92,6 +92,15 @@ filtered on, never read — §10.7 forbids a vector-store record becoming truth,
 the text is resolved from PostgreSQL by this id.
 """
 
+GENERATION_FIELD: Final = "generation_id"
+"""Payload key holding the generation a point belongs to.
+
+Declared here, in the lower layer, rather than imported from
+:mod:`finsight.retrieval.contracts`: the adapter must not depend on the retrieval
+package. The two spellings must agree or a filter silently matches nothing, so a test
+asserts they are equal rather than trusting that two literals stay in step.
+"""
+
 _POINT_NAMESPACE: Final = uuid.UUID("6f9b2a1e-0c3d-4f5a-8b7c-1d2e3f4a5b6c")
 """A fixed namespace for deriving point identifiers.
 
@@ -374,6 +383,49 @@ class QdrantVectorIndex:
             raise VectorIndexUnavailableError(
                 f"could not reach qdrant: {error}"
             ) from error
+
+    def delete_generations(self, generation_ids: Sequence[uuid.UUID]) -> int:
+        """Remove every point belonging to the named generations.
+
+        Three guards, in order, because this is the only destructive path in the
+        project and the index is 40 minutes of work to rebuild:
+
+        1. an empty list returns immediately, never reaching Qdrant. Passing an empty
+           ``MatchAny`` would in fact match nothing, but relying on that puts the whole
+           collection one refactor away from deletion;
+        2. the count is taken before and after, so the number reported is observed
+           rather than assumed — Qdrant's delete returns an operation status, not a
+           count;
+        3. a ``wait=True`` delete, so the after-count cannot read a stale index and
+           report fewer removals than happened.
+        """
+        if not generation_ids:
+            return 0
+
+        targets = [str(generation) for generation in generation_ids]
+        selector = {GENERATION_FIELD: targets}
+        before = self.count(filters=selector)
+        if before == 0:
+            return 0
+
+        try:
+            self._client.delete(
+                collection_name=self._collection,
+                points_selector=models.FilterSelector(
+                    filter=cast(models.Filter, _as_filter(selector))
+                ),
+                wait=True,
+            )
+        except (UnexpectedResponse, ApiException) as error:
+            raise VectorIndexUnavailableError(
+                f"qdrant rejected a delete: {error}"
+            ) from error
+        except OSError as error:
+            raise VectorIndexUnavailableError(
+                f"could not reach qdrant: {error}"
+            ) from error
+
+        return before - self.count(filters=selector)
 
     def close(self) -> None:
         self._client.close()

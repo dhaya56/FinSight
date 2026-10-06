@@ -336,7 +336,30 @@ one is indexed and reconciled**, so a re-index is background work rather than do
 
 Ollama must be running on the host. If it is not, the events stay `pending`, the new generation stays
 `shadow`, the previously active one stays queryable, and `corpus index` resumes with no flag — a path
-exercised by a real outage, not only by a test.
+exercised by a real outage, not only by a test. **Ollama appearing in the process list is not the
+same as Ollama serving**; the check that matters is an API call, which is what the indexer makes.
+
+### Pruning superseded points
+
+Activation does not remove the previous generation's vectors, so a re-chunk doubles the collection.
+After the first one: 9,836 points, of which 4,969 belonged to a superseded generation and could never
+be returned, because retrieval binds every search to the active generations.
+
+```cmd
+python -m finsight.cli.main prune
+python -m finsight.cli.main prune --confirm
+```
+
+Without `--confirm` it reports and changes nothing — the default, because rebuilding costs a 40-minute
+re-index. Measured on the first run: **4,969 removed, 4,867 remaining, active points 4,867 before and
+after**. That last figure is asserted, not merely printed: a prune that changed the active count
+raises rather than reporting success.
+
+This is the only destructive command in the project and it touches **only the derived index**. §29.2
+makes Qdrant rebuildable from PostgreSQL, so a wrong prune costs time rather than evidence.
+PostgreSQL keeps every superseded row — that is the audit trail the generation exists for, and §29.12
+reserves removal for tombstoning. `--include-failed` is opt-in, because a failed generation is
+retryable with `index --retry` and pruning it discards work a retry would skip.
 
 ### Searching
 

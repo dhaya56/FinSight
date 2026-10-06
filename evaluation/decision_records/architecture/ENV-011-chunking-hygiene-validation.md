@@ -160,9 +160,32 @@ table-aware reading order in the extraction phase.
 Lexemes still cost more than the text they index: 7,266 kB against 5,446 kB for config 4,
 confirming the ENV-010 finding at the new configuration.
 
-**Superseded points are not pruned.** Config 3's 4,969 points remain, so the collection
-holds 9,836 of which half are never served — retrieval binds to active generations, so this
-is a storage cost rather than a correctness risk. No prune command exists.
+### Superseded points, and the prune that followed
+
+Activation left config 3's 4,969 points in the collection beside config 4's 4,867 — half
+the index unreachable, since retrieval binds every search to the active generations. A
+storage cost rather than a correctness risk, but a growing one: every future re-chunk would
+add another full copy.
+
+`finsight prune` now removes them. Measured on this collection:
+
+| | Points |
+|---|---|
+| Collection before | 9,836 |
+| Prunable (3 superseded generations) | 4,969 |
+| Active (3 generations) | 4,867 |
+| Removed | **4,969** |
+| Collection after | **4,867** |
+| Active before and after | **4,867 → 4,867** |
+
+The last row is the one that matters and the command asserts it: a prune that changed the
+active count would raise rather than report success. Search was re-run afterwards and
+returns passages with resolving citations from both retrievers.
+
+This is the only destructive operation in the project and it is confined to the derived
+store. §29.2 makes the index rebuildable, so the cost of a wrong prune is a re-index;
+PostgreSQL keeps every superseded row, because that is the audit trail a superseded
+generation exists for and §29.12 reserves removal for tombstoning.
 
 ---
 
