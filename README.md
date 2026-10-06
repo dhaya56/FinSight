@@ -125,16 +125,23 @@ judgement, not a metric.
 | 2 | **Multi-column reading order is positional.** A column-aware ordering would differ on **195 of 1,403 pages (14%)**, and interleaved chunks read as prose while being two columns spliced together | 14% of pages, verbatim example | register §16 |
 | 3 | **Dense retrieval is nearly blind to which number a sentence states.** `1,234.56 crore` against `4,321.65 crore` scores **0.9863**; changing the fiscal year moves the vector *less* than changing the metric | cosine table | register §21 |
 | 4 | **An acronym cannot reach its own expansion.** Zero shared lexemes for all seven pairs tested, dense cosine 0.52–0.64. "PAT" reaches 8 chunks where "profit after tax" reaches 229 | 7 pairs, corpus counts | register §21 |
-| 5 | **19% of detected tables have their text split across chunks**, one across 25, so a header row and its figures can land apart | 166 of 861 tables | register §20 |
+| 5 | **19% of detected tables have their text split across chunks**, one across 25, so a header row and its figures can land apart. **128 of those 166 are unavoidable** — the table exceeds the child budget outright (median 734 tokens, max 3,801) and no chunking rule reunites it. Two attempts at the remainder were measured and rejected | 166 of 861; achievable gain measured at 2 | register §20 |
 | 6 | **24% of children are under the stated size floor**, 427 under 10 tokens, the smallest a single word | 1,212 of 4,969 | register §18 |
 | 7 | **Reranking is 93% of query latency** — 2,273 ms median against 175 ms with it off. §23.4's FlashRank trigger is live | per-token scaling table | ADR-006, ENV-010 |
-| 8 | **5.7% of the index is near-letterless**, including 384-token chunks of nothing but dot leaders | 282 of 4,969 | register §14 |
-| 9 | **Footnotes are extracted and unreachable.** 36 exist; `footnote_refs` resolves to nothing and footnotes are not indexed | — | register §22 |
+| 8 | **Fixed in code, pending re-index.** 5.7% of the index was near-letterless, including chunks that were 91% dot leaders and outranked the sections they point at. Typographic leader lines are now withheld from the index | 78 children and 13 parents over 80% dots; rank-1 displacement on 2 of 6 probes | ADR-007 |
+| 9 | **A footnote cannot be reached from the figure it qualifies.** The text is searchable — 34 of 36 bound footnotes are already in the index via the blocks they were read from — but `footnote_refs` resolves to nothing, so a retrieved figure never carries its own exclusion. Indexing the footnote elements would only duplicate text already present | 36 of 36 also stored as blocks, 34 findable | register §24 |
 | 10 | **Consensus outranks exclusivity at every rank** while the fusion constant is 60, so a chunk both retrievers agree on beats one either ranked first alone | crossover arithmetic | ENV-010 |
+| 11 | **A superscript footnote marker is stored as part of the number it annotates.** `get_text("blocks")` discards font size, so `145,000` with a superscript 1 becomes `145,0001`. Three cases in the development split, all glued, one turning a three-digit figure into a four-digit one. A floor, not a count | 3 of 3 glued, 0 separated | register §23 |
 
 Three more that are deliberate rather than defective: table cells are excluded from retrieval
 (ADR-003), QueryTrace is **not persisted** so §31.9 is unsatisfied, and no query planner derives
 §20.2's filters from a question — they are CLI flags.
+
+Problems 1, 3, 4, 7 and 10 are **blocked on evidence rather than effort**: each has a realistic
+alternative, and §8 requires recorded evidence plus approval to choose one. With no golden
+question set there is no way to show a fix helps, so they wait on §22.6. Problems 2, 6 and 11
+share a cause in the producer — `get_text("blocks")` discards the geometry and font information
+all three would need — so they belong to one extraction change, not three.
 
 ### The extraction architecture
 

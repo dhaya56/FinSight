@@ -180,19 +180,32 @@ across the whole development split, as trailing markers:
 
 **`#` was missed entirely** by the assumed pattern — 56 occurrences silently
 dropped. Fixed, with a test that pins every measured form so the set cannot
-regress to guesswork. No superscript digits appear anywhere in the corpus, and
-neither do `†` or `‡`; those two are retained because other filings use them, but
-their validation here is zero.
+regress to guesswork. Neither `†` nor `‡` appears anywhere in the corpus; both are
+retained because other filings use them, but their validation here is zero.
+
+**A superseded sentence, kept visible because it misled.** This section previously read
+"No superscript digits appear anywhere in the corpus." That is true of the stored bytes
+and false of the documents, and the difference is a silent corruption of financial values:
+PyMuPDF renders a superscript `1` as ASCII `1`, so the marker is already indistinguishable
+from a value digit before this rule runs. §23 measures it — three figures in the
+development split are stored glued to their own footnote marker, one of them turning a
+three-digit number into a four-digit one. The rule below cannot catch those, and no
+widening of its vocabulary would: the evidence needed is font size, which the producer
+discards.
 
 **Resolution target: confirmed to exist, still unbuilt.** The same pass counted
 *leading* markers, which is what a footnote's own text line looks like:
 parenthesised letters 472, parenthesised digits 426, `*` 103, `#` 23, `**` 20,
 `***` 3 — roughly a thousand candidate footnote text lines.
 
-So the notes are present and mechanically findable. A marker still resolves to
-nothing: there is no footnote element, no footnote text, and no link. A number
-released without its qualifier is wrong, not merely incomplete. Owner: footnote
-commit.
+So the notes are present and mechanically findable.
+
+**Partly superseded.** Footnote elements now exist — §10 binds 36 of them, and §24
+measures that 34 of those 36 are already reachable in the index through the blocks they
+were read from. What still resolves to nothing is the *reference*: a marker in a cell does
+not reach the footnote that explains it. A number released without its qualifier is wrong,
+not merely incomplete, so the gap matters — but it matters once an answer is composed, and
+§24 records why the fix belongs to Phase 8 rather than to chunking. Owner: Phase 8.
 
 ---
 
@@ -1220,3 +1233,96 @@ figure, there is nothing to reorder.
 | **Figure-region marking** | Chart axis and data labels extract as ordinary text. Measured across the full split: **841 of 1,403 pages (60%)** carry more than 40 drawing items, but only **50 (4%)** also show five or more bare-numeric short blocks. So heavy vector content is the norm and is mostly design furniture; the chart-label signature is real but confined to about 4% of pages |
 | **Table-aware reading order** | Measured at 14% page divergence; tables now make a table-aware ordering possible but it is unbuilt |
 | **Duplicate text between blocks and cells** | Text inside a table is stored twice, once as a block and once as cells. Deliberate — suppressing the blocks would let a false-positive table delete narrative prose, and §18 requires exclusion to be a reversible ranking decision. §18.4's table-aware chunking must avoid retrieving the same sentence twice |
+
+---
+
+## 23. Superscript markers are flattened into value digits
+
+**Measured 2026-10-06, prompted by developer research. This is a silent corruption of
+financial values and was not previously known.**
+
+`pymupdf_adapter.py` extracts with `page.get_text("blocks")`, which returns text and a
+box and discards font size and span flags. A superscript footnote marker is therefore
+indistinguishable from an ordinary character by the time anything in the project sees it:
+`145,000` with a superscript 1 arrives as `145,0001`.
+
+Tested by asking PyMuPDF for span sizes — information the extraction path throws away —
+and comparing against the text actually stored. A span was treated as a marker candidate
+when its size was under 0.80 of the page median and its whole text was one to three
+marker characters.
+
+| Filing | Pages | Small marker spans | Superscript digit directly after a digit | **Stored glued** | Stored separated |
+|---|---|---|---|---|---|
+| Infosys AR | 369 | 153 | 0 | 0 | 0 |
+| HDFC Bank AR | 590 | 398 | 2 | **2** | 0 |
+| Ola Electric DRHP | 444 | 211 | 1 | **1** | 0 |
+| **Total** | **1,403** | **762** | **3** | **3** | **0** |
+
+Every occurrence was glued; none was separated. Masked shapes, digits replaced by `N`:
+
+| Before | Marker | Stored as |
+|---|---|---|
+| `N.NN` | `N` | `N.NNN` |
+| ` NN.NN` | `N` | ` NN.NNN` |
+| `NNN` | `N` | **`NNNN`** |
+
+The third changes a three-digit number into a four-digit one. Whatever that figure is,
+the stored value is an order of magnitude from the printed one, and nothing anywhere
+reports an error.
+
+**§4's "No superscript digits appear anywhere in the corpus" is true of the stored bytes
+and false of the documents**, and that is precisely why this went unseen. PyMuPDF renders
+a superscript `1` as ASCII `1`, never as `¹`, so a search of stored text for superscript
+characters finds nothing and reads as reassurance. The marker-separation rule in §4 cannot
+see these markers either: by the time it runs they are ordinary digits inside a number.
+
+**Three is a floor, not a count.** The 0.80 size ratio excludes superscripts set closer
+to body size, and the test only counts the digit-after-digit case — a marker after a
+letter (`Revenue*`) glues harmlessly and is recoverable, which is the majority of the 762.
+The true frequency is unmeasured and could be higher.
+
+**Not fixed, and the fix is not in chunking.** Detecting these requires span-level
+extraction (`get_text("dict")` or `rawdict`) so size and baseline offset survive to where
+the marker rule runs. That is a change to the producer, so it invalidates every stored
+element and requires re-extraction, not merely re-chunking. It belongs with table-aware
+reading order (§16, §22), which is a `get_text` concern for the same reason. Owner:
+extraction phase.
+
+---
+
+## 24. Footnote text is already reachable; the gap is the link
+
+**Measured 2026-10-06. The recorded problem was stated wrongly, and acting on it as
+stated would have made the index worse.**
+
+The README carried "Footnotes are extracted and unreachable. 36 exist; `footnote_refs`
+resolves to nothing and footnotes are not indexed." The second half is true and the first
+is not.
+
+| Question | Measured |
+|---|---|
+| Bound footnote elements | 36, across 30 tables |
+| Whose text also exists as a `block` element | **36 of 36** |
+| Whose text is findable inside an indexed chunk | **34 of 36** |
+| Blocks that open with a footnote-style marker | 780 `(n)`, 1,142 `(a)`, 348 `*`, 62 `#` |
+
+Binding does not consume the block it read. `adjacency.py` creates a `footnote` element
+as a child of the table **in addition to** the block, so the text stays in
+`narrative_blocks` and reaches the index by that route. Roughly 2,300 further blocks open
+with a marker and were never bound at all; those are indexed as ordinary prose.
+
+So indexing the 36 `footnote` elements would add 36 chunks whose text is already present —
+duplicate evidence competing for result slots, which §20.9 would not collapse because the
+two copies have genuinely different source elements.
+
+**What is actually missing is the association**, and it has no consumer yet. A table chunk
+carrying a figure does not carry the qualifier that modifies it, and a footnote chunk does
+not say which figure it qualifies. That is the dangling pointer the research describes, and
+it causes a wrong answer only once something composes an answer — Phase 8. `footnote_refs`
+resolution is likewise consumerless while ADR-003 keeps cells out of retrieval.
+
+The admissible fix, when a consumer exists, is the enrichment layer: a footnote's text
+attached to the chunks of its own table as deterministic context, embedded but never citable
+as that chunk's source. Injecting it into chunk bodies — which is what the research proposes
+— is forbidden by §14.4, and citations are character offsets into the stored string (§14.9),
+so a rewrite would invalidate every one of them. Owner: Phase 8.
