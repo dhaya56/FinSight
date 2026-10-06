@@ -346,6 +346,48 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ----------------------------------------------------------------- Generation
+
+    generation_model: str = Field(
+        default="llama3.1:8b",
+        description=(
+            "PROVISIONAL, not selected. §22 reserves the choice and ADR-008 adopts this "
+            "one on the same basis ADR-004 adopted the embedding model: it is already "
+            "pulled, it runs on this host, and no comparison has been made. Served by "
+            "host-native Ollama with no tools and no network of its own (§10.4)."
+        ),
+    )
+    generation_context_window: int = Field(
+        default=8192,
+        ge=512,
+        description=(
+            "Tokens the model may read. Unmeasured, and deliberately generous: Ollama "
+            "discards prompt tokens past this without erroring, so a window that is too "
+            "small drops evidence while the answer still cites it. The adapter refuses a "
+            "response whose prompt reached the ceiling rather than trusting one."
+        ),
+    )
+    generation_temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+        description=(
+            "Zero, because §26.7's substitution is deterministic and an answer that "
+            "varies between identical runs cannot be compared or reproduced. Not a "
+            "guarantee of reproducibility, only the least variance available."
+        ),
+    )
+    generation_timeout_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        description=(
+            "MEASURED on this host: a two-claim answer took 16 s warm at roughly 3.9 "
+            "tokens per second, and the first call also loads a 4.9 GB model. A longer "
+            "answer scales with its own length, so this bound is wide — a timeout here "
+            "degrades the answer (§27.9) rather than failing the question."
+        ),
+    )
+
     embedding_config_version: str = Field(
         default="1",
         description=(
