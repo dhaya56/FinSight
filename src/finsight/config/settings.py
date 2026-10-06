@@ -377,6 +377,36 @@ class Settings(BaseSettings):
             "guarantee of reproducibility, only the least variance available."
         ),
     )
+    generation_evidence_budget_chars: int = Field(
+        default=22000,
+        ge=500,
+        description=(
+            "Characters of evidence a prompt may carry. Unmeasured, and bounded rather "
+            "than left to the context window because published guidance is explicit that "
+            "feeding everything retrieved to a model is not good practice. "
+            "Characters because the generation model's tokenizer is not available here; at "
+            "a conservative 3.5 characters per token this is roughly 6,300 tokens, leaving "
+            "room in an 8,192 window for instructions and the completion. The adapter "
+            "refuses a prompt that reached the window, so a wrong estimate fails loudly."
+        ),
+    )
+    generation_expand_below_chars: int = Field(
+        default=170,
+        ge=0,
+        description=(
+            "Expand a retrieved passage to its parent only when it is shorter than this. "
+            "MEASURED over six real queries and three policies: retrieved passages averaged "
+            "1,574 characters with 1 of 48 below this floor, because reranking already "
+            "filters out the corpus's 1,211 sub-floor children. Expanding everything "
+            "discarded 20 of 48 reranked passages to the budget. Expanding fragments "
+            "produced output identical to not expanding, because the one fragment that "
+            "surfaced has no parent. So this is a no-op on this corpus, kept because its "
+            "measured cost is zero and a retrieved fragment with a parent would benefit. "
+            "170 characters is the chunker's own 48-token floor in this module's unit; 0 "
+            "disables it, a large value restores expand-everything for comparison."
+        ),
+    )
+
     generation_timeout_seconds: float = Field(
         default=300.0,
         gt=0,

@@ -19,7 +19,7 @@ from uuid import UUID
 
 from sqlalchemy import func, insert, select, update
 from sqlalchemy import text as sql_text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from finsight.chunking.contracts import Chunk as DerivedChunk
 from finsight.domain.representations.retrieval import ChunkRole
@@ -364,6 +364,68 @@ class ChunkRepository:
             (row.id, float(row.score))
             for row in self._session.execute(statement, values)
         ]
+
+    def parents_of(self, *, chunk_ids: Sequence[UUID]) -> dict[UUID, PendingChunk]:
+        """Map each child to the parent that contains it, where one exists.
+
+        **Why generation reads parents at all.** A retrieved child is often a fragment —
+        measured on the active corpus, children average 200 tokens and 1,211 of 4,867 are
+        under 48. A model given a fragment answers from a fragment. §18.5 keeps parents for
+        interpretation and §20.8 expands to them; this is the read that makes that possible,
+        and until now nothing used it.
+
+        **A child with no parent is absent from the result, not an error.** The chunker drops
+        a parent whose text is byte-identical to its only child, because expanding to it
+        would return the same text twice. Those children are already whole runs, so the
+        caller uses the child's own text and loses nothing.
+
+        One query for the whole candidate set, joined through the child's ``parent_id``.
+        Order is not meaningful: the caller holds the ranking.
+        """
+        if not chunk_ids:
+            return {}
+        parent = aliased(Chunk, name="parent")
+        statement = (
+            select(
+                Chunk.id.label("child_id"),
+                parent.id,
+                parent.document_version_id,
+                parent.text,
+                parent.heading_path,
+                parent.page_numbers,
+                parent.evidence_type,
+                DocumentMetadata.issuer_name,
+                DocumentMetadata.document_type,
+                DocumentMetadata.fiscal_period,
+                DocumentMetadata.reporting_basis,
+                DocumentMetadata.currency,
+                DocumentMetadata.period_end,
+            )
+            .join(parent, parent.id == Chunk.parent_id)
+            .outerjoin(
+                DocumentMetadata,
+                DocumentMetadata.document_version_id == parent.document_version_id,
+            )
+            .where(Chunk.id.in_(list(chunk_ids)))
+        )
+        return {
+            row.child_id: PendingChunk(
+                chunk_id=row.id,
+                document_version_id=row.document_version_id,
+                text=row.text,
+                lexemes=None,
+                heading_path=tuple(row.heading_path or ()),
+                page_numbers=tuple(row.page_numbers or ()),
+                evidence_type=row.evidence_type,
+                issuer_name=row.issuer_name,
+                document_type=row.document_type,
+                fiscal_period=row.fiscal_period,
+                reporting_basis=row.reporting_basis,
+                currency=row.currency,
+                period_end=row.period_end,
+            )
+            for row in self._session.execute(statement).all()
+        }
 
     def load_context(self, *, chunk_ids: Sequence[UUID]) -> list[PendingChunk]:
         """Chunk text and its deterministic context, for reranking and for display.
