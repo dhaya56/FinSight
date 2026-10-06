@@ -1,27 +1,43 @@
-"""The page renders, and renders the right disclaimers.
+"""Every page renders, and the wired ones stay honest about what they show.
 
-``AppTest`` executes the script the way Streamlit does, which makes this the only
-check that the entry point actually runs — a page guarded by ``if __name__ ==
-"__main__"`` that Streamlit happened to import under another name would render
-blank, and nothing else in the suite would notice until a demonstration.
+``AppTest.from_function`` runs one view at a time, which is what makes this useful: a view
+that raises is caught here rather than discovered as a blank panel during a demonstration.
+All eight are exercised, including the preview pages, because a fixture page breaks just as
+easily as a live one — a bad Material icon name or a mistyped column config raises at render
+time and nothing else in the suite would notice.
 
-The API client is replaced, so this needs no server. What is asserted beyond "it
-renders" is the two things §27 and §7 require to be on the page rather than in
-documentation: that this returns passages rather than answers, and that a
-degradation is visible when one occurred.
+**The script function is self-contained, and has to be.** ``AppTest.from_function`` uses the
+function's *body* as the page script, so module globals and closure variables are not
+available to it: everything it needs is imported inside it and everything else arrives
+through ``kwargs``. Writing it as a closure looks correct and fails with ``NameError`` on
+every view at once.
 """
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from streamlit.testing.v1 import AppTest
 
 import finsight.ui
-from finsight.ui.client import ApiClient, ApiError
+from finsight.ui.client import ApiClient
+from finsight.ui.views import ask, health
 
 APP_SCRIPT = Path(finsight.ui.__file__).parent / "app.py"
-TOKEN = "a-token-long-enough-to-pass-the-length-floor"
+
+VIEW_NAMES = (
+    "ask",
+    "trace",
+    "library",
+    "ingest",
+    "ledger",
+    "compare",
+    "evaluation",
+    "health",
+)
+
+PREVIEW_VIEWS = ("library", "ingest", "ledger", "compare", "evaluation")
 
 
 def a_response(**overrides: Any) -> dict[str, Any]:
@@ -63,121 +79,232 @@ def a_response(**overrides: Any) -> dict[str, Any]:
     return body
 
 
-class StubClient(ApiClient):
-    """An ApiClient that answers from memory instead of over HTTP."""
+def _script(view_name: str, response: "dict[str, Any]", fail: str) -> None:
+    """The page script. Self-contained: no name here comes from the enclosing module.
 
-    def __init__(self, response: dict[str, Any] | None = None, *, fail: str = "") -> None:
-        super().__init__(base_url="http://127.0.0.1:8000", token=TOKEN)
-        object.__setattr__(self, "_response", response or a_response())
-        object.__setattr__(self, "_fail", fail)
+    The ``response`` annotation is quoted because the ``def`` line is executed in the
+    fresh namespace too, where ``Any`` is not bound. An unquoted annotation raises
+    ``NameError`` before the body runs, which presents as every view failing at once.
+    """
+    from contextlib import ExitStack
+    from unittest.mock import patch
 
-    def search(self, query: str, **kwargs: Any) -> dict[str, Any]:
-        if self._fail:
-            raise ApiError(self._fail)
-        return self._response
+    from finsight.ui.client import ApiClient, ApiError
+    from finsight.ui.views import (
+        ask,
+        compare,
+        evaluation,
+        health,
+        ingest,
+        ledger,
+        library,
+        trace,
+    )
 
-    def is_ready(self) -> bool:
-        return True
+    views = {
+        "ask": ask.render,
+        "trace": trace.render,
+        "library": library.render,
+        "ingest": ingest.render,
+        "ledger": ledger.render,
+        "compare": compare.render,
+        "evaluation": evaluation.render,
+        "health": health.render,
+    }
+
+    class Stub(ApiClient):
+        def search(self, query: str, **kwargs: object) -> dict[str, object]:
+            if fail:
+                raise ApiError(fail)
+            return response
+
+        def is_ready(self) -> bool:
+            return True
+
+    stub = Stub(base_url="http://127.0.0.1:8000", token="t" * 40)
+
+    # Patched in each *view's* namespace, not on finsight.ui.client. A view does
+    # ``from finsight.ui.client import client_from_environment`` at import time and
+    # holds its own binding, so replacing the attribute on the source module has no
+    # effect once the view has been imported. Getting this wrong is quiet: the real
+    # factory raises for a missing token, the view renders a configuration error, and
+    # a test that only counts rendered elements still passes.
+    modules = (ask, compare, evaluation, health, ingest, ledger, library, trace)
+    with ExitStack() as stack:
+        for module in modules:
+            if hasattr(module, "client_from_environment"):
+                stack.enter_context(
+                    patch.object(module, "client_from_environment", return_value=stub)
+                )
+        views[view_name]()
 
 
-def run(client: ApiClient, *, query: str = "") -> AppTest:
-    """Render the page with ``client`` substituted, optionally running a search."""
-    app = AppTest.from_file(str(APP_SCRIPT), default_timeout=30)
-    app.session_state["_test_client"] = client
+def run(
+    view_name: str,
+    *,
+    response: dict[str, Any] | None = None,
+    fail: str = "",
+    query: str = "",
+    seeded: dict[str, Any] | None = None,
+) -> AppTest:
+    """Render one view, optionally seeding session state or running a search."""
+    app = AppTest.from_function(
+        _script,
+        default_timeout=60,
+        kwargs={
+            "view_name": view_name,
+            "response": response if response is not None else a_response(),
+            "fail": fail,
+        },
+    )
+    for key, value in (seeded or {}).items():
+        app.session_state[key] = value
     app.run()
     if query:
-        # Two runs, deliberately. The Search button is disabled while the box is
-        # empty, and a browser user cannot click a disabled button either — so the
-        # value has to land and the script re-run before the click is possible. A
-        # single run here would assert against a page no user can reach.
+        # Two runs: the Search button is disabled while the box is empty, and a browser
+        # user cannot click a disabled button either.
         app.text_input[0].set_value(query).run()
         app.button[0].click().run()
     return app
 
 
-@pytest.fixture(autouse=True)
-def _substitute_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point the page's client factory at whatever the session state holds.
+def rendered_text(app: AppTest) -> str:
+    """Everything a reader would see, across every element kind these pages use.
 
-    **Patched on** :mod:`finsight.ui.client`, **not on the page module.**
-    ``AppTest`` executes the script's source in a fresh namespace rather than
-    importing it, so an attribute replaced on the already-imported page module would
-    never be consulted. The script's own ``from finsight.ui.client import ...`` does
-    reach this, because that import runs during the fresh execution.
+    ``app.get("html")`` is included and matters: the passage card, the heading
+    breadcrumb and the pipeline strips are all :func:`streamlit.html`, so a helper that
+    scanned only markdown and captions would miss the actual evidence text — and would
+    make the "no real issuer in a preview" check pass by looking in the wrong place.
 
-    Patching the factory rather than ``httpx`` keeps the test about the page: the
-    client's own behaviour is covered in ``test_ui_client.py``.
+    Tables are included for the same reason: the library and ledger previews put their
+    issuer names in a dataframe, not in prose.
+    """
+    parts = [
+        str(element.value)
+        for group in (app.markdown, app.caption, app.info, app.warning, app.error)
+        for element in group
+    ]
+    parts.extend(str(element.value) for element in app.get("html"))
+    parts.extend(str(element.value) for element in app.dataframe)
+    return " ".join(parts)
+
+
+class _ShellStub(ApiClient):
+    """Minimal client for the shell test, which only needs the default page to render."""
+
+    def search(self, query: str, **kwargs: object) -> dict[str, object]:
+        return dict(a_response())
+
+    def is_ready(self) -> bool:
+        return True
+
+
+class TestAppShell:
+    """The entry point itself, which the per-view tests do not cover.
+
+    Running each view in isolation says nothing about ``st.navigation``, and that gap let
+    a real failure ship: every view exposes ``render``, ``st.Page`` infers a URL pathname
+    from the callable's name when none is given, and all eight therefore collided and
+    ``st.navigation`` rejected the whole set. The page was blank on every route while all
+    eighty per-view assertions passed.
     """
 
-    def from_state() -> ApiClient:
-        import streamlit as st
+    def test_the_shell_builds_its_navigation(self) -> None:
+        stub = _ShellStub(base_url="http://127.0.0.1:8000", token="t" * 40)
+        app = AppTest.from_file(str(APP_SCRIPT), default_timeout=60)
 
-        held = st.session_state.get("_test_client")
-        if held is None:
-            raise ApiError("no client configured for this test")
-        return held
+        with (
+            patch.object(ask, "client_from_environment", return_value=stub),
+            patch.object(health, "client_from_environment", return_value=stub),
+        ):
+            app.run()
 
-    monkeypatch.setattr(
-        "finsight.ui.client.client_from_environment", from_state
-    )
+        assert not app.exception, f"shell raised: {[e.value for e in app.exception]}"
+
+    def test_every_page_declares_a_distinct_url_path(self) -> None:
+        """Pinned directly, so the cause is named rather than inferred from a blank page."""
+        from finsight.ui.app import _PAGES
+
+        slugs = [slug for _render, slug, *_rest in _PAGES]
+
+        assert len(slugs) == len(set(slugs)), f"duplicate url_path: {slugs}"
+        assert all(slugs), "a blank url_path falls back to the callable name"
+
+    def test_the_shell_renders_the_default_page(self) -> None:
+        stub = _ShellStub(base_url="http://127.0.0.1:8000", token="t" * 40)
+        app = AppTest.from_file(str(APP_SCRIPT), default_timeout=60)
+
+        with (
+            patch.object(ask, "client_from_environment", return_value=stub),
+            patch.object(health, "client_from_environment", return_value=stub),
+        ):
+            app.run()
+
+        assert "Ask" in rendered_text(app)
 
 
-class TestRender:
-    def test_the_page_runs_at_all(self) -> None:
-        """The check that a blank page cannot pass."""
-        app = run(StubClient())
+class TestEveryPageRenders:
+    @pytest.mark.parametrize("name", VIEW_NAMES)
+    def test_the_view_renders_without_raising(self, name: str) -> None:
+        """Catches a bad Material icon name or column config before a demonstration."""
+        app = run(name)
 
-        assert not app.exception
-        assert app.title[0].value == "FinSight"
+        assert not app.exception, f"{name} raised: {[e.value for e in app.exception]}"
 
-    def test_the_page_says_it_returns_passages_not_answers(self) -> None:
-        """§27: nothing here may be read as a generated or judged answer."""
-        app = run(StubClient())
+    @pytest.mark.parametrize("name", VIEW_NAMES)
+    def test_the_view_renders_something(self, name: str) -> None:
+        """A page that renders nothing passes an exception check and is still broken."""
+        app = run(name)
 
-        captions = " ".join(element.value for element in app.caption)
-        assert "not answers" in captions
+        produced = len(app.markdown) + len(app.caption) + len(app.metric) + len(app.dataframe)
+        assert produced > 0, f"{name} rendered no content"
 
-    def test_a_search_renders_the_passage_with_its_provenance(self) -> None:
-        app = run(StubClient(), query="credit risk")
+    @pytest.mark.parametrize("name", VIEW_NAMES)
+    def test_the_view_renders_no_error(self, name: str) -> None:
+        """Counting elements is not enough: an error page renders content too.
 
-        assert not app.exception
-        rendered = " ".join(str(element.value) for element in app.markdown)
-        assert "Probe Limited" in rendered
-        assert "counterparty limits" in rendered
-        # The heading path is a caption, which AppTest reports separately.
-        captions = " ".join(element.value for element in app.caption)
-        assert "7.2 Credit risk" in captions
-
-    def test_no_internal_commentary_is_rendered_to_the_reader(self) -> None:
-        """Streamlit's magic renders bare top-level string literals as page content.
-
-        An attribute docstring in the page module is therefore published, which is
-        how a paragraph explaining the degradation flags to a maintainer ended up on
-        the page itself. Pinned because the mistake is invisible in review: the
-        source looks like ordinary documentation.
+        Added after a mis-targeted patch left Ask showing a configuration error on every
+        run while the two checks above both passed.
         """
-        app = run(StubClient(), query="credit risk")
+        app = run(name)
 
-        everything = " ".join(
-            str(element.value)
-            for group in (app.markdown, app.caption, app.info, app.warning)
-            for element in group
-        )
-        for giveaway in ("machine-readable", "stable identifiers", "§20.12."):
-            assert giveaway not in everything
+        assert not app.error, f"{name} rendered: {[e.value for e in app.error]}"
+
+
+class TestAsk:
+    def test_a_search_renders_the_passage_and_its_provenance(self) -> None:
+        app = run("ask", query="credit risk")
+
+        assert not app.exception
+        text = rendered_text(app)
+        assert "counterparty limits" in text
+        assert "7.2 Credit risk" in text
 
     def test_the_rerank_score_is_labelled_a_logit_not_a_confidence(self) -> None:
-        app = run(StubClient(), query="credit risk")
+        """§27: a support signal is not a probability that the passage is correct."""
+        app = run("ask", query="credit risk")
 
-        captions = " ".join(element.value for element in app.caption)
-        assert "logit" in captions
+        helps = " ".join(str(element.help or "") for element in app.metric)
+        assert "logit" in helps.lower()
 
+    def test_an_api_failure_leaves_the_page_usable(self) -> None:
+        app = run("ask", fail="Could not reach the API", query="x")
 
-class TestHonesty:
+        assert not app.exception
+        assert any("Could not reach the API" in error.value for error in app.error)
+
+    def test_an_empty_result_explains_why_rather_than_looking_broken(self) -> None:
+        app = run("ask", response=a_response(candidates=[]), query="photosynthesis")
+
+        info = " ".join(element.value for element in app.info)
+        assert "Nothing matched" in info
+        assert "ADR-003" in info
+
     def test_a_degraded_result_warns_and_explains_the_cost(self) -> None:
-        """§20.12: flagged in words the reader can act on, not just a flag name."""
+        """§20.12: flagged in words a reader can act on, not just a flag name."""
         app = run(
-            StubClient(a_response(degraded=["dense_unavailable"], dense_used=False)),
+            "ask",
+            response=a_response(degraded=["dense_unavailable"], dense_used=False),
             query="credit risk",
         )
 
@@ -185,15 +312,56 @@ class TestHonesty:
         assert "dense_unavailable" in warnings
         assert "lexical only" in warnings
 
-    def test_an_empty_result_explains_why_rather_than_looking_broken(self) -> None:
-        app = run(StubClient(a_response(candidates=[])), query="photosynthesis")
+    def test_the_removed_disclaimer_line_is_gone(self) -> None:
+        """Removed at the developer's request; they explain it in the room instead."""
+        app = run("ask")
 
-        info = " ".join(element.value for element in app.info)
-        assert "Nothing matched" in info
-        assert "ADR-003" in info
+        assert "not answers" not in rendered_text(app)
 
-    def test_an_api_failure_leaves_the_page_usable(self) -> None:
-        app = run(StubClient(fail="Could not reach the API"), query="credit risk")
+
+class TestTrace:
+    def test_without_a_query_it_says_so_rather_than_erroring(self) -> None:
+        app = run("trace")
 
         assert not app.exception
-        assert any("Could not reach the API" in e.value for e in app.error)
+        assert any("No query in this session" in element.value for element in app.info)
+
+    def test_with_a_query_it_shows_the_reordering(self) -> None:
+        app = run("trace", seeded={ask.RESULT_KEY: a_response()})
+
+        assert not app.exception
+        assert len(app.dataframe) >= 1
+
+
+class TestHonesty:
+    @pytest.mark.parametrize("name", VIEW_NAMES)
+    def test_no_internal_commentary_is_rendered_to_the_reader(self, name: str) -> None:
+        """Streamlit's magic renders bare top-level string literals as page content.
+
+        An attribute docstring in a page module is therefore published, which is how a
+        paragraph written for a maintainer ended up on the page. Pinned because the
+        mistake is invisible in review: the source looks like ordinary documentation.
+        """
+        text = rendered_text(run(name))
+
+        for giveaway in ("stable identifiers", "CLAUDE.md", "attribute docstring"):
+            assert giveaway not in text, f"{name} published maintainer text"
+
+    @pytest.mark.parametrize("name", PREVIEW_VIEWS)
+    def test_a_preview_page_says_its_data_is_a_fixture(self, name: str) -> None:
+        """The one genuinely misleading option here would be an unlabelled fixture."""
+        captions = " ".join(element.value for element in run(name).caption)
+
+        assert "not yet wired" in captions, f"{name} does not disclose its fixtures"
+
+    @pytest.mark.parametrize("name", PREVIEW_VIEWS)
+    def test_no_preview_page_names_a_real_issuer(self, name: str) -> None:
+        """A fabricated figure beside a real company's name is a fabricated record.
+
+        It stays fabricated once it is screenshotted out of context, which is why the
+        fixtures invent the issuer as well as the numbers.
+        """
+        text = rendered_text(run(name))
+
+        for real in ("Infosys", "HDFC", "Reliance", "TCS"):
+            assert real not in text, f"{name} names {real} beside fixture figures"

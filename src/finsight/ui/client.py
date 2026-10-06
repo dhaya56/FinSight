@@ -84,9 +84,7 @@ class ApiClient:
                 timeout=self.timeout,
             )
         except httpx.RequestError as error:
-            raise ApiError(
-                f"Could not reach the API at {self.base_url}: {error}"
-            ) from error
+            raise ApiError(f"Could not reach the API at {self.base_url}: {error}") from error
 
         if response.status_code == httpx.codes.UNAUTHORIZED:
             raise ApiError(
@@ -107,9 +105,7 @@ class ApiClient:
         UI rather than leaving one error to mean both.
         """
         try:
-            response = httpx.get(
-                f"{self.base_url.rstrip('/')}/health/ready", timeout=5.0
-            )
+            response = httpx.get(f"{self.base_url.rstrip('/')}/health/ready", timeout=5.0)
         except httpx.RequestError:
             return False
         return response.is_success
@@ -146,7 +142,6 @@ def client_from_environment() -> ApiClient:
             f"the authenticated API and has no other credentials."
         )
     return ApiClient(
-        base_url=os.environ.get(API_URL_VARIABLE, DEFAULT_API_URL).strip()
-        or DEFAULT_API_URL,
+        base_url=os.environ.get(API_URL_VARIABLE, DEFAULT_API_URL).strip() or DEFAULT_API_URL,
         token=token,
     )

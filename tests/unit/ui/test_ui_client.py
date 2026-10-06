@@ -68,9 +68,7 @@ class TestRequestShape:
         recorder = Recorder()
         monkeypatch.setattr(httpx, "post", recorder)
 
-        client.search(
-            "x", filters={"issuer_name": "", "section": None, "document_type": "10-K"}
-        )
+        client.search("x", filters={"issuer_name": "", "section": None, "document_type": "10-K"})
 
         sent = recorder.calls[0]["json"]
         assert "issuer_name" not in sent
@@ -149,6 +147,7 @@ class TestFailure:
         self, client: ApiClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Unauthenticated, so "server down" stays distinct from "token wrong"."""
+
         def refuse(url: str, **kwargs: Any) -> httpx.Response:
             raise httpx.ConnectError("refused")
 
@@ -170,17 +169,13 @@ class TestEnvironment:
 
         assert client_from_environment().base_url == DEFAULT_API_URL
 
-    def test_the_url_is_taken_from_the_environment(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_the_url_is_taken_from_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(API_TOKEN_VARIABLE, TOKEN)
         monkeypatch.setenv(API_URL_VARIABLE, "http://localhost:9000")
 
         assert client_from_environment().base_url == "http://localhost:9000"
 
-    def test_a_whitespace_only_token_is_refused(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_a_whitespace_only_token_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(API_TOKEN_VARIABLE, "   ")
 
         with pytest.raises(ApiError):

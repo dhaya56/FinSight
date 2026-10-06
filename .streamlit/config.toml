@@ -1,0 +1,26 @@
+# Streamlit presentation settings.
+#
+# Theme only. Nothing here is a secret and nothing here is application
+# configuration: the API address and token come from the environment, because
+# §28.12 keeps the UI's credentials out of files the repository tracks.
+#
+# A deliberate palette rather than the default, because the default theme reads as
+# "a Streamlit script" and this is a frontend. Switch base to "light" if a room's
+# projector handles it better; nothing else depends on the choice.
+
+[theme]
+base = "dark"
+primaryColor = "#6366f1"
+backgroundColor = "#0b0e14"
+secondaryBackgroundColor = "#141925"
+textColor = "#e6e9ef"
+font = "sans serif"
+
+[server]
+# Loopback only. The UI holds the API token server-side, so anything that can reach
+# this port can search the corpus without a credential of its own.
+address = "127.0.0.1"
+headless = true
+
+[browser]
+gatherUsageStats = false
