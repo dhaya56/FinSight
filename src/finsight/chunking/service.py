@@ -31,7 +31,7 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from finsight.chunking.chunker import chunk_blocks, mark_table_derived
+from finsight.chunking.chunker import chunk_blocks, region_containing
 from finsight.chunking.contracts import Chunk, ChunkingConfig, SourceBlock
 from finsight.chunking.tokens import TokenCounter, build_token_counter
 from finsight.domain.errors import DomainError
@@ -268,17 +268,25 @@ class ChunkingService:
         )
 
     def _as_source_block(self, block: NarrativeBlock) -> SourceBlock:
-        """Mark table overlap here, where page geometry is still available."""
+        """Resolve which table region a block sits in, where page geometry still is.
+
+        A block with no box resolves to no region rather than to an arbitrary one. That
+        is not merely defensive: a block without geometry cannot be shown to be inside
+        any table, and guessing would put prose into a table run.
+        """
         return SourceBlock(
             element_id=block.element_id,
             text=block.text,
             page_number=block.page_number,
             ordinal=block.ordinal,
-            table_derived=block.bbox is not None
-            and mark_table_derived(
-                block.bbox,
-                block.page_tables,
-                threshold=self._config.table_overlap,
+            region_id=(
+                region_containing(
+                    block.bbox,
+                    block.page_tables,
+                    threshold=self._config.table_overlap,
+                )
+                if block.bbox is not None
+                else None
             ),
         )
 

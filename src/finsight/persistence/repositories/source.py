@@ -62,7 +62,12 @@ class NarrativeBlock:
     page_number: int
     ordinal: int
     bbox: tuple[float, float, float, float] | None
-    page_tables: tuple[tuple[float, float, float, float], ...]
+    page_tables: tuple[tuple[UUID, tuple[float, float, float, float]], ...]
+    """Detected table regions on this block's page, as (identifier, box), by ordinal.
+
+    The identifier is carried because the chunker needs to tell one table from the next,
+    not merely whether a block is inside some table.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,8 +295,16 @@ class SourceRepository:
         while no detector bounds a table correctly, and footnotes belong to the
         table they annotate rather than to the running text.
 
-        Each row carries its page's table regions so the chunker's caller can mark
-        table-derived blocks (§18.4) without a second query per page.
+        Each row carries its page's table regions **with their identifiers** so the
+        chunker's caller can resolve which table a block belongs to (§18.4) without a
+        second query per page. Identifiers rather than boxes alone: the chunker needs to
+        know where one table's text ends, which a list of anonymous rectangles cannot say.
+
+        ``jsonb_agg`` is ordered by the region's ordinal, so the sequence a block is
+        matched against is the same on every run. Left unordered, aggregate order is
+        whatever the plan produced, and a tie between two equally overlapping regions
+        would resolve differently between runs — which the idempotency index would then
+        read as a changed document.
         """
         statement = sql_text(
             """
@@ -302,7 +315,11 @@ class SourceRepository:
                 WHERE extraction_run_id = :run_id AND element_type = 'page'
             ),
             regions AS (
-                SELECT parent_id, jsonb_agg(location->'bbox') AS boxes
+                SELECT parent_id,
+                       jsonb_agg(
+                           jsonb_build_object('id', id, 'bbox', location->'bbox')
+                           ORDER BY ordinal
+                       ) AS boxes
                 FROM source_elements
                 WHERE extraction_run_id = :run_id AND element_type = 'table'
                 GROUP BY parent_id
@@ -326,9 +343,7 @@ class SourceRepository:
                 page_number=row.page_number,
                 ordinal=index,
                 bbox=_box(row.bbox),
-                page_tables=tuple(
-                    box for box in (_box(raw) for raw in row.page_tables) if box
-                ),
+                page_tables=_regions(row.page_tables),
             )
             for index, row in enumerate(rows)
         ]
@@ -470,6 +485,36 @@ def _box(raw: object) -> tuple[float, float, float, float] | None:
     if not isinstance(raw, list) or len(raw) != 4:
         return None
     return (float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3]))
+
+
+def _regions(
+    raw: object,
+) -> tuple[tuple[UUID, tuple[float, float, float, float]], ...]:
+    """Read aggregated ``(id, bbox)`` region objects out of a JSONB array.
+
+    A region with an unreadable or absent box is dropped rather than carried as
+    ``None``: the only use for a region here is to test overlap against it, and a region
+    with no geometry can never match. Keeping it would mean every caller re-checking.
+
+    Defensive about the shape rather than trusting it, because ``location`` is JSONB with
+    no column constraint on its contents — a producer that stored a three-element box
+    would otherwise raise an IndexError inside a read that has no business failing.
+    """
+    if not isinstance(raw, list):
+        return ()
+    regions: list[tuple[UUID, tuple[float, float, float, float]]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        box = _box(entry.get("bbox"))
+        identifier = entry.get("id")
+        if box is None or not isinstance(identifier, str):
+            continue
+        try:
+            regions.append((UUID(identifier), box))
+        except ValueError:
+            continue
+    return tuple(regions)
 
 
 def count_elements(elements: Iterable[ExtractedElement]) -> int:

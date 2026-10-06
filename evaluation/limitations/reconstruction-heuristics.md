@@ -867,6 +867,44 @@ cut a real table in half with more confidence than the detector has earned. The
 honest state is: table text is searchable, fragmented, and marked
 `table_derived` so retrieval can treat it differently.
 
+#### Two fixes attempted and both rejected, on measurement (2026-10-06)
+
+`SourceBlock.region_id` was added so the chunker can tell one table from the next, which
+makes per-table grouping possible for the first time. Both forms were measured end to end
+against the stored corpus, with the region mapping held identical on both sides so the
+comparison is of chunking and not of classification:
+
+| | Baseline | Run per table | Child boundary per table |
+|---|---|---|---|
+| Children under the 48-token floor | 1,212 | **1,399** | 1,210 |
+| Regions split across chunks | 165 | **184** | 163 |
+| Regions split across parents | 11 | 11 | 11 |
+| Chunks holding two or more tables | 50 | — | 39 |
+
+**A run per table is actively harmful.** 803 regions become 803 runs, each taking its own
+parent window, and because merging across runs is refused a small table becomes a fragment
+that can never grow — 187 extra children below the floor, which is the §18 defect made
+worse. It also breaks a property §20.8 depends on: a table interleaved with prose lands
+under two parents, so expanding from one child recovers half the table.
+
+**A child boundary per table is harmless and not useful.** Two fewer split regions and
+eleven fewer mixed chunks, out of 1,254 chunks holding table text. Its sign is not
+consistent across documents — one of the three filings got worse on both counts — so at
+this corpus size it is noise, and a production path should not carry a threshold
+interaction for noise.
+
+**What the earlier arithmetic got wrong.** An estimate of 38 recoverable regions was
+derived by subtracting "regions currently in one chunk" from "regions whose blocks fit
+inside one child". Both figures came from a region mapping that no longer applied, and the
+end-to-end measurement puts the achievable gain at **2**. Separately, an initial claim that
+no region was split across parents came from a counter that was initialised and never
+incremented; the true baseline is 11.
+
+**128 of the 805 regions with text exceed the child budget outright** (median 734 tokens,
+max 3,801) and must divide under any grouping. That is the dominant cause of the 19% and no
+chunking rule reunites it. Fixing it means repeating the header on later pieces, which
+§14.4 forbids, or admitting a detector, which ADR-003 refuses.
+
 The **56 tables with no overlapping block** are a separate gap: a region the
 detector found that no narrative block sits inside above threshold. Their content
 exists as cells, which are not indexed, so those tables are not reachable at all.

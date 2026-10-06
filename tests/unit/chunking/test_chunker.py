@@ -19,7 +19,7 @@ import pytest
 from finsight.chunking.chunker import (
     CoverageError,
     chunk_blocks,
-    mark_table_derived,
+    region_containing,
     verify_coverage,
 )
 from finsight.chunking.contracts import (
@@ -39,13 +39,22 @@ def words(text: str) -> int:
 def block(
     text: str, *, page: int = 1, ordinal: int = 0, table: bool = False
 ) -> SourceBlock:
+    """A source block. ``table=True`` places it in one shared anonymous region.
+
+    Shared deliberately: most tests only care that a block is table-derived, and giving
+    each its own region would split every table run and change what they assert. Tests
+    about *which* table a block belongs to build their own regions explicitly.
+    """
     return SourceBlock(
         element_id=uuid.uuid4(),
         text=text,
         page_number=page,
         ordinal=ordinal,
-        table_derived=table,
+        region_id=_SHARED_REGION if table else None,
     )
+
+
+_SHARED_REGION = uuid.UUID("00000000-0000-4000-8000-00000000fa11")
 
 
 def blocks(*texts: str, page: int = 1) -> list[SourceBlock]:
@@ -428,15 +437,146 @@ class TestEvidenceType:
 
     def test_overlap_marking_requires_real_containment(self) -> None:
         outside = (0.0, 0.0, 10.0, 10.0)
-        region = (100.0, 100.0, 200.0, 200.0)
+        region = (uuid.uuid4(), (100.0, 100.0, 200.0, 200.0))
 
-        assert mark_table_derived(outside, [region], threshold=0.5) is False
+        assert region_containing(outside, [region], threshold=0.5) is None
 
-    def test_a_block_inside_a_region_is_marked(self) -> None:
+    def test_a_block_inside_a_region_resolves_to_it(self) -> None:
         inside = (110.0, 110.0, 120.0, 120.0)
-        region = (100.0, 100.0, 200.0, 200.0)
+        identifier = uuid.uuid4()
+        region = (identifier, (100.0, 100.0, 200.0, 200.0))
 
-        assert mark_table_derived(inside, [region], threshold=0.5) is True
+        assert region_containing(inside, [region], threshold=0.5) == identifier
+
+    def test_no_regions_resolves_to_nothing(self) -> None:
+        assert region_containing((0.0, 0.0, 1.0, 1.0), [], threshold=0.5) is None
+
+    def test_the_greatest_overlap_wins_not_the_first(self) -> None:
+        """Emission order must not decide a block's table.
+
+        The block lies wholly inside the second region and only partly inside the first.
+        An ``any(...)`` test would have taken the first and been wrong.
+        """
+        block_box = (100.0, 100.0, 110.0, 110.0)
+        partial = (uuid.uuid4(), (105.0, 105.0, 300.0, 300.0))
+        full = (uuid.uuid4(), (90.0, 90.0, 200.0, 200.0))
+
+        assert region_containing(block_box, [partial, full], threshold=0.1) == full[0]
+
+    def test_a_nested_region_wins_over_its_container(self) -> None:
+        """Both contain the block fully, so the more specific answer is the smaller."""
+        block_box = (110.0, 110.0, 120.0, 120.0)
+        outer = (uuid.uuid4(), (100.0, 100.0, 400.0, 400.0))
+        inner = (uuid.uuid4(), (105.0, 105.0, 130.0, 130.0))
+
+        assert region_containing(block_box, [outer, inner], threshold=0.5) == inner[0]
+
+    def test_identical_regions_resolve_deterministically(self) -> None:
+        """Chunking must reproduce, or the idempotency index misreads a repeat run."""
+        block_box = (110.0, 110.0, 120.0, 120.0)
+        box = (100.0, 100.0, 200.0, 200.0)
+        first, second = (uuid.uuid4(), box), (uuid.uuid4(), box)
+
+        forward = region_containing(block_box, [first, second], threshold=0.5)
+        backward = region_containing(block_box, [second, first], threshold=0.5)
+
+        assert forward == backward
+
+    def test_a_threshold_is_exclusive(self) -> None:
+        """Exactly at the threshold does not qualify, as the original did not."""
+        block_box = (100.0, 100.0, 110.0, 110.0)
+        half = (uuid.uuid4(), (100.0, 100.0, 105.0, 110.0))
+
+        assert region_containing(block_box, [half], threshold=0.5) is None
+
+    def test_a_degenerate_region_is_not_matched(self) -> None:
+        """A zero-area box from a producer that emitted a collapsed rectangle."""
+        block_box = (100.0, 100.0, 110.0, 110.0)
+        empty = (uuid.uuid4(), (105.0, 105.0, 105.0, 105.0))
+
+        assert region_containing(block_box, [empty], threshold=0.5) is None
+
+
+class TestTableRuns:
+    """Runs are grouped by evidence type, not by table, and that is deliberate.
+
+    ``region_id`` exists so a footnote can be placed after its own table, not so runs can
+    be split per table. Both per-table groupings were measured on the corpus and rejected
+    — see ``_runs`` for the figures — so these tests pin the behaviour that was kept,
+    including the two cases a per-table grouping would have broken.
+    """
+
+    def table_block(self, text: str, region: uuid.UUID, ordinal: int) -> SourceBlock:
+        return SourceBlock(
+            element_id=uuid.uuid4(),
+            text=text,
+            page_number=1,
+            ordinal=ordinal,
+            region_id=region,
+        )
+
+    def test_adjacent_tables_share_a_run(self) -> None:
+        """Rejected alternative, pinned: splitting here fragmented 187 extra children."""
+        first, second = uuid.uuid4(), uuid.uuid4()
+        source = [
+            self.table_block("alpha one", first, 0),
+            self.table_block("beta two", second, 1),
+        ]
+
+        result = chunk_blocks(source, config=SMALL, count_tokens=words)
+
+        assert len(children(result)) == 1
+
+    def test_a_small_table_can_still_grow_by_merging(self) -> None:
+        """The property a per-table run destroys: a fragment with nothing to join."""
+        first, second = uuid.uuid4(), uuid.uuid4()
+        source = [
+            self.table_block("one", first, 0),
+            self.table_block("two", second, 1),
+            self.table_block("three", second, 2),
+        ]
+
+        result = chunk_blocks(source, config=SMALL, count_tokens=words)
+
+        assert all(chunk.token_count >= 3 for chunk in children(result))
+
+    def test_an_oversize_table_splits_but_stays_under_one_parent(self) -> None:
+        """§20.8 must still recover the whole table. 128 regions rely on this."""
+        region = uuid.uuid4()
+        source = [self.table_block("word " * 9, region, i) for i in range(4)]
+
+        result = chunk_blocks(source, config=SMALL, count_tokens=words)
+
+        kids = children(result)
+        assert len(kids) > 1
+        assert len({chunk.parent_index for chunk in kids}) == 1
+
+    def test_prose_still_forms_one_run(self) -> None:
+        """Narrative carries no region, so nothing about the prose path changes."""
+        source = blocks("alpha", "beta", "gamma")
+
+        result = chunk_blocks(source, config=SMALL, count_tokens=words)
+
+        assert len(children(result)) == 1
+
+    def test_prose_between_table_halves_still_separates_them(self) -> None:
+        """A type change is a run boundary, so adjacency is never fabricated across it.
+
+        This holds independently of ``region_id`` — it is ``_emit_section``'s existing
+        guarantee — and is pinned here because a table interleaved with prose is the case
+        that made a per-table run grouping break §20.8 recovery.
+        """
+        region = uuid.uuid4()
+        source = [
+            self.table_block("first half", region, 0),
+            block("intervening prose", ordinal=1),
+            self.table_block("second half", region, 2),
+        ]
+
+        result = chunk_blocks(source, config=SMALL, count_tokens=words)
+
+        texts = [chunk.text for chunk in children(result)]
+        assert not any("first half" in t and "second half" in t for t in texts)
 
 
 class TestParents:

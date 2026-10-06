@@ -38,8 +38,9 @@ class SourceBlock:
     built from. A chunk can only do that once the regions have identities, so
     chunking reads what was stored rather than what was produced.
 
-    ``table_derived`` is decided by the caller, which is the layer that still has
-    page geometry. Keeping it a flag here leaves the chunker free of coordinates.
+    ``region_id`` is decided by the caller, which is the layer that still has page
+    geometry. Keeping it an identifier here leaves the chunker free of coordinates while
+    telling it something a boolean could not: *which* table a block belongs to.
     """
 
     element_id: UUID
@@ -48,7 +49,33 @@ class SourceBlock:
     ordinal: int
     """Position in document order across the whole document, not within a page."""
 
-    table_derived: bool = False
+    region_id: UUID | None = None
+    """The detected table region this block lies inside, or ``None`` for prose.
+
+    **An identifier rather than a flag, and the difference is measurable.** With a
+    boolean, consecutive blocks from two different tables form one run, so accumulation
+    fills to the child budget and a boundary lands inside the second table. Measured on
+    the development corpus, 38 of 805 regions were split across chunks *despite fitting
+    within one child* — split only because they shared a run with their neighbour.
+
+    It also answers a question a flag cannot: where a table's text ends. That is what
+    lets a footnote be placed immediately after its own table rather than at the end of
+    the page, which keeps its heading path the one its table sits under.
+
+    The remaining 128 split regions exceed the child budget outright (median 734 tokens,
+    max 3,801) and must divide. All of their pieces already share one parent, so §20.8
+    expansion recovers the whole table; that is not a defect and this does not change it.
+    """
+
+    @property
+    def table_derived(self) -> bool:
+        """Whether this block lies inside a detected table region.
+
+        Kept as the name the rest of the chunker reads, because the question it asks —
+        "may this share a chunk with prose?" — is still a yes or no. §18.4's separation
+        is by *type*; ``region_id`` adds identity on top of it rather than replacing it.
+        """
+        return self.region_id is not None
 
 
 @dataclass(frozen=True, slots=True)

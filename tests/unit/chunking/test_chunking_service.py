@@ -36,7 +36,7 @@ def block(
     ordinal: int = 0,
     page: int = 1,
     bbox: tuple[float, float, float, float] | None = (0.0, 0.0, 10.0, 10.0),
-    tables: tuple[tuple[float, float, float, float], ...] = (),
+    tables: tuple[tuple[UUID, tuple[float, float, float, float]], ...] = (),
 ) -> NarrativeBlock:
     return NarrativeBlock(
         element_id=uuid.uuid4(),
@@ -129,7 +129,7 @@ class TestChunking:
                     "ROW DATA",
                     ordinal=1,
                     bbox=(100.0, 100.0, 110.0, 110.0),
-                    tables=((90.0, 90.0, 200.0, 200.0),),
+                    tables=((uuid.uuid4(), (90.0, 90.0, 200.0, 200.0)),),
                 ),
             ]
         )
@@ -142,7 +142,13 @@ class TestChunking:
     def test_a_block_without_geometry_is_not_marked(self) -> None:
         """A missing bbox is unknown position, not "inside a table"."""
         recorder = FakeRecorder(
-            blocks=[block("Text", bbox=None, tables=((0.0, 0.0, 999.0, 999.0),))]
+            blocks=[
+                block(
+                    "Text",
+                    bbox=None,
+                    tables=((uuid.uuid4(), (0.0, 0.0, 999.0, 999.0)),),
+                )
+            ]
         )
 
         service(recorder).chunk(uuid.uuid4())
