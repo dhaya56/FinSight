@@ -169,6 +169,32 @@ class GenerationRepository:
             .values(state=STATE_SHADOW, activated_at=None)
         )
 
+    def prunable_ids(self, *, include_failed: bool = False) -> list[UUID]:
+        """Generations whose index points are safe to remove, newest first.
+
+        **Superseded only by default, and the exclusions are the substance.** A shadow
+        generation may be mid-build right now and its points are the work in progress; an
+        active one is being served. Both are selected *out* by naming the states that may
+        go, never by naming the states that may not — an inverted predicate turns a
+        missing state constant into "prune everything".
+
+        ``include_failed`` is opt-in because a failed generation is retryable through
+        ``index --retry``: removing its points is harmless, since the point identifiers are
+        derived (§29.9) and a retry rewrites them, but it discards work that a retry would
+        otherwise skip. Deliberate, not habitual.
+
+        Returns identifiers only. The caller removes points from the derived index; nothing
+        here deletes a row, because PostgreSQL holds the audit trail a superseded generation
+        exists for, and §29.12 reserves removal for tombstoning.
+        """
+        states = [STATE_SUPERSEDED, *( [STATE_FAILED] if include_failed else [] )]
+        rows = self._session.execute(
+            select(Generation.id)
+            .where(Generation.state.in_(states))
+            .order_by(Generation.id.desc())
+        )
+        return list(rows.scalars().all())
+
     def for_configuration(
         self,
         *,

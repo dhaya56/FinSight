@@ -27,8 +27,8 @@ measured against, and the retrieval path: structure-aware chunking, local embedd
 carrying dense and BM25 sparse vectors, hybrid retrieval under hard metadata filters, reciprocal
 rank fusion, and cross-encoder reranking.
 
-The development corpus is indexed end to end: **1,403 pages → 40,476 blocks → 5,759 chunks → 4,969
-indexed vectors** across three filings.
+The development corpus is indexed end to end: **1,403 pages → 40,476 blocks → 5,637 chunks → 4,867
+indexed vectors** across three filings, under chunking configuration 4.
 
 Intake has no HTTP route yet. PROJECT_BLUEPRINT.md §28.2 requires authentication on every
 non-health route, so upload is exposed in the authentication phase. Extraction, chunking, indexing
@@ -125,16 +125,23 @@ judgement, not a metric.
 | 2 | **Multi-column reading order is positional.** A column-aware ordering would differ on **195 of 1,403 pages (14%)**, and interleaved chunks read as prose while being two columns spliced together | 14% of pages, verbatim example | register §16 |
 | 3 | **Dense retrieval is nearly blind to which number a sentence states.** `1,234.56 crore` against `4,321.65 crore` scores **0.9863**; changing the fiscal year moves the vector *less* than changing the metric | cosine table | register §21 |
 | 4 | **An acronym cannot reach its own expansion.** Zero shared lexemes for all seven pairs tested, dense cosine 0.52–0.64. "PAT" reaches 8 chunks where "profit after tax" reaches 229 | 7 pairs, corpus counts | register §21 |
-| 5 | **19% of detected tables have their text split across chunks**, one across 25, so a header row and its figures can land apart | 166 of 861 tables | register §20 |
+| 5 | **19% of detected tables have their text split across chunks**, one across 25, so a header row and its figures can land apart. **128 of those 166 are unavoidable** — the table exceeds the child budget outright (median 734 tokens, max 3,801) and no chunking rule reunites it. Two attempts at the remainder were measured and rejected | 166 of 861; achievable gain measured at 2 | register §20 |
 | 6 | **24% of children are under the stated size floor**, 427 under 10 tokens, the smallest a single word | 1,212 of 4,969 | register §18 |
 | 7 | **Reranking is 93% of query latency** — 2,273 ms median against 175 ms with it off. §23.4's FlashRank trigger is live | per-token scaling table | ADR-006, ENV-010 |
-| 8 | **5.7% of the index is near-letterless**, including 384-token chunks of nothing but dot leaders | 282 of 4,969 | register §14 |
-| 9 | **Footnotes are extracted and unreachable.** 36 exist; `footnote_refs` resolves to nothing and footnotes are not indexed | — | register §22 |
+| 8 | **Fixed and verified.** Chunks that were up to 91% dot leaders outranked the sections they point at. Leader lines are now withheld: **zero** dot-dominated chunks remain, and the two probes that returned a table of contents at rank 1 now return the section itself | 78 children and 13 parents over 80% dots → 0; max dot share in results 0.84 → 0.02 | ADR-007, ENV-011 |
+| 9 | **A footnote cannot be reached from the figure it qualifies.** The text is searchable — 34 of 36 bound footnotes are already in the index via the blocks they were read from — but `footnote_refs` resolves to nothing, so a retrieved figure never carries its own exclusion. Indexing the footnote elements would only duplicate text already present | 36 of 36 also stored as blocks, 34 findable | register §24 |
 | 10 | **Consensus outranks exclusivity at every rank** while the fusion constant is 60, so a chunk both retrievers agree on beats one either ranked first alone | crossover arithmetic | ENV-010 |
+| 11 | **A superscript footnote marker is stored as part of the number it annotates.** `get_text("blocks")` discards font size, so `145,000` with a superscript 1 becomes `145,0001`. Three cases in the development split, all glued, one turning a three-digit figure into a four-digit one. A floor, not a count | 3 of 3 glued, 0 separated | register §23 |
 
 Three more that are deliberate rather than defective: table cells are excluded from retrieval
 (ADR-003), QueryTrace is **not persisted** so §31.9 is unsatisfied, and no query planner derives
 §20.2's filters from a question — they are CLI flags.
+
+Problems 1, 3, 4, 7 and 10 are **blocked on evidence rather than effort**: each has a realistic
+alternative, and §8 requires recorded evidence plus approval to choose one. With no golden
+question set there is no way to show a fix helps, so they wait on §22.6. Problems 2, 6 and 11
+share a cause in the producer — `get_text("blocks")` discards the geometry and font information
+all three would need — so they belong to one extraction change, not three.
 
 ### The extraction architecture
 
@@ -329,7 +336,30 @@ one is indexed and reconciled**, so a re-index is background work rather than do
 
 Ollama must be running on the host. If it is not, the events stay `pending`, the new generation stays
 `shadow`, the previously active one stays queryable, and `corpus index` resumes with no flag — a path
-exercised by a real outage, not only by a test.
+exercised by a real outage, not only by a test. **Ollama appearing in the process list is not the
+same as Ollama serving**; the check that matters is an API call, which is what the indexer makes.
+
+### Pruning superseded points
+
+Activation does not remove the previous generation's vectors, so a re-chunk doubles the collection.
+After the first one: 9,836 points, of which 4,969 belonged to a superseded generation and could never
+be returned, because retrieval binds every search to the active generations.
+
+```cmd
+python -m finsight.cli.main prune
+python -m finsight.cli.main prune --confirm
+```
+
+Without `--confirm` it reports and changes nothing — the default, because rebuilding costs a 40-minute
+re-index. Measured on the first run: **4,969 removed, 4,867 remaining, active points 4,867 before and
+after**. That last figure is asserted, not merely printed: a prune that changed the active count
+raises rather than reporting success.
+
+This is the only destructive command in the project and it touches **only the derived index**. §29.2
+makes Qdrant rebuildable from PostgreSQL, so a wrong prune costs time rather than evidence.
+PostgreSQL keeps every superseded row — that is the audit trail the generation exists for, and §29.12
+reserves removal for tombstoning. `--include-failed` is opt-in, because a failed generation is
+retryable with `index --retry` and pruning it discards work a retry would skip.
 
 ### Searching
 

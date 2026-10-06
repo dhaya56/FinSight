@@ -67,6 +67,15 @@ _JOIN: Final = "\n"
 """How blocks are joined. A newline, because that is the boundary the document drew
 and collapsing it to a space would merge a heading into the line beneath it."""
 
+_LEADER_RUN: Final = re.compile(r"[._]{10,}")
+"""Ten or more consecutive dots or underscores: a typographic leader, not language.
+
+Ten rather than three, because an ellipsis is three and a decimal run is none. The
+shortest real leader measured in this corpus is far longer than ten.
+"""
+
+_LEADER_CHARS: Final = frozenset("._")
+
 
 class CoverageError(RuntimeError):
     """A block was lost or duplicated. Raised rather than returned.
@@ -104,9 +113,19 @@ def chunk_blocks(
     leak, and the test has to be this one: PostgreSQL's ``btrim`` defaults to
     trimming spaces only, so a SQL check for lost content calls a block of newlines
     non-empty and reports 1,557 losses that do not exist.
+
+    **Typographic leader lines are also dropped**, which is a narrower filter and a
+    larger decision: it withholds real text from the index rather than discarding
+    whitespace. 129 blocks across the three filings, 29,838 characters of 4,723,181.
+    See :func:`_is_retrievable` for the measurement and ADR-007 for the §7 deviation.
+
+    Every block is accounted for: of 40,476 blocks carrying text, 1,557 are whitespace,
+    129 are leader lines, and 38,790 reach a chunk. The three sum exactly, which is the
+    check that matters — a reduction in chunk count is expected here, but a block that
+    stops reaching any chunk would not be.
     """
     settings = config or ChunkingConfig()
-    usable = [block for block in blocks if block.text.strip()]
+    usable = [block for block in blocks if _is_retrievable(block.text, settings)]
     if not usable:
         return ()
     _require_document_order(usable)
@@ -115,6 +134,59 @@ def chunk_blocks(
     verify_coverage(usable, chunks)
     verify_parents(chunks)
     return chunks
+
+
+def _is_retrievable(text: str, config: ChunkingConfig) -> bool:
+    """Whether a block should become retrieval text at all.
+
+    Two exclusions, both of which discard the block from the *index* while leaving it
+    untouched in the source representation — verbatim, citable, with its coordinates.
+
+    **Whitespace.** Nothing to retrieve, and a chunk of it violates ``text_not_blank``.
+
+    **Typographic leaders.** A table-of-contents line is a leader run with a section
+    name attached, and indexing one is measurably harmful rather than merely untidy.
+    Measured on the development corpus, 78 of 4,969 children and 13 of 790 parents are
+    over 80% dots — the worst a 1,515-token parent at 91% — and they carry just enough
+    lexemes to compete: 5 on average against 60 for a normal child. Because BM25
+    normalises by document length and these are very short in indexed terms, they are
+    *advantaged*. Probed with six section-name queries, two returned a contents line at
+    **rank 1**, pushing the section it points at to ranks 3 and below:
+
+        'basis of preparation of financial statements'
+          1. 1.2 Basis of preparation of financial statemen......  (84% dots)
+          3. 1.2 Basis of preparation of financial statements ...   (the actual section)
+
+    A contents line is an index *of* the document, so it matches a section-name query
+    almost perfectly while containing none of the answer. That is the failure: not noise,
+    but a near-perfect match that is never the answer.
+
+    **This deviates from §7's "keep all extracted content searchable", and ADR-007
+    records it.** What is lost is the section-to-page mapping, for 129 blocks across
+    three filings. What is not lost: the sections themselves stay findable — in both
+    displacement cases above the real content was already being retrieved behind the
+    contents line, so excluding it promotes rather than hides. §7's preservation
+    requirements are untouched; only the retrieval clause is.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if _LEADER_RUN.search(stripped) is None:
+        return True
+    return _leader_share(stripped) < config.leader_share_floor
+
+
+def _leader_share(text: str) -> float:
+    """Share of non-whitespace characters that are leader characters.
+
+    Over non-whitespace rather than the whole string, so the indentation a contents line
+    carries cannot dilute its own measurement.
+    """
+    solid = [character for character in text if not character.isspace()]
+    if not solid:
+        return 0.0
+    leaders = sum(1 for character in solid if character in _LEADER_CHARS)
+    return leaders / len(solid)
 
 
 def _require_document_order(blocks: Sequence[SourceBlock]) -> None:
@@ -140,21 +212,47 @@ def _require_document_order(blocks: Sequence[SourceBlock]) -> None:
         )
 
 
-def mark_table_derived(
+def region_containing(
     box: tuple[float, float, float, float],
-    regions: Sequence[tuple[float, float, float, float]],
+    regions: Sequence[tuple[UUID, tuple[float, float, float, float]]],
     *,
     threshold: float,
-) -> bool:
-    """Whether a block lies inside a detected table region.
+) -> UUID | None:
+    """Which detected table region a block lies inside, or ``None``.
 
     Separate from the chunker because it needs page geometry, which the chunker
     deliberately does not see. Measured on a development filing, 6% of blocks fall
     inside a region the detector found — and the CSR committee table on page 60
-    does not, because the detector missed it entirely. The flag therefore marks
-    what was *detected*, never what is a table.
+    does not, because the detector missed it entirely. This reports what was
+    *detected*, never what is a table.
+
+    **The region with the greatest overlap wins, not the first one found.** Regions can
+    overlap each other — a detector proposing a table and a nested sub-table produces
+    two boxes over the same ink — and the previous ``any(...)`` form took whichever came
+    first in page order. That made a block's region depend on the detector's emission
+    order rather than on geometry, so the same page could classify differently after an
+    unrelated detector change, silently moving chunk boundaries.
+
+    **A tie goes to the smaller region**, which matters for the nested case: a block
+    inside a sub-table lies equally inside its parent table, both at an overlap of 1.0,
+    and the sub-table is the more specific answer. The region identifier breaks a
+    remaining tie so the result is fully deterministic — reachable when two boxes have
+    identical area over identical ink, and required because chunking must reproduce for
+    the idempotency index to mean anything.
     """
-    return any(_overlap(box, region) > threshold for region in regions)
+    candidates = [
+        (_overlap(box, region), -_area(region), region_id)
+        for region_id, region in regions
+    ]
+    qualifying = [candidate for candidate in candidates if candidate[0] > threshold]
+    if not qualifying:
+        return None
+    # Greatest overlap, then smallest area (negated above), then the identifier.
+    return max(qualifying)[2]
+
+
+def _area(region: tuple[float, float, float, float]) -> float:
+    return max(region[2] - region[0], 0.0) * max(region[3] - region[1], 0.0)
 
 
 def _overlap(box: tuple[float, ...], region: tuple[float, ...]) -> float:
@@ -239,7 +337,37 @@ def _emit_section(
 def _runs(
     section: Sequence[SourceBlock],
 ) -> list[tuple[EvidenceType, list[SourceBlock]]]:
-    """Split a section into maximal runs of consecutive same-type blocks."""
+    """Split a section into maximal runs of consecutive same-type blocks.
+
+    **Runs are grouped by type and not by table, and two attempts to change that were
+    measured and rejected.** ``SourceBlock.region_id`` makes grouping per table possible,
+    and the recorded defect — 19% of detected tables have text split across chunks —
+    makes it look obviously worth doing. Both forms were measured end to end against the
+    stored corpus, with the region mapping held identical on both sides:
+
+    | | Baseline | Run per table | Child boundary per table |
+    |---|---|---|---|
+    | Children under the 48-token floor | 1,212 | **1,399** | 1,210 |
+    | Regions split across chunks | 165 | **184** | 163 |
+    | Regions split across parents | 11 | 11 | 11 |
+    | Chunks holding two or more tables | 50 | — | 39 |
+
+    A run per table is clearly harmful: 803 regions become 803 runs, each taking its own
+    parent window, and because merging across runs is refused (see ``child_min_tokens``) a
+    small table becomes a fragment that can never grow. It also breaks a property §20.8
+    depends on — a table interleaved with prose lands under two parents, so expanding from
+    one recovers half the table.
+
+    A child boundary per table is harmless but not useful: 2 fewer split regions and 11
+    fewer mixed chunks out of 1,254 that hold table text. Its sign is not even consistent
+    across documents — one of the three filings got worse on both counts — so at this
+    corpus size it is noise, and a production path does not carry a threshold interaction
+    for noise.
+
+    The 128 regions that genuinely exceed the child budget (median 734 tokens, max 3,801)
+    must divide whatever the grouping, and no grouping reunites them. Recorded in the
+    limitation register rather than fixed here.
+    """
     grouped: list[tuple[EvidenceType, list[SourceBlock]]] = []
     for unit in section:
         kind = (
@@ -666,11 +794,17 @@ def _split_word(
 
 
 def _piece(unit: SourceBlock, text: str) -> SourceBlock:
+    """A slice of one block, keeping its identity, position and table.
+
+    ``region_id`` is carried so every piece of a split table block stays in the same run
+    as its siblings. Dropping it would make the second piece look like prose and split
+    the table at the one point the split was meant to be invisible.
+    """
     return SourceBlock(
         element_id=unit.element_id,
         text=text,
         page_number=unit.page_number,
-        table_derived=unit.table_derived,
+        region_id=unit.region_id,
         ordinal=unit.ordinal,
     )
 

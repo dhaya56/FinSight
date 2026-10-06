@@ -40,6 +40,7 @@ from finsight.corpus.store import CorpusStore, digest_of, media_type_for
 from finsight.domain.errors import DomainError
 from finsight.embedding.port import EmbeddingError
 from finsight.extraction.service import build_extraction_service
+from finsight.indexing.pruning import REBUILD_HINT, build_pruning_service
 from finsight.indexing.service import build_indexing_service
 from finsight.object_store.port import ObjectStoreError
 from finsight.persistence.repositories.source import ElementCounts
@@ -99,6 +100,29 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     index.set_defaults(handler=run_index)
+
+    prune = subcommands.add_parser(
+        "prune",
+        help="Remove index points of generations no reader can see.",
+    )
+    prune.add_argument(
+        "--confirm",
+        action="store_true",
+        help=(
+            "Actually remove the points. Without this the command reports what it "
+            "would remove and changes nothing."
+        ),
+    )
+    prune.add_argument(
+        "--include-failed",
+        action="store_true",
+        help=(
+            "Also remove points of failed generations. Opt-in: a failed generation "
+            "is retryable with 'index --retry', and this discards work a retry "
+            "would otherwise skip."
+        ),
+    )
+    prune.set_defaults(handler=run_prune)
 
     _add_search_command(subcommands)
     _add_corpus_commands(subcommands)
@@ -581,6 +605,45 @@ def run_index(args: argparse.Namespace) -> int:
     if result.already_complete:
         print("  note:       every chunk was already indexed by an earlier run")
     print(f"  activated:  {result.activated}")
+    return EXIT_OK
+
+
+def run_prune(args: argparse.Namespace) -> int:
+    """Report, and on ``--confirm`` remove, index points no reader can see.
+
+    Prints the active totals alongside the prunable ones, because the number that
+    matters to a reader deciding whether this is safe is the one that must *not*
+    change. A report showing 4,867 active before and after is the assurance; the
+    count removed is only the saving.
+    """
+    service = build_pruning_service()
+    report = service.prune(
+        include_failed=args.include_failed, confirm=args.confirm
+    )
+
+    print(f"generations prunable: {len(report.prunable)}")
+    print(f"generations active:   {len(report.active)}")
+    print(f"points in collection: {report.points_total_before}")
+    print(f"  of which prunable:  {report.points_prunable}")
+    print(f"  of which active:    {report.points_active_before}")
+
+    if not report.prunable:
+        print("nothing to prune")
+        return EXIT_OK
+
+    if not report.applied:
+        print()
+        print("reported only; nothing was removed. Pass --confirm to remove.")
+        print(f"note: {REBUILD_HINT}")
+        return EXIT_OK
+
+    print()
+    print(f"removed:              {report.removed}")
+    print(f"points remaining:     {report.points_total_after}")
+    print(
+        f"active points:        {report.points_active_before} before, "
+        f"{report.points_active_after} after"
+    )
     return EXIT_OK
 
 

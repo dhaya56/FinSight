@@ -31,7 +31,7 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from finsight.chunking.chunker import chunk_blocks, mark_table_derived
+from finsight.chunking.chunker import chunk_blocks, region_containing
 from finsight.chunking.contracts import Chunk, ChunkingConfig, SourceBlock
 from finsight.chunking.tokens import TokenCounter, build_token_counter
 from finsight.domain.errors import DomainError
@@ -41,7 +41,7 @@ from finsight.persistence.repositories.generations import GenerationRepository
 from finsight.persistence.repositories.source import NarrativeBlock, SourceRepository
 from finsight.persistence.tables.documents import DocumentVersion
 
-CHUNKING_CONFIG_VERSION: Final = "3"
+CHUNKING_CONFIG_VERSION: Final = "4"
 """Bump when any value in :class:`ChunkingConfig` changes, or when the chunker's
 output changes shape for the same values.
 
@@ -52,6 +52,11 @@ Bumped to "2" when parents became windows that contain their children. No
 configuration value moved; the *output* did — a long run now yields several parents
 instead of one truncated one — and the index cannot tell those apart by
 configuration alone.
+
+Bumped to "4" when typographic leader lines stopped being indexed. Fewer blocks are
+admitted, so chunk boundaries move corpus-wide and the populations are not comparable:
+a config-3 chunk and a config-4 chunk over the same section are different text. ADR-007
+carries the measurement and the §7 deviation.
 
 Bumped to "3" when comma-grouped figures began being joined before analysis, which
 changes every chunk's ``lexemes``. §9.7 already states the consequence of changing
@@ -263,17 +268,25 @@ class ChunkingService:
         )
 
     def _as_source_block(self, block: NarrativeBlock) -> SourceBlock:
-        """Mark table overlap here, where page geometry is still available."""
+        """Resolve which table region a block sits in, where page geometry still is.
+
+        A block with no box resolves to no region rather than to an arbitrary one. That
+        is not merely defensive: a block without geometry cannot be shown to be inside
+        any table, and guessing would put prose into a table run.
+        """
         return SourceBlock(
             element_id=block.element_id,
             text=block.text,
             page_number=block.page_number,
             ordinal=block.ordinal,
-            table_derived=block.bbox is not None
-            and mark_table_derived(
-                block.bbox,
-                block.page_tables,
-                threshold=self._config.table_overlap,
+            region_id=(
+                region_containing(
+                    block.bbox,
+                    block.page_tables,
+                    threshold=self._config.table_overlap,
+                )
+                if block.bbox is not None
+                else None
             ),
         )
 

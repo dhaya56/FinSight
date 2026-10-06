@@ -38,8 +38,9 @@ class SourceBlock:
     built from. A chunk can only do that once the regions have identities, so
     chunking reads what was stored rather than what was produced.
 
-    ``table_derived`` is decided by the caller, which is the layer that still has
-    page geometry. Keeping it a flag here leaves the chunker free of coordinates.
+    ``region_id`` is decided by the caller, which is the layer that still has page
+    geometry. Keeping it an identifier here leaves the chunker free of coordinates while
+    telling it something a boolean could not: *which* table a block belongs to.
     """
 
     element_id: UUID
@@ -48,7 +49,33 @@ class SourceBlock:
     ordinal: int
     """Position in document order across the whole document, not within a page."""
 
-    table_derived: bool = False
+    region_id: UUID | None = None
+    """The detected table region this block lies inside, or ``None`` for prose.
+
+    **An identifier rather than a flag, and the difference is measurable.** With a
+    boolean, consecutive blocks from two different tables form one run, so accumulation
+    fills to the child budget and a boundary lands inside the second table. Measured on
+    the development corpus, 38 of 805 regions were split across chunks *despite fitting
+    within one child* — split only because they shared a run with their neighbour.
+
+    It also answers a question a flag cannot: where a table's text ends. That is what
+    lets a footnote be placed immediately after its own table rather than at the end of
+    the page, which keeps its heading path the one its table sits under.
+
+    The remaining 128 split regions exceed the child budget outright (median 734 tokens,
+    max 3,801) and must divide. All of their pieces already share one parent, so §20.8
+    expansion recovers the whole table; that is not a defect and this does not change it.
+    """
+
+    @property
+    def table_derived(self) -> bool:
+        """Whether this block lies inside a detected table region.
+
+        Kept as the name the rest of the chunker reads, because the question it asks —
+        "may this share a chunk with prose?" — is still a yes or no. §18.4's separation
+        is by *type*; ``region_id`` adds identity on top of it rather than replacing it.
+        """
+        return self.region_id is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +159,33 @@ class ChunkingConfig:
     table_overlap: float = 0.5
     """Share of a block's area inside a table region before it counts as
     table-derived. Unmeasured."""
+
+    leader_share_floor: float = 0.30
+    """Leader-character share above which a block carrying a leader run is excluded.
+
+    **MEASURED, and the number is doing real work.** A rule keyed only on "contains a
+    run of ten or more ``.`` or ``_``" also catches a signature line —
+    ``_____ Signed for and on behalf of ...`` — which carries content worth retrieving.
+    Measured over the development corpus, the two populations separate cleanly:
+
+    | Population                          | Leader share            |
+    |-------------------------------------|-------------------------|
+    | Table-of-contents lines (the target)| p05 0.384, median 0.852, max 0.960 |
+    | Signature lines (must be kept)      | 0.234 to 0.236          |
+
+    0.30 sits in the sparse gap between them, so all three signature blocks survive and
+    every contents line is caught. The share is computed over non-whitespace characters.
+
+    **Both conditions are required, and neither is sufficient.** The run alone catches
+    signature lines; the share alone catches dense decimal text, because ``.`` is also a
+    decimal point — blocks of dense figures routinely exceed this share with no leader run
+    at all, and a share-only rule would delete a totals row.
+
+    Of the 40,476 blocks the active runs hold, 132 carry a leader run and 129 cross this
+    floor. ADR-007 carries the measurement, and a correction: those counts first read
+    double, because they were taken over every stored extraction run rather than the one
+    per document that chunking reads.
+    """
 
 
 @dataclass(frozen=True, slots=True)
