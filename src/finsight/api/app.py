@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from finsight import __version__
-from finsight.api.routes import health, search
+from finsight.api.routes import ask, health, search
 from finsight.persistence.database import dispose_engine
 
 
@@ -34,7 +34,8 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(health.router)
-    # Authenticated (§28.2). The dependency lives on the router itself, so every
+    # Authenticated (§28.2). The dependency lives on each router itself, so every
     # route it carries is covered without each one having to remember.
     app.include_router(search.router)
+    app.include_router(ask.router)
     return app

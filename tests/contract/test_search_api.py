@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from finsight.api.app import create_app
-from finsight.api.routes.search import get_pipeline
+from finsight.api.dependencies import get_pipeline
 from finsight.config.settings import Settings, get_settings
 from finsight.persistence.repositories.chunks import Citation
 from finsight.retrieval.contracts import DEGRADED_DENSE_UNAVAILABLE, RetrievalFilters
