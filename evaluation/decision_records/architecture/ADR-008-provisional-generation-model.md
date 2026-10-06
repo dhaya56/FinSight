@@ -85,10 +85,11 @@ not a budget.
   output across runs.
 - **No prompt-injection immunity.** Document text enters the prompt. §26.2's delimiting of
   content as data is a mitigation and is not a defence, and §10 forbids claiming otherwise.
-- **No judgement of financial reasoning.** The model contributes wording. Every numeral in
-  a released answer comes from a placeholder bound to a source region (§26.5, §27.3), and
-  arithmetic is forbidden to it outright (§7: financial arithmetic never uses model
-  arithmetic).
+- **No judgement of financial reasoning.** The model contributes wording. Every numeral in a
+  released answer is verified against a span its own claim cites (§26.5, §27.3, as amended by
+  ADR-009 — this record originally said "a placeholder bound to a source region", which the
+  design no longer uses), and arithmetic is forbidden to it outright (§7: financial arithmetic
+  never uses model arithmetic).
 
 ---
 

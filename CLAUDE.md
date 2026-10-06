@@ -129,7 +129,7 @@ Use the detailed architecture in `PROJECT_BLUEPRINT.md`. Preserve these non-nego
 - Hard filters, RRF, cross-encoder reranking, bounded context expansion, and QueryTrace form the production-candidate retrieval path.
 - Nomic versus BGE-M3, MiniLM versus a suitable BGE reranker, local generation models, and alternative sparse retrieval are selected through evaluation.
 - Financial arithmetic uses `Decimal` and never authoritative model arithmetic.
-- Typed placeholders, deterministic substitution, and the Evidence Gate protect released answers.
+- Citation references resolved by code, numerals verified against the spans their claim cites, and the Evidence Gate protect released answers. ADR-009 replaced typed placeholders and deterministic substitution; a model never writes a value or transcribes a quotation.
 - Docker Compose provides the single-node deployment; Ollama remains host-native.
 - GitHub Actions is introduced incrementally after equivalent local commands work.
 

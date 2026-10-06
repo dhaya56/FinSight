@@ -4,10 +4,10 @@ The passages are real. They come from the indexed corpus through the authenticat
 API, carry the source element ids they were built from, and report honestly when a
 retriever was unreachable.
 
-The composed answer above them is not real yet. It shows what Phase 8 releases: a
-numeral enters an answer only through a typed placeholder bound to a source region,
-and the Evidence Gate refuses release of anything a retrieved region does not support.
-It is labelled, and it is rendered from a fixture whose issuer does not exist.
+The composed answer above them is not real yet. It shows what the generation phase releases:
+the model emits claims with citation references, code resolves each reference to the stored
+source span, and a numeral is released only if it appears in a span its own claim cites
+(ADR-009). It is labelled, and rendered from a fixture whose issuer does not exist.
 """
 
 from typing import Any
@@ -211,7 +211,12 @@ def _answer_panel(result: dict[str, Any]) -> None:
         st.container(height=8, border=False)
         metrics = st.columns(4)
         metrics[0].metric("Support band", preview.support_band, border=True)
-        metrics[1].metric("Placeholders bound", preview.placeholders_substituted, border=True)
+        metrics[1].metric(
+            "Numerals verified",
+            preview.numerals_verified,
+            help="Found in a span the claim itself cites. The model writes no values.",
+            border=True,
+        )
         metrics[2].metric("Numerals refused", preview.refused_numerals, border=True)
         metrics[3].metric("Model", preview.model, border=True)
 
@@ -228,8 +233,8 @@ def _answer_panel(result: dict[str, Any]) -> None:
 
         panel_caption(
             Wiring.PREVIEW,
-            "Generation, typed placeholders and the Evidence Gate are Phase 8. The "
-            "issuer named above does not exist; the passages below are real.",
+            "Generation and the Evidence Gate are the next phase. The issuer named above "
+            "does not exist; the passages below are real.",
         )
 
 

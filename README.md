@@ -71,9 +71,33 @@ Measured across the 1,403 pages of the development corpus, a column-aware orderi
 Choosing between the two needs a recorded comparison on development data (§35.4), so the limitation
 is measured and asserted by test rather than assumed away.
 
-Not yet implemented: authentication, processing jobs, the Fact Ledger, generation, the Evidence
-Gate, the user interface, and the evaluation harness. The repository grows one phase at a time; a
-directory exists only once its capability is implemented.
+Not yet implemented: processing jobs, the Fact Ledger, generation, the Evidence Gate, and the
+evaluation harness. The repository grows one phase at a time; a directory exists only once its
+capability is implemented.
+
+### How generation will be grounded
+
+The phase in progress adds answers. Worth stating here because the design was changed on
+evidence, and the earlier one is still described in older records:
+
+The model **emits claims with citation references and never writes a value**. Code resolves each
+reference to the source span stored in PostgreSQL, and a numeral reaches a reader only if it
+appears in a span its own claim cites. An unsupported claim is removed and the answer becomes
+partial; an answer with nothing supported abstains.
+
+This replaces typed numeric placeholders with deterministic substitution, which the blueprint
+originally specified. The reason is that a placeholder moves the failure rather than removing it:
+a model that emits the wrong placeholder produces a numeral that is genuinely source-bound,
+passes every gate check, and is wrong — undetectable by construction. A citation reference is
+checkable, because the resolved span either contains the asserted numeral or does not.
+[ADR-009](evaluation/decision_records/architecture/ADR-009-citation-resolution-over-typed-placeholders.md)
+carries the reasoning, the amended blueprint sections, and an audit of what was adopted and
+rejected from current practice.
+
+**Arithmetic is refused rather than attempted.** Asked how much a figure grew year on year, the
+system reports both values with their periods and declines the subtraction, because comparison and
+calculation need the typed records the Fact Ledger will hold and no amount of prompting substitutes
+for them.
 
 ### The retrieval path
 

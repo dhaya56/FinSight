@@ -79,7 +79,7 @@ Calculations use exact decimal arithmetic and formula-specific compatibility gua
 
 ### 3.6 Evidence-Grounded Answer Release
 
-Generation uses evidence-bound placeholders. A post-generation Evidence Gate validates factual numerals, citations, qualitative evidence alignment, conflicts, and final answer decisions before release.
+Generation emits claims with citation references, resolved to stored source spans by code. A post-generation Evidence Gate validates factual numerals against the spans their claims cite, then validates citations, qualitative evidence alignment, conflicts, and final answer decisions before release.
 
 ### 3.7 Combined Narrative and Numerical Analysis
 
@@ -1179,9 +1179,9 @@ Exact model identifiers are not fixed in advance. The shortlist and final select
 
 Measure success in producing the expected typed intermediate response.
 
-### 24.4 Typed-Placeholder Compliance
+### 24.4 Citation and Numeral Compliance
 
-Measure correct use of fact, derived, period, and citation placeholders.
+Measure the rate at which the model cites an identifier outside the evidence set, and the rate at which it writes a numeral absent from the spans its claim cites. Both are failures the Evidence Gate catches, so the rate measures how much work the Gate is doing rather than how safe the answer is.
 
 ### 24.5 Raw Unsupported-Numeral Behavior
 
@@ -1273,23 +1273,25 @@ Document content is delimited and labelled as data, never as executable instruct
 
 ### 26.3 Typed Internal Generation Contract
 
-The model produces a structured intermediate representation containing claim text and evidence-bound placeholders.
+The model produces a structured intermediate representation containing claim text and citation references to the evidence set. Output structure is enforced by schema-constrained decoding at the model runtime, not requested in the prompt.
 
 ### 26.4 Pydantic Validation
 
 Pydantic validates the intermediate contract before substitution and Gate processing.
 
-### 26.5 Numeric and Period Placeholders
+### 26.5 Numerals Verified Against Cited Spans
 
-Literal authoritative values and periods are supplied through bound placeholders.
+A numeral may appear in a released claim only when it appears in a source span that claim cites. Verification is a deterministic comparison against text stored in PostgreSQL, tolerant of presentation — thousands separators, currency symbols, parenthesised negatives, scale words — and never of value.
 
-### 26.6 Citation Placeholders
+The model is not asked to supply values through a substitution mechanism. Amended 2026-10-06; ADR-009 records the reasoning and the measured basis.
 
-Citation placeholders reference evidence-set identifiers only.
+### 26.6 Citation References
 
-### 26.7 Deterministic Placeholder Substitution
+The model emits references to evidence-set identifiers. Identifiers are short and opaque: a reference carries no page number, filename or quoted text, because every element a model writes is an element it can get wrong, and all of them are derivable from the identifier.
 
-Code formats and substitutes values consistently.
+### 26.7 Deterministic Citation Resolution
+
+Code resolves each reference to the stored source span and renders the cited text. The model never transcribes a quotation, so corruption of a quoted value is structurally impossible rather than detected after the fact.
 
 ### 26.8 Response Presentation Planning
 
@@ -1319,11 +1321,13 @@ Generated output is segmented into atomic numeric, qualitative, and connective c
 
 ### 27.3 Unbound Factual Numeral Detection
 
-Any factual numeral not produced through an approved placeholder is removed or causes a non-answer outcome.
+Any factual numeral that does not appear in a span cited by its own claim is removed. A claim stripped of content becomes a withheld claim and the answer becomes partial; an answer with no surviving supported claim abstains.
 
 ### 27.4 Deterministic Numeric Verification
 
-Numeric claims are checked against facts or derived calculations.
+Numeric claims are checked against the source spans they cite. Where the Fact Ledger exists for a concept, a claim is additionally checked against the fact and its dimensions; where it does not, the cited span is the authority and no normalisation, comparison or arithmetic is performed on the value.
+
+A question requiring arithmetic over values that are not ledger facts is abstained from rather than computed. Amended 2026-10-06; ADR-009.
 
 ### 27.5 Qualitative Evidence Alignment
 
@@ -1556,7 +1560,7 @@ CPU, memory, temporary storage, and elapsed time are bounded.
 
 ### 30.11 Prompt-Injection Structural Controls
 
-Model isolation, hard evidence scope, typed placeholders, and the Evidence Gate provide the primary controls.
+Model isolation, hard evidence scope, document content delimited as data, schema-constrained output, and the Evidence Gate provide the primary controls. None of them is immunity: an instruction embedded in a filing can still influence wording, and the controls bound what that wording can assert rather than preventing it.
 
 ### 30.12 Injection Classification
 

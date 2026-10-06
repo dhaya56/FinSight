@@ -419,16 +419,18 @@ class AnswerPreview:
     support_band: str = "Strong"
     gate_checks: list[tuple[str, bool, str]] = field(default_factory=list)
     model: str = "llama3.1:8b"
-    placeholders_substituted: int = 0
+    numerals_verified: int = 0
+    """Numerals found in a span their own claim cites (§26.5, ADR-009)."""
+
     refused_numerals: int = 0
 
 
 def answer_preview(question: str) -> AnswerPreview:
     """A generated answer with its citations and Evidence Gate result.
 
-    The sentence/citation pairing is the shape Phase 8 produces: every numeral enters
-    through a typed placeholder bound to a source region, and the gate refuses release
-    of any numeral that no retrieved region supports.
+    The claim/citation pairing is the shape the generation phase produces: the model emits
+    claims with citation references, code resolves each reference to the stored source span,
+    and a numeral is released only if it appears in a span its own claim cites (ADR-009).
     """
     return AnswerPreview(
         question=question,
@@ -456,13 +458,13 @@ def answer_preview(question: str) -> AnswerPreview:
         ],
         support_band="Strong",
         gate_checks=[
-            ("Every numeral bound to a source region", True, "3 of 3 bound"),
+            ("Every numeral appears in a span its claim cites", True, "3 of 3 verified"),
             ("No numeral introduced by the model", True, "0 unbound numerals"),
-            ("Citations resolve to active generations", True, "4 of 4 resolved"),
-            ("Units and currency preserved from source", True, "INR crore, unchanged"),
-            ("Period and basis consistent across cited facts", True, "FY2024-25, consolidated"),
-            ("Comparative claim uses same reporting basis", True, "both consolidated"),
+            ("Every citation resolves inside the evidence set", True, "4 of 4 resolved"),
+            ("Issuer, period and basis match the claim", True, "FY2024-25, standalone"),
+            ("Conflicting figures disclosed with their periods", True, "no conflict found"),
+            ("Arithmetic refused on non-ledger values", True, "no computation attempted"),
         ],
-        placeholders_substituted=3,
+        numerals_verified=3,
         refused_numerals=0,
     )
