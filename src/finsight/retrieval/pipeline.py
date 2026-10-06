@@ -81,6 +81,15 @@ class RetrievedChunk:
     contributions: Mapping[str, int]
     rerank_score: float | None = None
 
+    reporting_basis: str | None = None
+    """Standalone, consolidated, or both. Carried because §27.7 validates it.
+
+    Added when the Evidence Gate's citation-context check was written and found it missing: the
+    repository loads it and the pipeline was dropping it, so a claim resting on a standalone and
+    a consolidated passage at once — exactly what §25.8 forbids comparing unasked — could not be
+    detected. Defaulted, so a caller that does not supply it is not implying the basis is known.
+    """
+
     citations: tuple[Citation, ...] = ()
     """The source regions this passage was built from (§14.7, §14.9).
 
@@ -215,6 +224,7 @@ class RetrievalPipeline:
                     evidence_type=chunk.evidence_type,
                     issuer_name=chunk.issuer_name,
                     fiscal_period=chunk.fiscal_period,
+                    reporting_basis=chunk.reporting_basis,
                     fused_score=candidate.score,
                     contributions=candidate.contributions,
                     rerank_score=scores.get(chunk_id),

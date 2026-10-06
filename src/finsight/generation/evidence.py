@@ -296,6 +296,7 @@ def _passage_of(
             evidence_type=candidate.evidence_type,
             issuer_name=candidate.issuer_name,
             fiscal_period=candidate.fiscal_period,
+            reporting_basis=candidate.reporting_basis,
             rerank_score=candidate.rerank_score,
         )
 
