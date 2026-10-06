@@ -41,7 +41,7 @@ from finsight.persistence.repositories.generations import GenerationRepository
 from finsight.persistence.repositories.source import NarrativeBlock, SourceRepository
 from finsight.persistence.tables.documents import DocumentVersion
 
-CHUNKING_CONFIG_VERSION: Final = "3"
+CHUNKING_CONFIG_VERSION: Final = "4"
 """Bump when any value in :class:`ChunkingConfig` changes, or when the chunker's
 output changes shape for the same values.
 
@@ -52,6 +52,11 @@ Bumped to "2" when parents became windows that contain their children. No
 configuration value moved; the *output* did — a long run now yields several parents
 instead of one truncated one — and the index cannot tell those apart by
 configuration alone.
+
+Bumped to "4" when typographic leader lines stopped being indexed. Fewer blocks are
+admitted, so chunk boundaries move corpus-wide and the populations are not comparable:
+a config-3 chunk and a config-4 chunk over the same section are different text. ADR-007
+carries the measurement and the §7 deviation.
 
 Bumped to "3" when comma-grouped figures began being joined before analysis, which
 changes every chunk's ``lexemes``. §9.7 already states the consequence of changing

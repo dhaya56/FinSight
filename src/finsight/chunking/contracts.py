@@ -133,6 +133,27 @@ class ChunkingConfig:
     """Share of a block's area inside a table region before it counts as
     table-derived. Unmeasured."""
 
+    leader_share_floor: float = 0.30
+    """Leader-character share above which a block carrying a leader run is excluded.
+
+    **MEASURED, and the number is doing real work.** A rule keyed only on "contains a
+    run of ten or more ``.`` or ``_``" also catches a signature line —
+    ``_____ Signed for and on behalf of ...`` — which carries content worth retrieving.
+    Measured over the development corpus, the two populations separate cleanly:
+
+    | Population                          | Leader share            |
+    |-------------------------------------|-------------------------|
+    | Table-of-contents lines (the target)| p05 0.384, median 0.852, max 0.960 |
+    | Signature lines (must be kept)      | 0.234 to 0.236          |
+
+    0.30 sits in the sparse gap between them, so all six signature blocks survive and
+    every contents line is caught. The share is computed over non-whitespace characters.
+
+    **Both conditions are required, and neither is sufficient.** The run alone catches
+    signature lines; the share alone catches dense decimal text, because ``.`` is also a
+    decimal point — 250 blocks of 80,688 exceed this share with no leader run at all.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class Chunk:

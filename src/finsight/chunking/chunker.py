@@ -67,6 +67,15 @@ _JOIN: Final = "\n"
 """How blocks are joined. A newline, because that is the boundary the document drew
 and collapsing it to a space would merge a heading into the line beneath it."""
 
+_LEADER_RUN: Final = re.compile(r"[._]{10,}")
+"""Ten or more consecutive dots or underscores: a typographic leader, not language.
+
+Ten rather than three, because an ellipsis is three and a decimal run is none. The
+shortest real leader measured in this corpus is far longer than ten.
+"""
+
+_LEADER_CHARS: Final = frozenset("._")
+
 
 class CoverageError(RuntimeError):
     """A block was lost or duplicated. Raised rather than returned.
@@ -104,9 +113,14 @@ def chunk_blocks(
     leak, and the test has to be this one: PostgreSQL's ``btrim`` defaults to
     trimming spaces only, so a SQL check for lost content calls a block of newlines
     non-empty and reports 1,557 losses that do not exist.
+
+    **Typographic leader lines are also dropped**, which is a narrower filter and a
+    larger decision: it withholds real text from the index rather than discarding
+    whitespace. 258 blocks across the three filings, 60,558 characters of 9.45 million.
+    See :func:`_is_retrievable` for the measurement and ADR-007 for the §7 deviation.
     """
     settings = config or ChunkingConfig()
-    usable = [block for block in blocks if block.text.strip()]
+    usable = [block for block in blocks if _is_retrievable(block.text, settings)]
     if not usable:
         return ()
     _require_document_order(usable)
@@ -115,6 +129,59 @@ def chunk_blocks(
     verify_coverage(usable, chunks)
     verify_parents(chunks)
     return chunks
+
+
+def _is_retrievable(text: str, config: ChunkingConfig) -> bool:
+    """Whether a block should become retrieval text at all.
+
+    Two exclusions, both of which discard the block from the *index* while leaving it
+    untouched in the source representation — verbatim, citable, with its coordinates.
+
+    **Whitespace.** Nothing to retrieve, and a chunk of it violates ``text_not_blank``.
+
+    **Typographic leaders.** A table-of-contents line is a leader run with a section
+    name attached, and indexing one is measurably harmful rather than merely untidy.
+    Measured on the development corpus, 78 of 4,969 children and 13 of 790 parents are
+    over 80% dots — the worst a 1,515-token parent at 91% — and they carry just enough
+    lexemes to compete: 5 on average against 60 for a normal child. Because BM25
+    normalises by document length and these are very short in indexed terms, they are
+    *advantaged*. Probed with six section-name queries, two returned a contents line at
+    **rank 1**, pushing the section it points at to ranks 3 and below:
+
+        'basis of preparation of financial statements'
+          1. 1.2 Basis of preparation of financial statemen......  (84% dots)
+          3. 1.2 Basis of preparation of financial statements ...   (the actual section)
+
+    A contents line is an index *of* the document, so it matches a section-name query
+    almost perfectly while containing none of the answer. That is the failure: not noise,
+    but a near-perfect match that is never the answer.
+
+    **This deviates from §7's "keep all extracted content searchable", and ADR-007
+    records it.** What is lost is the section-to-page mapping, for 258 blocks across
+    three filings. What is not lost: the sections themselves stay findable — in both
+    displacement cases above the real content was already being retrieved behind the
+    contents line, so excluding it promotes rather than hides. §7's preservation
+    requirements are untouched; only the retrieval clause is.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if _LEADER_RUN.search(stripped) is None:
+        return True
+    return _leader_share(stripped) < config.leader_share_floor
+
+
+def _leader_share(text: str) -> float:
+    """Share of non-whitespace characters that are leader characters.
+
+    Over non-whitespace rather than the whole string, so the indentation a contents line
+    carries cannot dilute its own measurement.
+    """
+    solid = [character for character in text if not character.isspace()]
+    if not solid:
+        return 0.0
+    leaders = sum(1 for character in solid if character in _LEADER_CHARS)
+    return leaders / len(solid)
 
 
 def _require_document_order(blocks: Sequence[SourceBlock]) -> None:

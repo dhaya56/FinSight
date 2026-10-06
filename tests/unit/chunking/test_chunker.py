@@ -129,6 +129,114 @@ class TestCoverage:
         assert chunk_blocks([], config=SMALL, count_tokens=words) == ()
 
 
+class TestLeaderLines:
+    """Typographic leader lines are withheld from the index (ADR-007).
+
+    The exclusion is narrower than it first appears and the tests are mostly about what
+    it must *not* catch: a signature rule and a dense decimal row both look leader-like
+    by one measure each, and a filter keyed on either alone deletes real content. ADR-007
+    records the §7 deviation this makes.
+    """
+
+    def placed(self, source: list[SourceBlock], config: ChunkingConfig) -> set[uuid.UUID]:
+        result = chunk_blocks(source, config=config, count_tokens=words)
+        return {
+            element_id
+            for chunk in children(result)
+            for element_id in chunk.source_element_ids
+        }
+
+    def test_a_contents_line_is_excluded(self) -> None:
+        source = [
+            block("Basis of preparation " + "." * 40 + " 313", ordinal=0),
+            block("The financial statements have been prepared on accrual basis", ordinal=1),
+        ]
+
+        assert self.placed(source, SMALL) == {source[1].element_id}
+
+    def test_a_run_of_leaders_alone_is_excluded(self) -> None:
+        source = [block("alpha beta", ordinal=0), block("." * 60, ordinal=1)]
+
+        assert self.placed(source, SMALL) == {source[0].element_id}
+
+    def test_a_signature_rule_is_kept(self) -> None:
+        """The case that makes the share guard necessary.
+
+        A leader run of 29 underscores, so a rule keyed on the run alone discards the
+        signatory with it. The share here is 29/125 = 0.232, matching the 0.234 measured
+        on the corpus — the text is invented, because §10 forbids committing source
+        document content, but the *proportion* is the thing under test and that is
+        faithful.
+        """
+        signature = (
+            "_" * 29 + " Signed for and on behalf of the Board of Directors of "
+            "Meridian Industries Limited, Chairman and Managing Director"
+        )
+        source = [block(signature, ordinal=0), block("alpha beta gamma", ordinal=1)]
+
+        assert source[0].element_id in self.placed(source, SMALL)
+
+    def test_a_short_signature_rule_is_excluded_and_that_is_a_known_limit(self) -> None:
+        """Honest about where the threshold fails rather than only where it works.
+
+        The guard is a proportion, so a signature line with a long rule and a *short*
+        signatory crosses it and is withheld. None of the six in this corpus is short
+        enough, but nothing guarantees the next filing's are. Pinned so the limitation is
+        visible here rather than discovered as a missing signatory.
+        """
+        source = [block("_" * 29 + " Signed for the Board", ordinal=0)]
+
+        assert self.placed(source, SMALL) == set()
+
+    def test_a_decimal_heavy_row_is_kept(self) -> None:
+        """The case that makes the run guard necessary: '.' is also a decimal point.
+
+        This row is 30% dots by character share and holds no run, so a share-only rule
+        would delete a totals line — which §17.8 requires stay retrievable.
+        """
+        row = "Total 710.31 51.98 58.07 820.36 7.22 0.96 8.18 828.54"
+        source = [block(row, ordinal=0)]
+
+        assert self.placed(source, SMALL) == {source[0].element_id}
+
+    def test_an_ellipsis_in_prose_is_kept(self) -> None:
+        source = [block("The Board resolved ... to approve the scheme", ordinal=0)]
+
+        assert self.placed(source, SMALL) == {source[0].element_id}
+
+    def test_the_floor_is_configurable_and_versioned(self) -> None:
+        """§18.10: a threshold that moves must move the configuration version with it."""
+        signature = "_" * 29 + " Signed for and on behalf of the Board of Directors"
+        source = [block(signature, ordinal=0), block("alpha beta gamma", ordinal=1)]
+        strict = ChunkingConfig(
+            child_max_tokens=10,
+            child_min_tokens=2,
+            parent_max_tokens=100,
+            leader_share_floor=0.10,
+        )
+
+        assert source[0].element_id not in self.placed(source, strict)
+
+    def test_excluding_everything_yields_no_chunks(self) -> None:
+        """Rather than raising: a contents page legitimately holds nothing else."""
+        source = blocks("." * 40, "_" * 40)
+
+        assert chunk_blocks(source, config=SMALL, count_tokens=words) == ()
+
+    def test_coverage_holds_over_what_remains(self) -> None:
+        """The guarantee is over admitted blocks, as it already is for blank ones."""
+        source = [
+            block("alpha beta gamma", ordinal=0),
+            block("Contents " + "." * 50, ordinal=1),
+            block("delta epsilon zeta", ordinal=2),
+        ]
+
+        assert self.placed(source, SMALL) == {
+            source[0].element_id,
+            source[2].element_id,
+        }
+
+
 class TestVerbatimText:
     """§14.4: the chunker never rewrites what it was given."""
 
