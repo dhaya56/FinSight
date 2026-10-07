@@ -99,6 +99,7 @@ def search(
         fusion_version=result.fusion_version,
         collapsed_count=len(result.collapsed),
         elapsed_ms=elapsed_ms,
+        timings_ms=dict(result.timings_ms),
     )
 
 
