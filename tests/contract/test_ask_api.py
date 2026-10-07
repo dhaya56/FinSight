@@ -87,10 +87,12 @@ def an_evidence_set(*passages: EvidencePassage) -> EvidenceSet:
     )
 
 
-def a_released_claim() -> ReleasedClaim:
+def a_released_claim(*, citations: tuple[ResolvedCitation, ...] | None = None) -> ReleasedClaim:
     return ReleasedClaim(
         text="The Company monitors credit risk through counterparty limits.",
-        citations=(
+        citations=citations
+        if citations is not None
+        else (
             ResolvedCitation(
                 passage_id=1,
                 source_element_id=ELEMENT_ID,
@@ -313,6 +315,44 @@ class TestResponse:
                 "text": SPAN,
             }
         ]
+
+    def test_the_passage_labels_are_deduplicated(
+        self, client: TestClient, app: FastAPI, service: FakeAskService
+    ) -> None:
+        """Measured against the real route: a passage over a table yields one citation per
+        row, so a client marking each citation rendered ``[4][4][4]...`` eleven times. The
+        contract supplies the distinct ids so it does not have to."""
+        rows = tuple(
+            ResolvedCitation(
+                passage_id=4,
+                source_element_id=uuid4(),
+                locator="p. 228",
+                text=f"table row {index}",
+            )
+            for index in range(11)
+        )
+        app.dependency_overrides[get_ask_service] = lambda: FakeAskService(
+            an_answer(
+                released=(
+                    a_released_claim(
+                        citations=(
+                            ResolvedCitation(
+                                passage_id=1,
+                                source_element_id=ELEMENT_ID,
+                                locator="p. 41",
+                                text=SPAN,
+                            ),
+                            *rows,
+                        )
+                    ),
+                )
+            )
+        )
+
+        claim = post(client).json()["claims"][0]
+
+        assert claim["cited_passage_ids"] == [1, 4]
+        assert len(claim["citations"]) == 12
 
     def test_a_disclosure_travels_with_its_claim(
         self, client: TestClient, service: FakeAskService

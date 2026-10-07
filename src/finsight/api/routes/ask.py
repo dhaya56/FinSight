@@ -150,8 +150,19 @@ def _as_response(answer: AskedAnswer) -> AskResponse:
 
 
 def _released(claim: ReleasedClaim) -> ReleasedClaimModel:
+    """One released claim, with its passage labels alongside its spans.
+
+    The deduplicated passage ids are computed here rather than left to the client. There is one
+    citation per *source element*, so a claim resting on a single passage built from eleven table
+    rows carries eleven citations naming the same passage — a client marking each one renders
+    ``[4][4][4]...``. The CLI already deduplicated; putting it in the contract means the next
+    client does not have to discover the trap.
+    """
     return ReleasedClaimModel(
         text=claim.text,
+        cited_passage_ids=tuple(
+            sorted({citation.passage_id for citation in claim.citations})
+        ),
         citations=tuple(
             ClaimCitationModel(
                 passage_id=citation.passage_id,

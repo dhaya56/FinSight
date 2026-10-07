@@ -40,6 +40,85 @@ VIEW_NAMES = (
 PREVIEW_VIEWS = ("library", "ingest", "ledger", "compare", "evaluation")
 
 
+def an_answer(**overrides: Any) -> dict[str, Any]:
+    """A released answer as ``POST /v1/ask`` returns one.
+
+    ``cited_passage_ids`` is distinct from ``citations`` on purpose, and the fixture keeps
+    them inconsistent in the way the real route is: two citations naming one passage. A
+    fixture with one citation per passage would let a view that marked every citation pass,
+    and that view renders ``[1][1]`` against the live API.
+    """
+    body: dict[str, Any] = {
+        "question": "credit risk",
+        "decision": "partial",
+        "support_band": "weak",
+        "reason_codes": ["unsupported_numeral"],
+        "degraded": [],
+        "claims": [
+            {
+                "text": "The Company monitors credit risk through counterparty limits.",
+                "cited_passage_ids": [1],
+                "citations": [
+                    {
+                        "passage_id": 1,
+                        "source_element_id": "11111111-1111-1111-1111-111111111111",
+                        "locator": "p. 41",
+                        "text": "Credit risk is monitored through counterparty limits.",
+                    },
+                    {
+                        "passage_id": 1,
+                        "source_element_id": "11111111-1111-1111-1111-111111111112",
+                        "locator": "p. 41",
+                        "text": "Limits are reviewed annually.",
+                    },
+                ],
+                "disclosures": [],
+            }
+        ],
+        "withheld": [
+            {
+                "text": "Revenue was 99,999 crore.",
+                "findings": [
+                    {
+                        "code": "unsupported_numeral",
+                        "severity": "remove",
+                        "detail": "states 99,999, which appears in none of its cited spans",
+                    }
+                ],
+            }
+        ],
+        "passages": [
+            {
+                "id": 1,
+                "chunk_id": "6f1d8c4e-0000-4000-8000-000000000001",
+                "text": "The Company monitors credit risk through counterparty limits.",
+                "heading_path": ["7. Risk factors"],
+                "page_numbers": [41],
+                "evidence_type": "narrative",
+                "issuer_name": "Probe Limited",
+                "fiscal_period": "FY2024-25",
+                "reporting_basis": "consolidated",
+                "rerank_score": -2.5,
+                "expanded": False,
+                "stands_for": [],
+            }
+        ],
+        "model": "llama3.1:8b",
+        "answer_id": "33333333-3333-3333-3333-333333333333",
+        "evidence_budget_chars": 22000,
+        "evidence_used_chars": 6362,
+        "passages_considered": 4,
+        "passages_dropped_for_budget": 0,
+        "passages_merged": 0,
+        "passages_expanded": 0,
+        "prompt_tokens": 1971,
+        "completion_tokens": 437,
+        "timings_ms": {"retrieval_ms": 1500, "generation_ms": 287185, "total_ms": 302351},
+    }
+    body.update(overrides)
+    return body
+
+
 def a_response(**overrides: Any) -> dict[str, Any]:
     body: dict[str, Any] = {
         "query": "credit risk",
@@ -79,7 +158,13 @@ def a_response(**overrides: Any) -> dict[str, Any]:
     return body
 
 
-def _script(view_name: str, response: "dict[str, Any]", fail: str) -> None:
+def _script(
+    view_name: str,
+    response: "dict[str, Any]",
+    fail: str,
+    answer: "dict[str, Any] | None" = None,
+    ask_fail: str = "",
+) -> None:
     """The page script. Self-contained: no name here comes from the enclosing module.
 
     The ``response`` annotation is quoted because the ``def`` line is executed in the
@@ -118,6 +203,13 @@ def _script(view_name: str, response: "dict[str, Any]", fail: str) -> None:
                 raise ApiError(fail)
             return response
 
+        def ask(self, question: str, **kwargs: object) -> dict[str, object]:
+            if ask_fail:
+                raise ApiError(ask_fail)
+            if answer is None:
+                raise ApiError("no answer fixture supplied to this run")
+            return answer
+
         def is_ready(self) -> bool:
             return True
 
@@ -146,8 +238,10 @@ def run(
     fail: str = "",
     query: str = "",
     seeded: dict[str, Any] | None = None,
+    answer: dict[str, Any] | None = None,
+    ask_fail: str = "",
 ) -> AppTest:
-    """Render one view, optionally seeding session state or running a search."""
+    """Render one view, optionally seeding session state or asking a question."""
     app = AppTest.from_function(
         _script,
         default_timeout=60,
@@ -155,13 +249,15 @@ def run(
             "view_name": view_name,
             "response": response if response is not None else a_response(),
             "fail": fail,
+            "answer": answer if answer is not None else an_answer(),
+            "ask_fail": ask_fail,
         },
     )
     for key, value in (seeded or {}).items():
         app.session_state[key] = value
     app.run()
     if query:
-        # Two runs: the Search button is disabled while the box is empty, and a browser
+        # Two runs: the Ask button is disabled while the box is empty, and a browser
         # user cannot click a disabled button either.
         app.text_input[0].set_value(query).run()
         app.button[0].click().run()
@@ -178,6 +274,11 @@ def rendered_text(app: AppTest) -> str:
 
     Tables are included for the same reason: the library and ledger previews put their
     issuer names in a dataframe, not in prose.
+
+    Expander *labels* are included too, and they are not reachable any other way: an
+    expander's children appear in the element groups above but its own label does not, so a
+    heading like "Withheld by the Evidence Gate (1)" — the one thing telling a reader that
+    something was removed at all — was invisible to this helper until it was added.
     """
     parts = [
         str(element.value)
@@ -186,6 +287,8 @@ def rendered_text(app: AppTest) -> str:
     ]
     parts.extend(str(element.value) for element in app.get("html"))
     parts.extend(str(element.value) for element in app.dataframe)
+    parts.extend(str(element.label) for element in app.expander)
+    parts.extend(str(element.label) for element in app.status)
     return " ".join(parts)
 
 
@@ -194,6 +297,9 @@ class _ShellStub(ApiClient):
 
     def search(self, query: str, **kwargs: object) -> dict[str, object]:
         return dict(a_response())
+
+    def ask(self, question: str, **kwargs: object) -> dict[str, object]:
+        return dict(an_answer())
 
     def is_ready(self) -> bool:
         return True
@@ -317,6 +423,136 @@ class TestAsk:
         app = run("ask")
 
         assert "not answers" not in rendered_text(app)
+
+
+class TestTheAnswerPanel:
+    """The composed answer, which replaced a fixture panel in this phase.
+
+    These assert the three things a reader cannot verify for themselves: that the decision is
+    stated rather than implied by whether text appeared, that the Gate's removals are visible,
+    and that a citation mark leads to the stored span rather than being decoration.
+    """
+
+    def test_a_released_claim_and_its_decision_are_shown(self) -> None:
+        app = run("ask", query="credit risk")
+
+        assert not app.exception
+        text = rendered_text(app)
+        assert "Composed answer" in text
+        assert "counterparty limits" in text
+        # Streamlit renders a badge as markdown directive text rather than its own
+        # element kind, so the decision is asserted where a reader would see it.
+        assert "orange-badge" in text and "Partial" in text
+
+    def test_the_support_band_is_not_presented_as_a_probability(self) -> None:
+        """§27.13. A band beside a percentage would be read as one."""
+        text = rendered_text(run("ask", query="credit risk"))
+
+        assert "not a probability of correctness" in text
+
+    def test_a_withheld_claim_is_shown_with_its_reason_in_plain_words(self) -> None:
+        """An invisible removal is indistinguishable from a model that never said it."""
+        text = rendered_text(run("ask", query="credit risk"))
+
+        assert "Withheld by the Evidence Gate (1)" in text
+        assert "99,999" in text
+        assert "appears in none of the spans" in text
+
+    def test_a_citation_mark_is_rendered_once_per_passage_not_once_per_span(self) -> None:
+        """The claim cites one passage through two source elements.
+
+        Marking each citation would render ``[1][1]``, which is what the live route
+        produced before the contract exposed the distinct ids. Pinned because the fixture
+        deliberately keeps the two counts different.
+        """
+        html = " ".join(str(element.value) for element in run("ask", query="x").get("html"))
+
+        assert html.count('<span class="fs-cite">1</span>') == 1
+
+    def test_the_cited_span_text_is_available_to_the_reader(self) -> None:
+        """A citation a reader cannot follow is a reference, not evidence (§14.9)."""
+        text = rendered_text(run("ask", query="credit risk"))
+
+        assert "Limits are reviewed annually." in text
+
+    def test_an_abstention_says_why_in_words(self) -> None:
+        app = run(
+            "ask",
+            query="what is the chief executive's pay",
+            answer=an_answer(
+                decision="abstained",
+                support_band="none",
+                reason_codes=["model_reported_unanswerable"],
+                claims=[],
+                withheld=[],
+            ),
+        )
+
+        info = " ".join(element.value for element in app.info)
+        assert "No claim was released" in info
+        assert "do not answer the question" in info
+
+    def test_a_lost_model_warns_and_keeps_the_evidence(self) -> None:
+        """§26.10: the passages are still worth reading when no prose was composed."""
+        app = run(
+            "ask",
+            query="credit risk",
+            answer=an_answer(
+                decision="abstained",
+                support_band="none",
+                reason_codes=[],
+                claims=[],
+                withheld=[],
+                degraded=["generation_unavailable"],
+            ),
+        )
+
+        warnings = " ".join(element.value for element in app.warning)
+        assert "generation_unavailable" in warnings
+        assert "passages below were still retrieved" in warnings
+        assert "counterparty limits" in rendered_text(app)
+
+    def test_a_failed_ask_leaves_the_retrieved_evidence_on_the_page(self) -> None:
+        """The whole point of two requests: losing the answer must not lose the evidence."""
+        app = run("ask", query="credit risk", ask_fail="The API returned 503")
+
+        assert not app.exception
+        assert any("503" in error.value for error in app.error)
+        assert "counterparty limits" in rendered_text(app)
+
+    def test_reranking_off_discloses_that_the_answer_used_a_different_order(self) -> None:
+        """POST /v1/ask carries no rerank field, so the answer always uses reranked order.
+
+        Without this the page shows a fusion-ordered evidence list beside an answer built
+        from a reranked one, and a reader would reasonably assume the answer came from what
+        they can see.
+        """
+        app = run(
+            "ask",
+            query="credit risk",
+            response=a_response(reranked=False, rerank_score=None),
+        )
+
+        info = " ".join(element.value for element in app.info)
+        assert "Reranking is switched off" in info
+        assert "the two lists may differ" in info
+
+    def test_an_unavailable_reranker_is_not_reported_as_a_user_choice(self) -> None:
+        """Both leave 'reranked' false; only one is something the reader did."""
+        app = run(
+            "ask",
+            query="credit risk",
+            response=a_response(reranked=False, degraded=["reranker_unavailable"]),
+        )
+
+        info = " ".join(element.value for element in app.info)
+        assert "Reranking is switched off" not in info
+
+    def test_the_wait_is_stated_before_it_is_endured(self) -> None:
+        """Two to four minutes with no warning reads as a hung page."""
+        text = rendered_text(run("ask", query="credit risk"))
+
+        assert "Two to four minutes" in text
 
 
 class TestTrace:

@@ -105,7 +105,23 @@ class ReleasedClaimModel(BaseModel):
     """A claim that may be shown, with anything that must be shown beside it."""
 
     text: str
-    citations: tuple[ClaimCitationModel, ...]
+
+    cited_passage_ids: tuple[int, ...] = Field(
+        default=(),
+        description=(
+            "The distinct passages this claim rests on, ascending — what to render as "
+            "inline [n] marks. Use this rather than counting 'citations': there is one "
+            "citation per source element, so a claim resting on one passage built from "
+            "eleven table rows has eleven citations that all name the same passage, and "
+            "a client marking each one produces '[4][4][4]...'."
+        ),
+    )
+    citations: tuple[ClaimCitationModel, ...] = Field(
+        description=(
+            "Every source span behind the claim, one per source element. This is the "
+            "evidence a reader follows; 'cited_passage_ids' is how it is labelled."
+        )
+    )
     disclosures: tuple[FindingModel, ...] = Field(
         default=(),
         description=(

@@ -1,24 +1,38 @@
-"""Ask: the live retrieval surface, with the Phase 8 answer shape alongside it.
+"""Ask: evidence first, then the composed answer when it lands.
 
-The passages are real. They come from the indexed corpus through the authenticated
-API, carry the source element ids they were built from, and report honestly when a
-retriever was unreachable.
+Everything on this page is real. Passages come from the indexed corpus through the
+authenticated API; the answer above them is composed by a local model, its citations
+resolved to stored source spans by code, and every numeral checked against a span its own
+claim cites before release (ADR-009).
 
-The composed answer above them is not real yet. It shows what the generation phase releases:
-the model emits claims with citation references, code resolves each reference to the stored
-source span, and a numeral is released only if it appears in a span its own claim cites
-(ADR-009). It is labelled, and rendered from a fixture whose issuer does not exist.
+**Two requests, in that order, and the order is the point.** A composed answer takes two to
+four minutes on this host — no GPU offload is available, so prompt evaluation runs at roughly
+26 tokens per second. One blocking call would leave the page empty for all of it. Retrieval
+answers in about two seconds, so the passages are drawn first into the lower slot while the
+answer composes into the slot reserved above them. The reader has citable evidence in seconds
+rather than a frozen page, and the arrangement states the architecture: evidence is primary,
+prose is the convenience built on top of it.
+
+The cost is one extra retrieval. Measured, that is about two seconds against the answer's two
+hundred and ninety — the server caches the pipeline per process, so the second retrieval does
+not reload the cross-encoder.
+
+**Streaming the model's output is not available to us, and that is deliberate.** The Evidence
+Gate must parse the complete response and verify every numeral before anything is released, so
+streaming tokens would put unverified figures in front of a reader — the failure this whole
+design exists to prevent. The wait is the cost of not doing that.
 """
 
 from typing import Any
 
 import streamlit as st
+from streamlit.delta_generator import DeltaGenerator
 
-from finsight.ui import demo
 from finsight.ui.client import ApiClient, ApiError, client_from_environment
-from finsight.ui.theme import Wiring, page_header, panel_caption, state_badge
+from finsight.ui.theme import BadgeColour, Wiring, page_header, state_badge
 
 RESULT_KEY = "ask.result"
+ANSWER_KEY = "ask.answer"
 QUERY_KEY = "ask.query"
 
 _EXAMPLES = (
@@ -27,6 +41,8 @@ _EXAMPLES = (
     "What are the principal risks to the business?",
     "What dividend was declared?",
 )
+
+_SPAN_PREVIEW = 420
 
 # Plain-language consequence of each degradation flag the API can return. The flag
 # names are stable identifiers and mean nothing to a reader.
@@ -44,15 +60,80 @@ _FLAG_MEANINGS = {
         "The cross-encoder could not be loaded, so the order below is the fusion order. "
         "The same passages were considered; only their ranking is less refined."
     ),
+    "generation_unavailable": (
+        "The language model could not be reached, so no answer was composed. The "
+        "passages below were still retrieved and are unaffected \N{EM DASH} they are the "
+        "evidence an answer would have been built from."
+    ),
+    "generation_prompt_truncated": (
+        "The evidence did not fit the model's context window, so it would have answered "
+        "from only part of it while appearing to cite all of it. Refused rather than "
+        "released. Reduce the passage count."
+    ),
+    "generation_contract_violated": (
+        "The model returned a shape the response schema forbids, which means its output "
+        "is not being constrained. A configuration fault, not a bad question."
+    ),
+}
+
+# Plain-language meaning of each reason code the Evidence Gate can return. A reader
+# told "unsupported_numeral" has been told nothing.
+_REASON_MEANINGS = {
+    "no_evidence_retrieved": (
+        "Retrieval returned nothing, so there was nothing to answer from. The filters or "
+        "the corpus are the place to look, not the question."
+    ),
+    "model_reported_unanswerable": (
+        "The model read the passages and said they do not answer the question. That is a "
+        "permitted and correct outcome, not a failure."
+    ),
+    "no_claim_survived_validation": (
+        "Every claim the model produced was removed by the Evidence Gate, so nothing "
+        "could be released."
+    ),
+    "unsupported_numeral": (
+        "A figure appeared in a claim that appears in none of the spans that claim cites."
+    ),
+    "no_citation": "A claim rested on no resolvable source region.",
+    "citation_not_in_evidence": (
+        "A claim cited a passage that was never supplied \N{EM DASH} the reference was "
+        "invented."
+    ),
+    "cited_span_has_no_text": (
+        "A cited passage resolved, but its source regions carry no text, so nothing could "
+        "be checked against it."
+    ),
+    "scale_not_in_cited_span": (
+        "A claim stated a scale \N{EM DASH} crore, lakh, million \N{EM DASH} that none of "
+        "its cited spans use. The same numeral under a different scale is a different "
+        "amount."
+    ),
+    "currency_not_in_cited_span": (
+        "A claim stated a currency that none of its cited spans use."
+    ),
+    "mixed_issuer": "The cited passages come from more than one issuer.",
+    "mixed_period": "The cited passages describe more than one reporting period.",
+    "mixed_basis": (
+        "The cited passages mix standalone and consolidated reporting, which are not "
+        "comparable unless the document compares them itself."
+    ),
+}
+
+#: Badge colour and icon per decision. Annotated with Streamlit's own colour literal
+#: rather than ``str``, so a typo is a type error instead of a runtime one.
+_DECISION_STYLE: dict[str, tuple[BadgeColour, str]] = {
+    "answered": ("green", ":material/check_circle:"),
+    "partial": ("orange", ":material/rule:"),
+    "abstained": ("grey", ":material/block:"),
 }
 
 
 def render() -> None:
-    """Render the Ask page."""
+    # Render the Ask page.
     page_header(
         "Ask",
-        "Put a question to the ingested filings and read the passages behind it.",
-        Wiring.PARTIAL,
+        "Put a question to the ingested filings and read the evidence behind every claim.",
+        Wiring.LIVE,
     )
 
     try:
@@ -61,7 +142,7 @@ def render() -> None:
         st.error(str(error))
         return
 
-    options = _controls(client)
+    options = _controls()
     query = st.text_input(
         "Question",
         key=QUERY_KEY,
@@ -71,38 +152,108 @@ def render() -> None:
 
     with st.container(horizontal=True, gap="small"):
         asked = st.button(
-            "Search", type="primary", icon=":material/search:", disabled=not query.strip()
+            "Ask", type="primary", icon=":material/send:", disabled=not query.strip()
         )
         if st.button("Clear", icon=":material/close:", disabled=RESULT_KEY not in st.session_state):
             st.session_state.pop(RESULT_KEY, None)
+            st.session_state.pop(ANSWER_KEY, None)
             st.rerun()
 
     _example_chips()
 
+    # Both slots are reserved before either request runs, so the answer can be written
+    # above evidence that was drawn while it was still composing.
+    answer_slot = st.container()
+    evidence_slot = st.container()
+
     if asked:
-        _run(client, query.strip(), options)
+        _ask(client, query.strip(), options, answer_slot, evidence_slot)
+        return
 
     result = st.session_state.get(RESULT_KEY)
     if result is None:
-        _empty_state()
+        with evidence_slot:
+            _empty_state()
         return
 
-    _answer_panel(result)
-    _passages_panel(result)
+    answer = st.session_state.get(ANSWER_KEY)
+    with answer_slot:
+        if answer is not None:
+            _answer_panel(answer)
+    with evidence_slot:
+        _passages_panel(result)
 
 
-def _controls(client: ApiClient) -> dict[str, Any]:
-    """Sidebar controls and the §20.2 hard filters."""
+def _ask(
+    client: ApiClient,
+    query: str,
+    options: dict[str, Any],
+    answer_slot: DeltaGenerator,
+    evidence_slot: DeltaGenerator,
+) -> None:
+    # Retrieve, draw the evidence, then compose into the slot above it.
+    st.session_state.pop(ANSWER_KEY, None)
+    with st.spinner("Retrieving from the corpus\N{HORIZONTAL ELLIPSIS}"):
+        try:
+            st.session_state[RESULT_KEY] = client.search(
+                query,
+                limit=options["limit"],
+                rerank=options["rerank"],
+                filters=options["filters"],
+            )
+        except ApiError as error:
+            st.session_state.pop(RESULT_KEY, None)
+            st.error(str(error), icon=":material/error:")
+            return
+
+    with evidence_slot:
+        _passages_panel(st.session_state[RESULT_KEY])
+
+    with answer_slot, st.status(
+        "Composing the answer\N{HORIZONTAL ELLIPSIS}", expanded=True
+    ) as status:
+        st.caption(
+            "Two to four minutes on this host. The model has no GPU to offload to, so it "
+            "reads the evidence at about 26 tokens per second. Nothing is shown until "
+            "every numeral has been checked against the span its claim cites \N{EM DASH} "
+            "the evidence below is already readable."
+        )
+        try:
+            st.session_state[ANSWER_KEY] = client.ask(
+                query, limit=options["limit"], filters=options["filters"]
+            )
+        except ApiError as error:
+            status.update(label="The answer could not be composed", state="error")
+            st.error(str(error), icon=":material/error:")
+            return
+        status.update(label="Answer composed", state="complete", expanded=False)
+
+    with answer_slot:
+        _answer_panel(st.session_state[ANSWER_KEY])
+
+
+def _controls() -> dict[str, Any]:
+    # Sidebar controls and the §20.2 hard filters.
     with st.sidebar:
-        st.subheader("Retrieval", divider="grey")
-        limit = st.slider("Passages", 1, 25, 5, help="How many results to return.")
+        st.subheader("Evidence", divider="grey")
+        limit = st.slider(
+            "Passages",
+            1,
+            25,
+            4,
+            help=(
+                "How many passages the answer may rest on. Every one is prompt the model "
+                "must read, and reading is the dominant cost: four passages measured 302 "
+                "seconds end to end on this host."
+            ),
+        )
         rerank = st.toggle(
             "Cross-encoder reranking",
             value=True,
             help=(
                 "Measured on this host: about 1.9 s with reranking against 0.13 s "
                 "without. Whether it orders better is unmeasured \N{EM DASH} there is "
-                "no golden question set yet."
+                "no golden question set yet. Applies to retrieval only."
             ),
         )
 
@@ -137,7 +288,7 @@ def _controls(client: ApiClient) -> dict[str, Any]:
 
 
 def _example_chips() -> None:
-    """Offer a few starting questions, which is what an empty box needs."""
+    # Offer a few starting questions, which is what an empty box needs.
     picked = st.pills(
         "Try",
         options=list(_EXAMPLES),
@@ -150,38 +301,25 @@ def _example_chips() -> None:
         st.rerun()
 
 
-def _run(client: ApiClient, query: str, options: dict[str, Any]) -> None:
-    """Call the API, keeping the page usable when it fails."""
-    with st.spinner("Retrieving from the corpus\N{HORIZONTAL ELLIPSIS}"):
-        try:
-            st.session_state[RESULT_KEY] = client.search(
-                query,
-                limit=options["limit"],
-                rerank=options["rerank"],
-                filters=options["filters"],
-            )
-        except ApiError as error:
-            st.session_state.pop(RESULT_KEY, None)
-            st.error(str(error), icon=":material/error:")
-
-
 def _empty_state() -> None:
-    """What the page shows before anything has been asked."""
+    # What the page shows before anything has been asked.
     st.container(height=12, border=False)
     with st.container(border=True):
         st.markdown("#### Nothing asked yet")
         st.caption(
             "Retrieval is hybrid: BM25 over PostgreSQL lexemes and dense vectors over "
-            "Qdrant, fused by reciprocal rank and reordered by a local cross-encoder. "
-            "Every passage returned names the source regions it was built from."
+            "Qdrant, fused by reciprocal rank and reordered by a local cross-encoder. The "
+            "answer is composed under a JSON schema by a local model that writes no "
+            "figures of its own \N{EM DASH} every citation is resolved by code and every "
+            "numeral checked against the span its claim cites before release."
         )
         columns = st.columns(3)
         for column, (label, value, note) in zip(
             columns,
             (
                 ("Indexed passages", "4,969", "across 3 active generations"),
-                ("Retrievers", "2 + rerank", "BM25, dense, cross-encoder"),
-                ("Typical query", "1.9 s", "0.13 s with reranking off"),
+                ("Retrieval", "1.9 s", "0.13 s with reranking off"),
+                ("Composed answer", "2\N{EN DASH}4 min", "CPU only; no GPU offload here"),
             ),
             strict=True,
         ):
@@ -190,61 +328,205 @@ def _empty_state() -> None:
         st.caption("Figures measured on this host, not targets.")
 
 
-def _answer_panel(result: dict[str, Any]) -> None:
-    """The Phase 8 answer shape, rendered from a fixture and labelled as one."""
-    question = result.get("query", "")
-    preview = demo.answer_preview(question)
+def _answer_panel(answer: dict[str, Any]) -> None:
+    # The composed answer, what was withheld, and the decision behind both.
+    decision = str(answer.get("decision", "abstained"))
+    colour, icon = _DECISION_STYLE.get(decision, ("grey", ":material/help:"))
+
+    for flag in answer.get("degraded", ()):
+        st.warning(
+            f"**Degraded \N{EM DASH} {flag}.** "
+            f"{_FLAG_MEANINGS.get(flag, 'See the degradation flags in §20.12.')}",
+            icon=":material/warning:",
+        )
 
     with st.container(border=True):
         head, badge = st.columns([5, 1], vertical_alignment="center")
         with head:
             st.markdown("##### Composed answer")
         with badge:
-            state_badge(Wiring.PREVIEW)
+            state_badge(Wiring.LIVE)
 
-        body = " ".join(
-            sentence + "".join(f'<span class="fs-cite">{index}</span>' for index in citations)
-            for sentence, citations in preview.sentences
-        )
-        st.html(f'<div style="line-height:1.75;font-size:0.97rem">{body}</div>')
-
-        st.container(height=8, border=False)
-        metrics = st.columns(4)
-        metrics[0].metric("Support band", preview.support_band, border=True)
-        metrics[1].metric(
-            "Numerals verified",
-            preview.numerals_verified,
-            help="Found in a span the claim itself cites. The model writes no values.",
-            border=True,
-        )
-        metrics[2].metric("Numerals refused", preview.refused_numerals, border=True)
-        metrics[3].metric("Model", preview.model, border=True)
-
-        with st.expander("Evidence Gate", icon=":material/verified_user:"):
-            st.caption(
-                "Every check must pass before an answer is released. A failed check "
-                "withholds the answer rather than annotating it."
+        with st.container(horizontal=True, gap="small", vertical_alignment="center"):
+            st.badge(decision.capitalize(), icon=icon, color=colour)
+            st.html(
+                '<span class="fs-meta">Support band '
+                f'<strong>{answer.get("support_band", "none")}</strong> \N{BULLET} '
+                "a rule over what survived, not a probability of correctness</span>"
             )
-            for label, passed, detail in preview.gate_checks:
-                icon = ":material/check_circle:" if passed else ":material/cancel:"
-                with st.container(horizontal=True, gap="small", vertical_alignment="center"):
-                    st.badge("", icon=icon, color="green" if passed else "red")
-                    st.markdown(f"**{label}** \N{EM DASH} {detail}")
 
-        panel_caption(
-            Wiring.PREVIEW,
-            "Generation and the Evidence Gate are the next phase. The issuer named above "
-            "does not exist; the passages below are real.",
+        claims = answer.get("claims") or ()
+        if claims:
+            st.container(height=4, border=False)
+            for claim in claims:
+                _claim(claim)
+        else:
+            st.info(_abstention_note(answer), icon=":material/info:")
+
+        _withheld_panel(answer.get("withheld") or ())
+        _reasons(answer.get("reason_codes") or (), released=bool(claims))
+        _answer_footer(answer)
+
+
+def _claim(claim: dict[str, Any]) -> None:
+    # One released claim, its inline citation marks, and the spans behind them.
+    #
+    # ``cited_passage_ids`` rather than the citation list: there is one citation per
+    # source element, so a claim resting on a passage built from eleven table rows has
+    # eleven citations naming the same passage, and marking each would render [4] eleven
+    # times. The API supplies the distinct ids for exactly this reason.
+    ids = list(claim.get("cited_passage_ids") or ())
+    marks = "".join(f'<span class="fs-cite">{identifier}</span>' for identifier in ids)
+    st.html(
+        f'<div style="line-height:1.75;font-size:0.97rem;margin:0.35rem 0">'
+        f"{claim.get('text', '')} {marks}</div>"
+    )
+
+    for finding in claim.get("disclosures") or ():
+        code = str(finding.get("code", ""))
+        st.warning(
+            f"**Shown with a qualification \N{EM DASH} {code}.** "
+            f"{_REASON_MEANINGS.get(code, finding.get('detail', ''))}",
+            icon=":material/info:",
         )
+
+    citations = claim.get("citations") or ()
+    if not citations:
+        return
+
+    with st.container(horizontal=True, gap="small"):
+        for identifier in ids:
+            spans = [
+                citation
+                for citation in citations
+                if citation.get("passage_id") == identifier
+            ]
+            with st.popover(f"[{identifier}]", help="The stored spans this claim rests on"):
+                st.caption(
+                    f"Passage {identifier} \N{BULLET} {len(spans)} source region(s). "
+                    "Read from the source representation; the model wrote none of this."
+                )
+                for span in spans:
+                    _span(span)
+
+
+def _span(span: dict[str, Any]) -> None:
+    # One stored source span, with the address a reader is shown and its element id.
+    body = str(span.get("text", ""))
+    shown = body if len(body) <= _SPAN_PREVIEW else f"{body[:_SPAN_PREVIEW]}\N{HORIZONTAL ELLIPSIS}"
+    st.html(
+        f'<div class="fs-meta">{span.get("locator", "")}</div>'
+        f'<div class="fs-passage" style="margin:0.2rem 0 0.5rem">{shown}</div>'
+        f'<div><span class="fs-id">{span.get("source_element_id", "")}</span></div>'
+    )
+
+
+def _withheld_panel(withheld: tuple[dict[str, Any], ...]) -> None:
+    # What the Evidence Gate removed. Shown, not hidden: a reader who cannot see the
+    # removal cannot tell a complete answer from a dismantled one.
+    if not withheld:
+        return
+
+    with st.expander(
+        f"Withheld by the Evidence Gate ({len(withheld)})",
+        icon=":material/shield:",
+        expanded=True,
+    ):
+        st.caption(
+            "The model wrote these and they were not released. They are shown so the "
+            "answer above can be judged for completeness \N{EM DASH} do not read them as "
+            "findings."
+        )
+        for claim in withheld:
+            st.html(
+                '<div class="fs-passage" style="border-left-color:#ef4444">'
+                f'{claim.get("text", "")}</div>'
+            )
+            for finding in claim.get("findings") or ():
+                code = str(finding.get("code", ""))
+                st.caption(
+                    f"**{code}** \N{EM DASH} "
+                    f"{_REASON_MEANINGS.get(code, finding.get('detail', ''))}"
+                )
+
+
+def _reasons(codes: tuple[str, ...], *, released: bool) -> None:
+    # Reason codes in plain language. Only when something was withheld or qualified:
+    # on a clean answer the list is empty and a heading over nothing reads as a warning.
+    if not codes or not released:
+        return
+    with st.expander(f"Why content was withheld or qualified ({len(codes)})"):
+        for code in codes:
+            st.markdown(f"**{code}** \N{EM DASH} {_REASON_MEANINGS.get(code, code)}")
+
+
+def _abstention_note(answer: dict[str, Any]) -> str:
+    # Why there is no answer, in words rather than codes.
+    codes = [str(code) for code in (answer.get("reason_codes") or ())]
+    if not codes:
+        return (
+            "No answer was composed. The degradation flag above says why; the evidence "
+            "below was still retrieved."
+        )
+    explained = " ".join(_REASON_MEANINGS.get(code, code) for code in codes)
+    return f"**No claim was released.** {explained}"
+
+
+def _answer_footer(answer: dict[str, Any]) -> None:
+    # What the answer cost and where the time went.
+    timings = answer.get("timings_ms") or {}
+    total = timings.get("total_ms", 0)
+    generation = timings.get("generation_ms", 0)
+
+    strip = st.columns(4)
+    strip[0].metric("Claims released", len(answer.get("claims") or ()), border=True)
+    strip[1].metric("Withheld", len(answer.get("withheld") or ()), border=True)
+    strip[2].metric(
+        "Evidence",
+        f"{len(answer.get('passages') or ())} passages",
+        help=(
+            f"{answer.get('evidence_used_chars', 0)} of "
+            f"{answer.get('evidence_budget_chars', 0)} characters of budget used; "
+            f"{answer.get('passages_dropped_for_budget', 0)} dropped."
+        ),
+        border=True,
+    )
+    strip[3].metric(
+        "Answer time",
+        f"{total / 1000:.0f} s",
+        help=f"Of which the model took {generation / 1000:.0f} s.",
+        border=True,
+    )
+
+    st.caption(
+        f"Model {answer.get('model', '\N{EM DASH}')} \N{BULLET} "
+        f"{answer.get('prompt_tokens', 0)} prompt and "
+        f"{answer.get('completion_tokens', 0)} completion tokens \N{BULLET} "
+        f"recorded as {answer.get('answer_id', '\N{EM DASH}')}"
+    )
 
 
 def _passages_panel(result: dict[str, Any]) -> None:
-    """The live retrieved passages."""
+    # The retrieved passages the answer was composed from.
     for flag in result.get("degraded", ()):
         st.warning(
             f"**Degraded \N{EM DASH} {flag}.** "
             f"{_FLAG_MEANINGS.get(flag, 'See the degradation flags in §20.12.')}",
             icon=":material/warning:",
+        )
+
+    # Reranking off is a property of *this panel only*: POST /v1/ask carries no rerank
+    # field, so a composed answer always rests on the reranked order. Said out loud,
+    # because a reader comparing an answer against a differently ordered evidence list
+    # would reasonably assume the answer was built from what they can see.
+    if not result.get("reranked") and "reranker_unavailable" not in (
+        result.get("degraded") or ()
+    ):
+        st.info(
+            "Reranking is switched off for the passages below, so they are in fusion "
+            "order. A composed answer always uses the reranked order \N{EM DASH} the two "
+            "lists may differ, and the answer's own passage count is shown above.",
+            icon=":material/swap_vert:",
         )
 
     candidates = result.get("candidates", ())
@@ -277,7 +559,7 @@ def _passages_panel(result: dict[str, Any]) -> None:
 
 
 def _passage_card(candidate: dict[str, Any]) -> None:
-    """One passage, with its provenance inline rather than behind a click."""
+    # One passage, with its provenance inline rather than behind a click.
     pages = candidate.get("page_numbers") or []
     page_label = (
         f"p. {pages[0]}"

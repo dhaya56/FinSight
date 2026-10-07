@@ -17,7 +17,12 @@ from typing import Any, Final
 
 import httpx
 
-__all__ = ["ApiClient", "ApiError", "client_from_environment"]
+__all__ = [
+    "ASK_TIMEOUT_SECONDS",
+    "ApiClient",
+    "ApiError",
+    "client_from_environment",
+]
 
 API_URL_VARIABLE: Final = "FINSIGHT_API_URL"
 API_TOKEN_VARIABLE: Final = "FINSIGHT_API_TOKEN"
@@ -31,6 +36,20 @@ request of a process also loads the cross-encoder from the local cache, and
 httpx's own default of 5 seconds would abandon that load and report a timeout as
 though retrieval had failed. A client timeout shorter than the work it waits for
 turns a slow answer into a wrong diagnosis.
+"""
+
+ASK_TIMEOUT_SECONDS: Final = 900.0
+"""Separate from the retrieval timeout, and far larger, because generation is.
+
+Measured against the live route on this host: 302 seconds for one question over four
+passages, of which 287 was the model. Prompt evaluation runs at roughly 26 tokens per
+second and decode at roughly 3.3, because no GPU offload is available here and an 8B
+model will not fit 2 GB of integrated video memory.
+
+So the retrieval timeout would abandon a request **the server goes on to complete and
+record** — the client gives up, the answer lands in the audit table, and the reader is
+told the model failed when it did not. 900 seconds leaves headroom over the worst
+measured case rather than sitting just above it.
 """
 
 
@@ -53,6 +72,7 @@ class ApiClient:
     base_url: str
     token: str
     timeout: float = DEFAULT_TIMEOUT_SECONDS
+    ask_timeout: float = ASK_TIMEOUT_SECONDS
 
     def search(
         self,
@@ -69,19 +89,44 @@ class ApiClient:
                 returned a status outside 2xx.
         """
         payload: dict[str, Any] = {"query": query, "limit": limit, "rerank": rerank}
-        # Only filters the caller actually set are sent. Sending nulls would be
-        # equivalent here, but an absent key states "unfiltered" rather than
-        # "filtered on nothing", and the request contract forbids unknown fields.
-        payload.update(
-            {key: value for key, value in (filters or {}).items() if value not in (None, "")}
-        )
+        return self._post("/v1/search", _with_filters(payload, filters), self.timeout)
 
+    def ask(
+        self,
+        question: str,
+        *,
+        limit: int = 8,
+        filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Answer ``question`` from the corpus, with citations.
+
+        **Minutes, not seconds** — see :data:`ASK_TIMEOUT_SECONDS`. A caller must not
+        present this as interactive.
+
+        An abstention is a successful response, not an error: the body carries the
+        decision and the reason, and the evidence is attached even when no prose was
+        composed. Only transport failure and a refused or failed request raise.
+
+        Raises:
+            ApiError: the API was unreachable, rejected the credentials, or returned a
+                status outside 2xx.
+        """
+        payload: dict[str, Any] = {"question": question, "limit": limit}
+        return self._post("/v1/ask", _with_filters(payload, filters), self.ask_timeout)
+
+    def _post(self, path: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        """One POST, with the error handling both routes need.
+
+        Shared so the two routes cannot drift on how a 401 is reported: the message tells
+        the operator which end of the connection to look at, and getting that wrong sends
+        them to the server when the token is the problem.
+        """
         try:
             response = httpx.post(
-                f"{self.base_url.rstrip('/')}/v1/search",
+                f"{self.base_url.rstrip('/')}{path}",
                 json=payload,
                 headers={"Authorization": f"Bearer {self.token}"},
-                timeout=self.timeout,
+                timeout=timeout,
             )
         except httpx.RequestError as error:
             raise ApiError(f"Could not reach the API at {self.base_url}: {error}") from error
@@ -109,6 +154,21 @@ class ApiClient:
         except httpx.RequestError:
             return False
         return response.is_success
+
+
+def _with_filters(
+    payload: dict[str, Any], filters: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Add only the filters the caller actually set.
+
+    Sending nulls would be equivalent to the API, but an absent key states "unfiltered"
+    rather than "filtered on nothing", and both request contracts forbid unknown fields —
+    so a stray key is a 422 rather than a silently widened scope.
+    """
+    payload.update(
+        {key: value for key, value in (filters or {}).items() if value not in (None, "")}
+    )
+    return payload
 
 
 def _detail(response: httpx.Response) -> str:

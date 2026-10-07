@@ -14,7 +14,7 @@ totals add up, growth rates match the values they are computed from — but they
 nothing. None is a benchmark, a target, or a result.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Final
@@ -25,7 +25,6 @@ __all__ = [
     "DemoExperiment",
     "DemoFact",
     "EvaluationSummary",
-    "answer_preview",
     "demo_documents",
     "demo_experiments",
     "demo_facts",
@@ -407,64 +406,4 @@ def evaluation_summary() -> EvaluationSummary:
         recall_at_10=0.812,
         recall_trend=(0.70, 0.72, 0.75, 0.78, 0.79, 0.81, 0.81),
         latency_trend=(3.1, 2.9, 2.6, 2.5, 2.3, 2.2, 2.1),
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class AnswerPreview:
-    """A composed answer, as Phase 8 would release one."""
-
-    question: str
-    sentences: list[tuple[str, list[int]]] = field(default_factory=list)
-    support_band: str = "Strong"
-    gate_checks: list[tuple[str, bool, str]] = field(default_factory=list)
-    model: str = "llama3.1:8b"
-    numerals_verified: int = 0
-    """Numerals found in a span their own claim cites (§26.5, ADR-009)."""
-
-    refused_numerals: int = 0
-
-
-def answer_preview(question: str) -> AnswerPreview:
-    """A generated answer with its citations and Evidence Gate result.
-
-    The claim/citation pairing is the shape the generation phase produces: the model emits
-    claims with citation references, code resolves each reference to the stored source span,
-    and a numeral is released only if it appears in a span its own claim cites (ADR-009).
-    """
-    return AnswerPreview(
-        question=question,
-        sentences=[
-            (
-                "Meridian describes credit risk as the risk of financial loss where a "
-                "customer or counterparty fails to meet its contractual obligations.",
-                [1],
-            ),
-            (
-                "Exposure arises principally from trade receivables and from deposits "
-                "held with banks.",
-                [1, 2],
-            ),
-            (
-                "The company reports a loss allowance of INR 412.00 crore for "
-                "FY2024-25, against INR 386.00 crore in the prior year.",
-                [2, 3],
-            ),
-            (
-                "Concentration is described as limited, with no single customer "
-                "accounting for more than ten per cent of receivables.",
-                [3],
-            ),
-        ],
-        support_band="Strong",
-        gate_checks=[
-            ("Every numeral appears in a span its claim cites", True, "3 of 3 verified"),
-            ("No numeral introduced by the model", True, "0 unbound numerals"),
-            ("Every citation resolves inside the evidence set", True, "4 of 4 resolved"),
-            ("Issuer, period and basis match the claim", True, "FY2024-25, standalone"),
-            ("Conflicting figures disclosed with their periods", True, "no conflict found"),
-            ("Arithmetic refused on non-ledger values", True, "no computation attempted"),
-        ],
-        numerals_verified=3,
-        refused_numerals=0,
     )
