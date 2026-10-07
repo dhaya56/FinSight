@@ -142,6 +142,68 @@ class ApiClient:
         decoded: dict[str, Any] = response.json()
         return decoded
 
+    def facets(self) -> dict[str, Any]:
+        """The values the scope filters can usefully take.
+
+        Returns empty lists rather than raising when the API cannot be reached: a chooser
+        with no options is a degraded control, while an exception here would take down the
+        whole page over a sidebar.
+        """
+        try:
+            response = httpx.get(
+                f"{self.base_url.rstrip('/')}/v1/facets",
+                headers={"Authorization": f"Bearer {self.token}"},
+                timeout=self.timeout,
+            )
+        except httpx.RequestError:
+            return {}
+        if not response.is_success:
+            return {}
+        decoded: dict[str, Any] = response.json()
+        return decoded
+
+    def library(self) -> dict[str, Any]:
+        """Every ingested document and the generation of each that is queryable.
+
+        Raises:
+            ApiError: the API was unreachable, rejected the credentials, or returned a
+                status outside 2xx. Unlike :meth:`facets`, a failure here is reported: the
+                Library page has nothing else to show, so swallowing it would leave an
+                empty table that reads as an empty corpus.
+        """
+        return self._get("/v1/library", self.timeout)
+
+    def system(self) -> dict[str, Any]:
+        """Dependency health, index consistency and answer activity.
+
+        Raises:
+            ApiError: the API was unreachable, rejected the credentials, or returned a
+                status outside 2xx.
+        """
+        return self._get("/v1/system", self.timeout)
+
+    def _get(self, path: str, timeout: float) -> dict[str, Any]:
+        """One GET, with the error handling every read route needs."""
+        try:
+            response = httpx.get(
+                f"{self.base_url.rstrip('/')}{path}",
+                headers={"Authorization": f"Bearer {self.token}"},
+                timeout=timeout,
+            )
+        except httpx.RequestError as error:
+            raise ApiError(f"Could not reach the API at {self.base_url}: {error}") from error
+
+        if response.status_code == httpx.codes.UNAUTHORIZED:
+            raise ApiError(
+                f"The API rejected the token. Check {API_TOKEN_VARIABLE} matches "
+                f"the one the server was started with."
+            )
+        if not response.is_success:
+            raise ApiError(f"The API returned {response.status_code}: {_detail(response)}")
+
+        decoded: dict[str, Any] = response.json()
+        return decoded
+
     def is_ready(self) -> bool:
         """Whether the API's readiness probe currently passes.
 

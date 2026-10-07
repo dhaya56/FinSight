@@ -16,21 +16,13 @@ nothing. None is a benchmark, a target, or a result.
 
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
 from typing import Final
 
 __all__ = [
     "DEMO_ISSUERS",
     "DemoDocument",
-    "DemoExperiment",
-    "DemoFact",
-    "EvaluationSummary",
     "demo_documents",
-    "demo_experiments",
-    "demo_facts",
-    "evaluation_summary",
     "ingest_stages",
-    "ledger_concepts",
 ]
 
 DEMO_ISSUERS: Final = (
@@ -41,16 +33,6 @@ DEMO_ISSUERS: Final = (
 
 # Concepts the Fact Ledger is bounded to. The catalogue is the point: §7 restricts the
 # ledger to an approved set, and anything outside it stays source-bound narrative.
-ledger_concepts: Final = (
-    "Revenue from operations",
-    "Profit before tax",
-    "Profit after tax",
-    "Total assets",
-    "Total equity",
-    "Earnings per share (basic)",
-    "Dividend per share",
-    "Return on net worth",
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,44 +51,6 @@ class DemoDocument:
     tables_found: int
     reading_order_divergence: float
     split: str
-
-
-@dataclass(frozen=True, slots=True)
-class DemoFact:
-    """One canonical fact, carrying the dimensions §7 requires to be preserved."""
-
-    concept: str
-    issuer: str
-    period: str
-    basis: str
-    value: Decimal
-    currency: str
-    unit: str
-    value_state: str
-    assurance: str
-    as_presented: bool
-    source: str
-
-
-@dataclass(frozen=True, slots=True)
-class DemoExperiment:
-    """One recorded experiment, as the evaluation surface would list it."""
-
-    identifier: str
-    changed_factor: str
-    baseline: str
-    candidate: str
-    sample: int
-    baseline_score: float
-    candidate_score: float
-    decision: str
-    recorded: date
-    metric: str = "recall@10"
-    notes: str = ""
-
-    @property
-    def delta(self) -> float:
-        return round(self.candidate_score - self.baseline_score, 4)
 
 
 def demo_documents() -> list[DemoDocument]:
@@ -201,70 +145,6 @@ _FACT_ROWS: Final = (
 )
 
 
-def demo_facts(issuer: str = "Meridian Industries Limited") -> list[DemoFact]:
-    """Canonical facts for the ledger preview."""
-    facts = [
-        DemoFact(
-            concept=concept,
-            issuer=issuer,
-            period=period,
-            basis=basis,
-            value=Decimal(value),
-            currency="INR",
-            unit="crore",
-            value_state="reported",
-            assurance="audited",
-            as_presented=True,
-            source=f"p. {120 + index * 3}, Statement of profit and loss",
-        )
-        for index, (concept, period, basis, value) in enumerate(_FACT_ROWS)
-    ]
-    facts.extend(
-        [
-            DemoFact(
-                concept="Earnings per share (basic)",
-                issuer=issuer,
-                period="FY2024-25",
-                basis="consolidated",
-                value=Decimal("174.20"),
-                currency="INR",
-                unit="per share",
-                value_state="reported",
-                assurance="audited",
-                as_presented=True,
-                source="p. 148, Note 2.18 Earnings per equity share",
-            ),
-            DemoFact(
-                concept="Dividend per share",
-                issuer=issuer,
-                period="FY2024-25",
-                basis="standalone",
-                value=Decimal("46.00"),
-                currency="INR",
-                unit="per share",
-                value_state="reported",
-                assurance="audited",
-                as_presented=True,
-                source="p. 92, Directors' report",
-            ),
-            DemoFact(
-                concept="Return on net worth",
-                issuer=issuer,
-                period="FY2024-25",
-                basis="consolidated",
-                value=Decimal("18.57"),
-                currency="INR",
-                unit="percent",
-                value_state="derived",
-                assurance="unaudited",
-                as_presented=False,
-                source="Computed: profit after tax / total equity",
-            ),
-        ]
-    )
-    return facts
-
-
 @dataclass(frozen=True, slots=True)
 class IngestStage:
     """One stage of the ingestion pipeline, for the progress preview."""
@@ -324,86 +204,3 @@ def ingest_stages() -> list[IngestStage]:
     ]
 
 
-def demo_experiments() -> list[DemoExperiment]:
-    """Recorded experiments for the evaluation surface."""
-    return [
-        DemoExperiment(
-            identifier="EXP-004",
-            changed_factor="Embedding model",
-            baseline="nomic-embed-text",
-            candidate="BGE-M3",
-            sample=120,
-            baseline_score=0.812,
-            candidate_score=0.847,
-            decision="Candidate leads; not admitted without a second run",
-            recorded=date(2026, 9, 30),
-            notes="Development split only. Held-out never opened.",
-        ),
-        DemoExperiment(
-            identifier="EXP-003",
-            changed_factor="Reranker",
-            baseline="MiniLM-L-6-v2",
-            candidate="BGE reranker base",
-            sample=120,
-            baseline_score=0.794,
-            candidate_score=0.801,
-            decision="Within noise at this sample size; no change",
-            recorded=date(2026, 9, 24),
-        ),
-        DemoExperiment(
-            identifier="EXP-002",
-            changed_factor="Fusion constant k",
-            baseline="k=60",
-            candidate="k=20",
-            sample=120,
-            baseline_score=0.812,
-            candidate_score=0.788,
-            decision="Baseline retained",
-            recorded=date(2026, 9, 18),
-            notes="Negative result, recorded rather than discarded.",
-        ),
-        DemoExperiment(
-            identifier="EXP-001",
-            changed_factor="Chunking method",
-            baseline="Fixed 512-token window",
-            candidate="Heading-path with parent windows",
-            sample=80,
-            baseline_score=0.701,
-            candidate_score=0.812,
-            decision="Candidate adopted",
-            recorded=date(2026, 9, 9),
-        ),
-    ]
-
-
-@dataclass(frozen=True, slots=True)
-class EvaluationSummary:
-    """Headline figures for the evaluation surface.
-
-    A dataclass rather than a mapping so each field keeps its type: a ``dict`` of mixed
-    values types every member as ``object``, and every arithmetic or ``len`` call on one
-    then needs a cast that hides a genuine mistake just as well as a spurious one.
-    """
-
-    questions: int
-    answerable: int
-    unanswerable_probes: int
-    citation_resolution: float
-    refusal_precision: float
-    recall_at_10: float
-    recall_trend: tuple[float, ...]
-    latency_trend: tuple[float, ...]
-
-
-def evaluation_summary() -> EvaluationSummary:
-    """Headline figures for the evaluation surface."""
-    return EvaluationSummary(
-        questions=120,
-        answerable=104,
-        unanswerable_probes=16,
-        citation_resolution=1.0,
-        refusal_precision=0.94,
-        recall_at_10=0.812,
-        recall_trend=(0.70, 0.72, 0.75, 0.78, 0.79, 0.81, 0.81),
-        latency_trend=(3.1, 2.9, 2.6, 2.5, 2.3, 2.2, 2.1),
-    )
