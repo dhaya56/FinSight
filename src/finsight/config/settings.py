@@ -408,13 +408,21 @@ class Settings(BaseSettings):
     )
 
     generation_timeout_seconds: float = Field(
-        default=300.0,
+        default=600.0,
         gt=0,
         description=(
-            "MEASURED on this host: a two-claim answer took 16 s warm at roughly 3.9 "
-            "tokens per second, and the first call also loads a 4.9 GB model. A longer "
-            "answer scales with its own length, so this bound is wide — a timeout here "
-            "degrades the answer (§27.9) rather than failing the question."
+            "MEASURED, and raised from 300 s because 300 s was below the worst case the "
+            "other configured bounds permit. A real answer over four passages measured "
+            "287 s of generation — 96% of the old budget — and ENV-012 measures the rates "
+            "that explain it: prompt evaluation at 27.3 tokens per second and decode at "
+            "3.0, with no GPU offload available on this host. The full evidence budget is "
+            "5,362 prompt tokens (196 s), max_tokens of 800 is 263 s of decode, and a "
+            "cold model load measured 50 s: 510 s in total. The old default would have "
+            "abandoned a working generation after five minutes and reported it as the "
+            "model being unreachable — a timeout degrades the answer (§27.9), so the "
+            "reader would have been told the corpus had nothing when it had an answer. "
+            "Kept below the UI client's own 900 s so the server reports a clean "
+            "degradation with its evidence rather than the client losing the response."
         ),
     )
 

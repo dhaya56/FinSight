@@ -54,7 +54,7 @@ class FakeGenerator:
     """Raise :class:`GenerationTruncatedError`, for the silent-truncation path."""
 
     invent_numeral: str | None = None
-    """Append a numeral no placeholder produced, which the Gate must refuse (§27.3)."""
+    """Append a numeral absent from every cited span, which the Gate must refuse (§27.3)."""
 
     cite_outside: int | None = None
     """Cite an identifier outside the evidence set, which the Gate must refuse (§27.6)."""

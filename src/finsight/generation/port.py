@@ -12,10 +12,11 @@ parsed cleanly on every attempt. So the contract is enforced at the boundary ins
 hoped for, and a caller receives a parsed object rather than a string it must re-judge.
 
 **Two layers of validation, deliberately.** This port guarantees only that the response
-was JSON. Whether it is a *valid* generation contract — placeholders that resolve,
-citations inside the evidence set — is decided above, by Pydantic and then by the Evidence
-Gate (§26.4, §27). A port that validated meaning would put the security boundary in the
-transport layer, where a new adapter could quietly omit it.
+was JSON. Whether it is a *valid* generation contract — citation references that resolve
+inside the evidence set, numerals present in the spans they cite — is decided above, by
+Pydantic and then by the Evidence Gate (§26.4, §27). A port that validated meaning would
+put the security boundary in the transport layer, where a new adapter could quietly omit
+it.
 
 **The model has no capabilities** (§10.4): no tools, no function calling, no filesystem,
 no network of its own. An adapter that enabled any of those would break the trust boundary
@@ -64,8 +65,8 @@ class GenerationShapeError(GenerationError):
 
     Not survivable by retrying the same request: either the runtime ignored the schema or
     the schema is wrong, and both mean the typed contract (§26.3) is not in force. Raised
-    rather than parsed leniently, because a partially-understood contract is how a
-    placeholder goes unrecognised and its numeral reaches a reader unbound.
+    rather than parsed leniently, because a partially-understood contract is how a claim's
+    citations go unread and its numerals reach a reader unchecked.
     """
 
 
