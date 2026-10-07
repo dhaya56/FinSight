@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from finsight import __version__
-from finsight.api.routes import ask, health, search
+from finsight.api.routes import ask, facets, health, library, search, system
 from finsight.persistence.database import dispose_engine
 
 
@@ -38,4 +38,7 @@ def create_app() -> FastAPI:
     # route it carries is covered without each one having to remember.
     app.include_router(search.router)
     app.include_router(ask.router)
+    app.include_router(facets.router)
+    app.include_router(library.router)
+    app.include_router(system.router)
     return app

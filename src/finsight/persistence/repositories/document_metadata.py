@@ -5,7 +5,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from finsight.persistence.tables.document_metadata import DocumentMetadata
 
@@ -85,3 +85,41 @@ class DocumentMetadataRepository:
                 DocumentMetadata.document_version_id == document_version_id
             )
         ).scalar_one_or_none()
+
+    def filter_values(self) -> dict[str, list[str]]:
+        """The distinct values each §20.2 filter can usefully take, for a chooser.
+
+        **A filter a reader has to guess is not a usable filter.** The issuer field was a
+        free-text box, so "Infosys" matched nothing while "Infosys Limited" matched — a
+        silent empty result that reads as "the corpus has nothing" rather than "that is not
+        how the name is spelled". These are the values that actually exist, so a chooser can
+        offer them.
+
+        Drawn from recorded metadata rather than from a configured list: a value that no
+        document carries would narrow a search to nothing, which is the same trap in a
+        different place.
+
+        Sorted, because a chooser's order is part of its usability and the database's
+        physical order is not an order.
+        """
+        return {
+            name: self._distinct(column)
+            for name, column in (
+                ("issuer_name", DocumentMetadata.issuer_name),
+                ("document_type", DocumentMetadata.document_type),
+                ("fiscal_period", DocumentMetadata.fiscal_period),
+                ("reporting_basis", DocumentMetadata.reporting_basis),
+            )
+        }
+
+    def _distinct(self, column: InstrumentedAttribute[str]) -> list[str]:
+        """Every value present, once, in order."""
+        return [
+            value
+            for value in self._session.execute(
+                select(column).distinct().where(column.is_not(None)).order_by(column)
+            )
+            .scalars()
+            .all()
+            if value
+        ]

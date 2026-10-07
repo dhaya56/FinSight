@@ -24,14 +24,22 @@ substituting settings substitutes the *provider* instead, which is the seam the 
 already use.
 """
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from functools import lru_cache
+
+from sqlalchemy.orm import Session
 
 from finsight.config.settings import get_settings
 from finsight.generation.ollama_generator import build_generator
 from finsight.generation.service import AskService
+from finsight.persistence.database import session_scope
 from finsight.retrieval.pipeline import RetrievalPipeline, build_retrieval_pipeline
 
-__all__ = ["get_ask_service", "get_pipeline"]
+__all__ = ["SessionScope", "get_ask_service", "get_pipeline", "get_session_scope"]
+
+SessionScope = Callable[[], AbstractContextManager[Session]]
+"""A factory for one bounded database session (§29.7)."""
 
 
 @lru_cache(maxsize=1)
@@ -43,6 +51,16 @@ def _cached_pipeline() -> RetrievalPipeline:
 def get_pipeline() -> RetrievalPipeline:
     """Provide the process-wide retrieval pipeline."""
     return _cached_pipeline()
+
+
+def get_session_scope() -> SessionScope:
+    """Provide the session factory for routes that read the database directly.
+
+    Not cached and not a session: a dependency that returned an open session would hold a
+    transaction for the lifetime of a request, which §29.7 forbids. Routes open and close
+    their own, bounded by the work they do.
+    """
+    return session_scope
 
 
 @lru_cache(maxsize=1)
