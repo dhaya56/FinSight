@@ -7,17 +7,16 @@ extracted text, no filename, no object key, no connection string, no part of a
 document (CLAUDE.md §10). An operator running `corpus ingest` in a shared terminal, or
 piping it into a log, must not thereby disclose the contents of a filing.
 
-**`search` is the one exception, and it is one by design rather than by drift.**
-Showing retrieved passages is the command's entire purpose, and §6.8 makes inspecting
-"exact pages, spans, tables, and cells supporting an answer" a product capability
-rather than a leak. So the rule is narrower than "never print document text": an
-*operational* command must not, and the *evidence view* must. Two consequences follow,
-and both are enforced here rather than assumed:
+**`search` and `ask` are the exceptions, and they are so by design rather than by drift.**
+Showing retrieved passages is their entire purpose, and §6.8 makes inspecting "exact pages,
+spans, tables, and cells supporting an answer" a product capability rather than a leak. So the
+rule is narrower than "never print document text": an *operational* command must not, and the
+*evidence view* must. Two consequences follow, and both are enforced here rather than assumed:
 
-* nothing `search` prints is logged — it goes to stdout for the operator who typed the
-  query, and no log line carries a passage or a question;
-* passages are truncated to a snippet unless `--full` is asked for, so a careless
-  redirect spills a line rather than a filing.
+* nothing either command prints is logged — it goes to stdout for the operator who typed the
+  query, and no log line carries a passage, a question or a figure;
+* passages and cited spans are truncated to a snippet unless `--full` is asked for, so a
+  careless redirect spills a line rather than a filing.
 """
 
 import argparse
@@ -40,6 +39,9 @@ from finsight.corpus.store import CorpusStore, digest_of, media_type_for
 from finsight.domain.errors import DomainError
 from finsight.embedding.port import EmbeddingError
 from finsight.extraction.service import build_extraction_service
+from finsight.generation.decision import AnswerDecision, ReleasedClaim
+from finsight.generation.resolution import ResolvedCitation
+from finsight.generation.service import AskedAnswer, build_ask_service
 from finsight.indexing.pruning import REBUILD_HINT, build_pruning_service
 from finsight.indexing.service import build_indexing_service
 from finsight.object_store.port import ObjectStoreError
@@ -125,19 +127,14 @@ def build_parser() -> argparse.ArgumentParser:
     prune.set_defaults(handler=run_prune)
 
     _add_search_command(subcommands)
+    _add_ask_command(subcommands)
     _add_corpus_commands(subcommands)
 
     return parser
 
 
 def _add_search_command(subcommands: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
-    """Attach ``search``: the evidence view (§6.8).
-
-    Every filter is optional and every one is a §20.2 hard filter when given. Optional
-    because a question spanning the corpus wants none, and hard because §7 forbids
-    similarity overriding scope — so a filter that *is* given is never relaxed to find
-    more results.
-    """
+    """Attach ``search``: the evidence view (§6.8)."""
     search = subcommands.add_parser(
         "search", help="Retrieve passages from the indexed corpus."
     )
@@ -145,38 +142,7 @@ def _add_search_command(subcommands: argparse._SubParsersAction) -> None:  # typ
     search.add_argument(
         "--limit", type=int, default=5, help="Passages to return. Defaults to 5."
     )
-    search.add_argument(
-        "--issuer", default=None, help="Restrict to one issuer, exactly as recorded."
-    )
-    search.add_argument(
-        "--document-type", default=None, help="annual_report, drhp, form_10k."
-    )
-    search.add_argument(
-        "--basis",
-        default=None,
-        help="consolidated, standalone, both or undetermined (§16.9).",
-    )
-    search.add_argument(
-        "--section", default=None, help="Restrict to one top-level heading."
-    )
-    search.add_argument(
-        "--year",
-        type=int,
-        default=None,
-        help="Period ending in this year. Use --since for a range.",
-    )
-    search.add_argument(
-        "--since",
-        type=int,
-        default=None,
-        help="Period ending in this year or later. Cannot be used with --year.",
-    )
-    search.add_argument(
-        "--evidence-type",
-        choices=["narrative", "table_derived"],
-        default=None,
-        help="Restrict to one evidence type. Allocation covers both by default.",
-    )
+    _add_filter_options(search)
     search.add_argument(
         "--no-rerank",
         action="store_true",
@@ -191,6 +157,95 @@ def _add_search_command(subcommands: argparse._SubParsersAction) -> None:  # typ
         help="Print whole passages rather than a snippet.",
     )
     search.set_defaults(handler=run_search)
+
+
+def _add_ask_command(subcommands: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    """Attach ``ask``: the answer view.
+
+    The same filters as ``search`` and for the same reason. An answer is composed from
+    retrieved passages, so a filter that narrows retrieval narrows the evidence the answer
+    may rest on — and §20.2's filters being hard means an answer cannot quietly reach outside
+    the scope the operator asked for.
+    """
+    ask = subcommands.add_parser(
+        "ask", help="Answer a question from the indexed corpus, with citations."
+    )
+    ask.add_argument("question", help="The question, in quotes.")
+    ask.add_argument(
+        "--limit",
+        type=int,
+        default=8,
+        help=(
+            "Passages considered as evidence. Defaults to 8; the character budget may "
+            "admit fewer."
+        ),
+    )
+    _add_filter_options(ask)
+    ask.add_argument(
+        "--full",
+        action="store_true",
+        help="Print whole cited spans rather than a snippet.",
+    )
+    ask.set_defaults(handler=run_ask)
+
+
+def _add_filter_options(parser: argparse.ArgumentParser) -> None:
+    """The §20.2 hard filters, shared by ``search`` and ``ask``.
+
+    Every filter is optional and every one is hard when given. Optional because a question
+    spanning the corpus wants none, and hard because §7 forbids similarity overriding scope —
+    so a filter that *is* given is never relaxed to find more results.
+    """
+    parser.add_argument(
+        "--issuer", default=None, help="Restrict to one issuer, exactly as recorded."
+    )
+    parser.add_argument(
+        "--document-type", default=None, help="annual_report, drhp, form_10k."
+    )
+    parser.add_argument(
+        "--basis",
+        default=None,
+        help="consolidated, standalone, both or undetermined (§16.9).",
+    )
+    parser.add_argument(
+        "--section", default=None, help="Restrict to one top-level heading."
+    )
+    parser.add_argument(
+        "--year",
+        type=int,
+        default=None,
+        help="Period ending in this year. Use --since for a range.",
+    )
+    parser.add_argument(
+        "--since",
+        type=int,
+        default=None,
+        help="Period ending in this year or later. Cannot be used with --year.",
+    )
+    parser.add_argument(
+        "--evidence-type",
+        choices=["narrative", "table_derived"],
+        default=None,
+        help="Restrict to one evidence type. Allocation covers both by default.",
+    )
+
+
+def _filters_from(args: argparse.Namespace) -> RetrievalFilters:
+    """Build the filter set from parsed arguments.
+
+    ``--year`` and ``--since`` land in the same field because a fiscal year is either an exact
+    value or a bound, never both; the caller rejects the pair before reaching here.
+    """
+    return RetrievalFilters(
+        issuer_name=args.issuer,
+        document_type=args.document_type,
+        reporting_basis=args.basis,
+        section=args.section,
+        evidence_type=args.evidence_type,
+        fiscal_year=args.year
+        if args.year is not None
+        else (Span(low=args.since) if args.since is not None else None),
+    )
 
 
 def _add_corpus_commands(subcommands: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
@@ -648,6 +703,8 @@ def run_prune(args: argparse.Namespace) -> int:
 
 
 _SNIPPET = 220
+_SPANS = 4
+"""Cited spans printed per passage before the rest are counted rather than listed."""
 
 
 def run_search(args: argparse.Namespace) -> int:
@@ -666,17 +723,7 @@ def run_search(args: argparse.Namespace) -> int:
         pipeline = replace(pipeline, reranker=None)
 
     result = pipeline.search(
-        args.query,
-        filters=RetrievalFilters(
-            issuer_name=args.issuer,
-            document_type=args.document_type,
-            reporting_basis=args.basis,
-            section=args.section,
-            evidence_type=args.evidence_type,
-            fiscal_year=args.year if args.year is not None
-            else (Span(low=args.since) if args.since is not None else None),
-        ),
-        limit=args.limit,
+        args.query, filters=_filters_from(args), limit=args.limit
     )
 
     if result.degraded:
@@ -738,6 +785,168 @@ def _print_search_footer(result: Result) -> None:
     if result.collapsed:
         print(f"collapsed {len(result.collapsed)} duplicate passage(s) (§20.9)")
     print(f"fusion config: {result.fusion_version}  (QueryTrace not persisted yet)")
+
+
+def run_ask(args: argparse.Namespace) -> int:
+    """Answer a question and print the answer, what was withheld, and the sources.
+
+    **All three, always.** An answer without its citations is prose a reader cannot check, and
+    an answer that silently omits what the Evidence Gate removed reads as complete when it is
+    not — §27.11 gives the answer one decision, and this prints that decision rather than
+    inferring one from whether any text appeared.
+
+    Exit code 0 for an abstention. Declining to answer is a correct outcome (§26.1), not a
+    command failure; an operator scripting this should distinguish them by the decision line,
+    not by whether the process succeeded.
+    """
+    if args.year is not None and args.since is not None:
+        print("error: use --year or --since, not both", file=sys.stderr)
+        return EXIT_FAILED
+
+    answer = build_ask_service().ask(
+        args.question, filters=_filters_from(args), limit=args.limit
+    )
+    decision = answer.decision
+
+    if decision.degraded:
+        # First, as in `search`. A reader who stops at the first line must already know.
+        print(f"DEGRADED: {', '.join(decision.degraded)}")
+    print(
+        f"decision: {decision.decision.value}"
+        f"   support: {decision.support_band.value}"
+        f"   model: {answer.model}"
+    )
+    if decision.reason_codes:
+        print(f"reasons:  {', '.join(decision.reason_codes)}")
+
+    _print_claims(decision)
+    _print_withheld(decision)
+    _print_sources(answer, full=args.full)
+    _print_ask_footer(answer)
+    return EXIT_OK
+
+
+def _print_claims(decision: AnswerDecision) -> None:
+    """The released claims, each followed by the passage ids it rests on.
+
+    Inline ``[n]`` rather than a footnote list, because the reference has to sit beside the
+    sentence it supports: a claim whose citations are three lines away is one a reader checks
+    by assuming rather than by looking.
+    """
+    if not decision.released:
+        print("\n(no claim was released)")
+        return
+
+    print()
+    for claim in decision.released:
+        marks = "".join(f"[{identifier}]" for identifier in _cited_ids(claim))
+        print(f"{claim.text} {marks}")
+        for finding in claim.disclosures:
+            # Shown with the claim, not collected at the end. §27.8 requires a disclosed
+            # conflict to appear beside what it qualifies.
+            print(f"    disclosed: {finding.code} — {finding.detail}")
+
+
+def _print_withheld(decision: AnswerDecision) -> None:
+    """What the Gate removed, and why.
+
+    Printed rather than dropped: a reader who cannot see what was removed cannot judge
+    whether what remains is complete.
+    """
+    if not decision.withheld:
+        return
+
+    total = len(decision.released) + len(decision.withheld)
+    print(f"\nwithheld {len(decision.withheld)} of {total} claim(s):")
+    for claim in decision.withheld:
+        print(f"  - {claim.text}")
+        for finding in claim.findings:
+            print(f"      {finding.code} — {finding.detail}")
+
+
+def _print_sources(answer: AskedAnswer, *, full: bool) -> None:
+    """Every passage a released claim cites, with the source regions behind it.
+
+    The spans are the point. A citation a reader cannot follow to stored text is a reference
+    rather than evidence (§14.9), so the locator and the source element id are printed with
+    it — and the span's own text, which is what the numeral in the claim was checked against.
+    """
+    spans: dict[int, list[ResolvedCitation]] = {}
+    for claim in answer.decision.released:
+        for citation in claim.citations:
+            seen = spans.setdefault(citation.passage_id, [])
+            if all(
+                existing.source_element_id != citation.source_element_id
+                for existing in seen
+            ):
+                seen.append(citation)
+
+    if not spans:
+        return
+
+    print("\nsources:")
+    for identifier in sorted(spans):
+        passage = answer.evidence.by_id(identifier)
+        heading = passage.heading_path if passage is not None else ()
+        print(
+            f"  [{identifier}] "
+            f"{(passage.issuer_name if passage else None) or 'unknown issuer'}"
+            f"  {(passage.fiscal_period if passage else None) or 'unknown period'}"
+            f"  {(passage.reporting_basis if passage else None) or 'basis unknown'}"
+            f"  pages {list(passage.page_numbers) if passage else []}"
+        )
+        if heading:
+            print(f"        section: {' > '.join(heading)}")
+
+        # Bounded as `search` bounds its own, and for a sharper reason: a chunk spanning a
+        # table resolves to one element per row, so an unbounded list buried the two spans
+        # that carried the claim under fourteen that carried "2025 2024". The count is
+        # printed so a reader knows the list was cut rather than that the rest do not exist.
+        shown = spans[identifier] if full else spans[identifier][:_SPANS]
+        for citation in shown:
+            print(f"        {citation.locator}  {citation.source_element_id}")
+            body = " ".join(citation.text.split())
+            if not full and len(body) > _SNIPPET:
+                body = f"{body[:_SNIPPET]}..."
+            print(f"          {body}")
+        remaining = len(spans[identifier]) - len(shown)
+        if remaining > 0:
+            print(f"        ... and {remaining} further span(s) in this passage")
+
+    uncited = len(answer.evidence.passages) - len(spans)
+    if uncited > 0:
+        print(f"  ({uncited} further passage(s) were supplied as evidence but not cited)")
+
+
+def _print_ask_footer(answer: AskedAnswer) -> None:
+    """What the evidence set cost and where the time went.
+
+    Separated by stage because generation dominates — and an operator seeing one total cannot
+    tell a slow index from a cold model.
+    """
+    evidence = answer.evidence
+    print(
+        f"\nevidence: {len(evidence.passages)} passage(s) of {evidence.considered} "
+        f"considered, {evidence.used_chars} of {evidence.budget_chars} chars"
+        f", {evidence.merged} merged, {evidence.expanded} expanded"
+        f", {evidence.dropped_for_budget} dropped to budget"
+    )
+    timings = ", ".join(
+        f"{name.removesuffix('_ms')} {value} ms"
+        for name, value in answer.timings_ms.items()
+    )
+    print(f"timings:  {timings}")
+    print(
+        f"tokens:   {answer.prompt_tokens} prompt, "
+        f"{answer.completion_tokens} completion"
+    )
+    if answer.answer_id is not None:
+        print(f"recorded: {answer.answer_id}")
+
+
+def _cited_ids(claim: ReleasedClaim) -> list[int]:
+    """The passage ids a claim cites, ascending and without repeats."""
+    return sorted({citation.passage_id for citation in claim.citations})
 
 
 def run_extract(args: argparse.Namespace) -> int:

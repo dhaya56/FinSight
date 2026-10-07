@@ -19,7 +19,7 @@ from uuid import UUID
 
 from sqlalchemy import func, insert, select, update
 from sqlalchemy import text as sql_text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from finsight.chunking.contracts import Chunk as DerivedChunk
 from finsight.domain.representations.retrieval import ChunkRole
@@ -33,6 +33,7 @@ from finsight.persistence.tables.chunks import (
     IndexOutbox,
 )
 from finsight.persistence.tables.document_metadata import DocumentMetadata
+from finsight.persistence.tables.documents import DocumentVersion
 from finsight.persistence.tables.source import SourceElement
 
 
@@ -365,6 +366,68 @@ class ChunkRepository:
             for row in self._session.execute(statement, values)
         ]
 
+    def parents_of(self, *, chunk_ids: Sequence[UUID]) -> dict[UUID, PendingChunk]:
+        """Map each child to the parent that contains it, where one exists.
+
+        **Why generation reads parents at all.** A retrieved child is often a fragment —
+        measured on the active corpus, children average 200 tokens and 1,211 of 4,867 are
+        under 48. A model given a fragment answers from a fragment. §18.5 keeps parents for
+        interpretation and §20.8 expands to them; this is the read that makes that possible,
+        and until now nothing used it.
+
+        **A child with no parent is absent from the result, not an error.** The chunker drops
+        a parent whose text is byte-identical to its only child, because expanding to it
+        would return the same text twice. Those children are already whole runs, so the
+        caller uses the child's own text and loses nothing.
+
+        One query for the whole candidate set, joined through the child's ``parent_id``.
+        Order is not meaningful: the caller holds the ranking.
+        """
+        if not chunk_ids:
+            return {}
+        parent = aliased(Chunk, name="parent")
+        statement = (
+            select(
+                Chunk.id.label("child_id"),
+                parent.id,
+                parent.document_version_id,
+                parent.text,
+                parent.heading_path,
+                parent.page_numbers,
+                parent.evidence_type,
+                DocumentMetadata.issuer_name,
+                DocumentMetadata.document_type,
+                DocumentMetadata.fiscal_period,
+                DocumentMetadata.reporting_basis,
+                DocumentMetadata.currency,
+                DocumentMetadata.period_end,
+            )
+            .join(parent, parent.id == Chunk.parent_id)
+            .outerjoin(
+                DocumentMetadata,
+                DocumentMetadata.document_version_id == parent.document_version_id,
+            )
+            .where(Chunk.id.in_(list(chunk_ids)))
+        )
+        return {
+            row.child_id: PendingChunk(
+                chunk_id=row.id,
+                document_version_id=row.document_version_id,
+                text=row.text,
+                lexemes=None,
+                heading_path=tuple(row.heading_path or ()),
+                page_numbers=tuple(row.page_numbers or ()),
+                evidence_type=row.evidence_type,
+                issuer_name=row.issuer_name,
+                document_type=row.document_type,
+                fiscal_period=row.fiscal_period,
+                reporting_basis=row.reporting_basis,
+                currency=row.currency,
+                period_end=row.period_end,
+            )
+            for row in self._session.execute(statement).all()
+        }
+
     def load_context(self, *, chunk_ids: Sequence[UUID]) -> list[PendingChunk]:
         """Chunk text and its deterministic context, for reranking and for display.
 
@@ -481,6 +544,84 @@ class ChunkRepository:
         for row in self._session.execute(statement):
             grouped.setdefault(row.chunk_id, set()).add(row.source_element_id)
         return {chunk_id: frozenset(items) for chunk_id, items in grouped.items()}
+
+    def top_level_sections(self, *, limit: int = 200) -> list[str]:
+        """The section names a reader can filter on, from active generations only.
+
+        ``heading_path[1]`` because PostgreSQL arrays are one-indexed and the indexer
+        writes ``heading_path[0]`` into the ``section`` payload field — so this has to read
+        the same element the filter is matched against, or the chooser would offer values
+        that match nothing.
+
+        Active generations only, for the same reason: a section that exists solely in a
+        superseded generation is unreachable, and offering it would hand a reader a filter
+        that silently returns nothing.
+
+        Bounded, because this feeds a dropdown. A corpus with thousands of distinct
+        headings needs a search box rather than a longer list, and that is a different
+        design rather than a larger number.
+        """
+        statement = (
+            select(Chunk.heading_path[1].label("section"))
+            .join(
+                DocumentVersion,
+                DocumentVersion.active_generation_id == Chunk.generation_id,
+            )
+            .where(func.cardinality(Chunk.heading_path) > 0)
+            .distinct()
+            .order_by("section")
+            .limit(limit)
+        )
+        return [row.section for row in self._session.execute(statement) if row.section]
+
+    def sections_by_version(
+        self, *, top: int = 10
+    ) -> dict[UUID, list[tuple[str, int]]]:
+        """What each filing contains, as top-level sections with their passage counts.
+
+        **The question a reader of a filing library actually has is "what is in it".** A
+        page count says how long a document is; this says whether it has a risk section,
+        how much of it is notes to the accounts, and therefore whether a question about
+        either can be answered at all.
+
+        Counted over **retrieval children in active generations**, because a section with
+        no retrievable passages cannot be reached by a question whatever the document
+        contains. Parents are excluded so a passage is not counted twice.
+
+        ``heading_path[1]`` is the first element — PostgreSQL arrays are one-indexed — and
+        it is the same element the indexer writes into the ``section`` filter, so what is
+        listed here is what that filter can match.
+        """
+        # Grouped by the output column *name*, not by a second copy of the subscript
+        # expression: SQLAlchemy binds each ``heading_path[1]`` as its own parameter, and
+        # PostgreSQL then refuses the statement because the grouped expression is not
+        # textually the selected one.
+        statement = (
+            select(
+                Chunk.document_version_id,
+                Chunk.heading_path[1].label("section"),
+                func.count().label("passages"),
+            )
+            .join(
+                DocumentVersion,
+                DocumentVersion.active_generation_id == Chunk.generation_id,
+            )
+            .where(
+                func.cardinality(Chunk.heading_path) > 0,
+                Chunk.role == ChunkRole.CHILD.value,
+            )
+            .group_by(Chunk.document_version_id, sql_text("section"))
+            .order_by(Chunk.document_version_id, func.count().desc())
+        )
+
+        grouped: dict[UUID, list[tuple[str, int]]] = {}
+        for row in self._session.execute(statement):
+            if not row.section:
+                continue
+            sections = grouped.setdefault(row.document_version_id, [])
+            if len(sections) < top:
+                sections.append((row.section, row.passages))
+        return grouped
 
     def count_for_generation(self, *, generation_id: UUID) -> int:
         return self._session.execute(

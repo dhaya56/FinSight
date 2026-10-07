@@ -205,7 +205,8 @@ measures that 34 of those 36 are already reachable in the index through the bloc
 were read from. What still resolves to nothing is the *reference*: a marker in a cell does
 not reach the footnote that explains it. A number released without its qualifier is wrong,
 not merely incomplete, so the gap matters — but it matters once an answer is composed, and
-§24 records why the fix belongs to Phase 8 rather than to chunking. Owner: Phase 8.
+§24 records why the fix belongs to the generation phase rather than to chunking. Owner: the
+generation phase (Phase 11).
 
 ---
 
@@ -1318,11 +1319,15 @@ two copies have genuinely different source elements.
 **What is actually missing is the association**, and it has no consumer yet. A table chunk
 carrying a figure does not carry the qualifier that modifies it, and a footnote chunk does
 not say which figure it qualifies. That is the dangling pointer the research describes, and
-it causes a wrong answer only once something composes an answer — Phase 8. `footnote_refs`
-resolution is likewise consumerless while ADR-003 keeps cells out of retrieval.
+it causes a wrong answer only once something composes an answer — the generation phase.
+`footnote_refs` resolution is likewise consumerless while ADR-003 keeps cells out of retrieval.
 
 The admissible fix, when a consumer exists, is the enrichment layer: a footnote's text
 attached to the chunks of its own table as deterministic context, embedded but never citable
 as that chunk's source. Injecting it into chunk bodies — which is what the research proposes
 — is forbidden by §14.4, and citations are character offsets into the stored string (§14.9),
-so a rewrite would invalidate every one of them. Owner: Phase 8.
+so a rewrite would invalidate every one of them. Owner: the generation phase (Phase 11).
+
+**Phase naming.** Records written before 2026-10-06 say "Phase 8" for generation, following
+the blueprint's component order. Delivery order differs — retrieval was Phase 7, the interface
+Phase 9, chunking hygiene Phase 10 — so generation is Phase 11. Both names mean the same work.

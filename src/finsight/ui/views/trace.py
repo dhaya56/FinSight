@@ -1,21 +1,36 @@
 """Query trace: why each passage is where it is.
 
-Almost all of this is real. The retrieval response carries, per candidate, the rank each
-retriever gave it, the fused score, and the reranker's logit — which is enough to show
-the reordering at every stage rather than asserting that it happened.
+**The question this page answers is the one an analyst actually has about a retrieval
+system: why that passage, and why in that order.** The response carries, per candidate, the
+rank each retriever gave it, the fused score and the reranker's logit — enough to show the
+reordering at every stage rather than asserting that it happened.
 
-What is not yet real is the per-stage timing breakdown: the API reports one wall time for
-the whole pipeline, so the split across stages is a fixture and is labelled as one.
-Persisting the trace to PostgreSQL (§20.13, §31.9) is also still to come; this reads the
-response in the browser session rather than a stored record.
+**Live, including the latency split.** It previously apportioned one measured total across
+stages using ratios recorded in ENV-010. Those ratios were real on the query they were taken
+from and a guess on every other, so a reader saw a fabricated number beside a measured one
+with nothing to tell them apart. The stages are now timed per call.
+
+Still not persisted (§20.13, §31.9): this reads the response held in the browser session, not
+a stored trace record. A trace that vanishes when the tab closes is not an audit trail, and
+the page says so rather than implying otherwise.
 """
 
 from typing import Any
 
 import streamlit as st
 
-from finsight.ui.theme import Wiring, page_header, panel_caption, state_badge
+from finsight.ui.theme import page_header
 from finsight.ui.views.ask import RESULT_KEY
+
+_STAGE_ORDER = ("lexical", "dense", "fusion", "resolve", "rerank")
+
+_STAGE_MEANING = {
+    "lexical": "BM25 over Qdrant sparse vectors, run once per evidence type.",
+    "dense": "Dense vectors over Qdrant, run once per evidence type.",
+    "fusion": "Reciprocal rank fusion. Arithmetic over ranks, so it is nearly free.",
+    "resolve": "Reading chunk text and citations back from PostgreSQL.",
+    "rerank": "Cross-encoder scoring. Cost scales with passage length, not count.",
+}
 
 
 def render() -> None:
@@ -24,7 +39,6 @@ def render() -> None:
         "Query trace",
         "How a question became a ranked list: which retriever found what, how fusion "
         "combined them, and what reranking changed.",
-        Wiring.PARTIAL,
     )
 
     result = st.session_state.get(RESULT_KEY)
@@ -37,17 +51,72 @@ def render() -> None:
         return
 
     st.markdown(f"**Question** \N{EM DASH} {result.get('query', '')}")
-
+    _funnel(result)
+    st.container(height=10, border=False)
     _pipeline_strip(result)
+    st.container(height=10, border=False)
+
+    _reordering(result)
     st.container(height=10, border=False)
 
     left, right = st.columns([3, 2], gap="medium")
     with left:
-        _reordering_panel(result)
+        _latency(result)
     with right:
-        _retriever_panel(result)
+        _agreement(result)
 
-    _timing_panel(result)
+
+def _funnel(result: dict[str, Any]) -> None:
+    """How many passages were considered, and how many a reader ever sees.
+
+    **This is the number the page was missing.** Everything else here explains the five
+    results that came back; none of it said that twenty-five were examined to produce
+    them. For an analyst deciding whether to trust a short answer, "was anything else
+    found?" is the first question, and the ratio between these two figures is the answer.
+    """
+    returned = len(result.get("candidates", ()))
+    depth = int(result.get("depth", 0))
+    collapsed = int(result.get("collapsed_count", 0))
+    dropped = max(depth - returned - collapsed, 0)
+
+    columns = st.columns(4)
+    columns[0].metric(
+        "Considered",
+        depth,
+        help=(
+            "Candidates retrieved before narrowing. Both retrievers search to this depth "
+            "so that a passage ranked low by one still reaches the cross-encoder."
+        ),
+        border=True,
+    )
+    columns[1].metric(
+        "Collapsed as duplicates",
+        collapsed,
+        help=(
+            "Candidates built from the same source regions (§20.9). The same evidence "
+            "retrieved twice is still one piece of evidence."
+        ),
+        border=True,
+    )
+    columns[2].metric(
+        "Ranked below the cut",
+        dropped,
+        help="Considered, scored, and not returned because the limit was reached.",
+        border=True,
+    )
+    columns[3].metric(
+        "Shown",
+        returned,
+        help="What reached the reader, and what an answer may rest on.",
+        border=True,
+    )
+
+    if depth:
+        st.caption(
+            f"**{returned} of {depth} considered passages reached the reader.** The rest "
+            "were scored and set aside, not missed \N{EM DASH} widening the limit in the "
+            "sidebar admits more of them without re-running retrieval differently."
+        )
 
 
 def _pipeline_strip(result: dict[str, Any]) -> None:
@@ -62,7 +131,11 @@ def _pipeline_strip(result: dict[str, Any]) -> None:
         ("Lexical", result.get("lexical_retriever", "\N{EM DASH}"), f"depth {depth}"),
         ("Dense", "ran" if dense_used else "unavailable", f"depth {depth}"),
         ("Fusion", f"RRF v{result.get('fusion_version', '?')}", "reciprocal rank"),
-        ("Rerank", "ran" if reranked else "skipped", result.get("reranker_model") or "\N{EM DASH}"),
+        (
+            "Rerank",
+            "ran" if reranked else "skipped",
+            result.get("reranker_model") or "\N{EM DASH}",
+        ),
         ("Returned", str(count), "after deduplication"),
     ]
     columns = st.columns(len(stages))
@@ -76,33 +149,53 @@ def _pipeline_strip(result: dict[str, Any]) -> None:
             )
 
 
-def _reordering_panel(result: dict[str, Any]) -> None:
-    """Fused rank against final rank, which is what reranking actually did."""
-    header, badge = st.columns([4, 1], vertical_alignment="center")
-    with header:
-        st.markdown("##### Reordering")
-    with badge:
-        state_badge(Wiring.LIVE)
+def _reordering(result: dict[str, Any]) -> None:
+    """What reranking changed, as movement rather than as two columns of numbers.
 
+    **The movement is the finding.** A table of "fused rank" beside "final rank" is read as
+    two lists; the same data as a signed change says at a glance whether the cross-encoder
+    agreed with fusion or overruled it — which is the question worth asking of a stage that
+    costs most of the query's latency.
+    """
+    candidates = list(result.get("candidates", ()))
+    if not candidates:
+        st.info("Nothing matched this query.", icon=":material/info:")
+        return
+
+    st.markdown("##### Reordering")
+    reranked = bool(result.get("reranked"))
     rows = []
-    for candidate in result.get("candidates", ()):
+    for position, candidate in enumerate(candidates, start=1):
         contributions: dict[str, int] = candidate.get("contributions") or {}
+        fused_rank = min(contributions.values()) if contributions else None
         rows.append(
             {
                 "Final": candidate["rank"],
+                "Moved": (fused_rank - position) if fused_rank is not None else 0,
                 "BM25": contributions.get("bm25"),
                 "Dense": contributions.get("dense"),
                 "Fused": round(candidate["fused_score"], 5),
                 "Rerank": candidate.get("rerank_score"),
-                "Passage": (candidate["text"][:60] + "\N{HORIZONTAL ELLIPSIS}").replace("\n", " "),
+                "Passage": " ".join(str(candidate["text"]).split())[:90]
+                + "\N{HORIZONTAL ELLIPSIS}",
             }
         )
+
     st.dataframe(
         rows,
         hide_index=True,
         width="stretch",
         column_config={
             "Final": st.column_config.NumberColumn("Final", width="small"),
+            "Moved": st.column_config.NumberColumn(
+                "Moved",
+                help=(
+                    "Places gained against the best rank any single retriever gave this "
+                    "passage. Positive means fusion and reranking promoted it; negative "
+                    "means they pushed it down."
+                ),
+                format="%+d",
+            ),
             "BM25": st.column_config.NumberColumn(
                 "BM25 rank", help="Blank means BM25 did not return it."
             ),
@@ -110,24 +203,38 @@ def _reordering_panel(result: dict[str, Any]) -> None:
                 "Dense rank", help="Blank means dense did not return it."
             ),
             "Fused": st.column_config.NumberColumn("Fused", format="%.5f"),
-            "Rerank": st.column_config.NumberColumn("Rerank logit", format="%+.2f"),
+            "Rerank": st.column_config.NumberColumn(
+                "Rerank logit",
+                help=(
+                    "A cross-encoder logit. Unbounded, frequently negative, and **not** a "
+                    "probability that the passage is correct (§27.13)."
+                ),
+                format="%+.2f",
+            ),
         },
     )
-    panel_caption(
-        Wiring.LIVE,
-        "A blank retriever column is informative: it means only one side found that "
+
+    if reranked:
+        st.bar_chart(
+            [{"Passage": f"[{row['Final']}]", "Rerank logit": row["Rerank"]} for row in rows],
+            x="Passage",
+            y="Rerank logit",
+            height=190,
+            color="#4f46e5",
+        )
+        st.caption(
+            "The cross-encoder's score for each returned passage, in final order. A "
+            "descending bar means reranking and the final order agree; a bar out of "
+            "sequence is a passage deduplication moved."
+        )
+    st.caption("A blank retriever column is informative: it means only one side found that "
         "passage, and fusion still promoted it.",
     )
 
 
-def _retriever_panel(result: dict[str, Any]) -> None:
-    """How much each retriever contributed, and where they agreed."""
-    header, badge = st.columns([4, 1], vertical_alignment="center")
-    with header:
-        st.markdown("##### Agreement")
-    with badge:
-        state_badge(Wiring.LIVE)
-
+def _agreement(result: dict[str, Any]) -> None:
+    """Where the two retrievers agreed, which is what fusion rewards."""
+    st.markdown("##### Retriever agreement")
     candidates = result.get("candidates", ())
     both = sum(1 for c in candidates if len(c.get("contributions") or {}) > 1)
     lexical_only = sum(
@@ -138,65 +245,78 @@ def _retriever_panel(result: dict[str, Any]) -> None:
     )
 
     st.metric(
-        "Found by both retrievers",
-        both,
-        help="Consensus, which is what fusion rewards.",
+        "Found by both",
+        f"{both} of {len(candidates)}",
+        help=(
+            "Consensus is what reciprocal rank fusion rewards: a passage both retrievers "
+            "found beats one either ranked first alone."
+        ),
         border=True,
     )
     with st.container(horizontal=True, gap="small"):
-        st.metric("Lexical only", lexical_only, border=True)
-        st.metric("Dense only", dense_only, border=True)
-
-    if candidates:
-        st.bar_chart(
-            [
-                {"source": "Both", "count": both},
-                {"source": "Lexical only", "count": lexical_only},
-                {"source": "Dense only", "count": dense_only},
-            ],
-            x="source",
-            y="count",
-            height=170,
-            color="#6366f1",
+        st.metric(
+            "Wording only",
+            lexical_only,
+            help="BM25 found it; the dense vector did not. Usually exact terminology.",
+            border=True,
+        )
+        st.metric(
+            "Meaning only",
+            dense_only,
+            help="The dense vector found it; BM25 did not. Usually paraphrase.",
+            border=True,
         )
 
     for flag in result.get("degraded", ()):
         st.warning(f"Degraded: {flag}", icon=":material/warning:")
 
-    panel_caption(Wiring.LIVE)
 
-
-def _timing_panel(result: dict[str, Any]) -> None:
-    """Per-stage latency. The total is live; the split is not yet instrumented."""
-    total = result.get("elapsed_ms", 0)
-    header, badge = st.columns([5, 1], vertical_alignment="center")
-    with header:
-        st.markdown("##### Latency")
-    with badge:
-        state_badge(Wiring.PARTIAL)
-
-    reranked = bool(result.get("reranked"))
-    # Proportions from the measurements recorded in ENV-010: reranking dominates a
-    # reranked query at roughly 93% of wall time. Applied to this query's real total.
-    shares = (
-        {"Lexical": 0.03, "Dense": 0.03, "Fusion": 0.005, "Rerank": 0.93, "Resolve": 0.005}
-        if reranked
-        else {"Lexical": 0.42, "Dense": 0.40, "Fusion": 0.06, "Resolve": 0.12}
-    )
-    rows = [{"stage": stage, "ms": round(total * share)} for stage, share in shares.items()]
-
-    columns = st.columns([2, 3])
-    with columns[0]:
-        st.metric("Total, measured", f"{total} ms", border=True)
-        st.caption(
-            "Reranking is roughly 93% of a reranked query on this host "
-            "\N{EM DASH} cost scales with passage length, not candidate count."
+def _latency(result: dict[str, Any]) -> None:
+    """Where the time went, measured per stage."""
+    timings: dict[str, int] = result.get("timings_ms") or {}
+    st.markdown("##### Where the time went")
+    total = int(result.get("elapsed_ms", 0))
+    if not timings:
+        st.metric("Total", f"{total} ms", border=True)
+        st.caption("This response carries no per-stage timings; only the total is available.",
         )
-    with columns[1]:
-        st.bar_chart(rows, x="stage", y="ms", height=200, color="#8b5cf6")
+        return
 
-    panel_caption(
-        Wiring.PARTIAL,
-        "The total is measured per request. The split across stages is apportioned from "
-        "recorded ENV-010 ratios, not instrumented per stage yet.",
+    measured: list[tuple[str, int]] = [
+        (stage, int(timings[stage])) for stage in _STAGE_ORDER if stage in timings
+    ]
+    if not measured:
+        return
+
+    # **Not a bar chart.** One stage takes 90% of the query and another takes 28 ms, so a
+    # shared linear axis renders every stage but the dominant one as no bar at all — which
+    # reads as "that stage did not run" rather than "that stage was fast". A per-row bar
+    # keeps its own scale and carries the number beside it, so a 1% stage is still visible
+    # and still legible.
+    st.dataframe(
+        [
+            {
+                "Stage": stage,
+                "Share": (value / total) if total else 0.0,
+                "ms": value,
+                "What it is": _STAGE_MEANING.get(stage, ""),
+            }
+            for stage, value in measured
+        ],
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Share": st.column_config.ProgressColumn(
+                "Share of query", min_value=0.0, max_value=1.0, format="%.1f%%"
+            ),
+            "ms": st.column_config.NumberColumn("Measured", format="%d ms"),
+        },
     )
+
+    stage, value = max(measured, key=lambda pair: pair[1])
+    if total:
+        st.caption(
+            f"**{stage} is {value / total * 100:.0f}% of this query** "
+            f"({value} ms of {total} ms). Measured per stage on this request, not "
+            "apportioned from recorded ratios."
+        )

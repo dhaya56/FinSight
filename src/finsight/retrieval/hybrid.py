@@ -32,6 +32,7 @@ resolve a result against. §10.9 classifies it as essential for that reason.
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from time import perf_counter
 
 from finsight.domain.representations.retrieval import EvidenceType
 from finsight.retrieval.contracts import (
@@ -66,6 +67,19 @@ class HybridResult:
 
     Recorded because "the fusion returned nothing" and "one retriever returned
     nothing and the other was down" are different diagnoses with the same output.
+    """
+
+    timings_ms: dict[str, int] = field(default_factory=dict)
+    """Wall time per stage, measured rather than apportioned (§20.13).
+
+    The trace surface previously split one measured total across stages using ratios
+    recorded in ENV-010. Those ratios were real on the query they were taken from and
+    are a guess on every other, so a reader was shown a fabricated number beside a
+    measured one with nothing to tell them apart. These are measured per call.
+
+    Lexical and dense are summed across evidence types, because each runs twice — once
+    per type — and a reader comparing "lexical" against "dense" wants the cost of the
+    retriever, not of one of its two passes.
     """
 
     @property
@@ -111,10 +125,15 @@ class HybridRetrievalService:
         lexical_name = ""
         dense_used = True
 
+        lexical_seconds = 0.0
+        dense_seconds = 0.0
+
         for evidence_type in (EvidenceType.NARRATIVE, EvidenceType.TABLE_DERIVED):
             scoped = replace(resolved, evidence_type=evidence_type.value)
 
+            started = perf_counter()
             lexical = self.lexical.search(query, filters=scoped, limit=limit)
+            lexical_seconds += perf_counter() - started
             lexical_by_type[evidence_type.value] = lexical.candidates
             lexical_name = lexical.retriever
             for flag in lexical.degraded:
@@ -122,6 +141,7 @@ class HybridRetrievalService:
                     degraded.append(flag)
 
             if dense_used:
+                started = perf_counter()
                 try:
                     dense_by_type[evidence_type.value] = self.dense.search(
                         query, filters=scoped, limit=limit
@@ -133,7 +153,13 @@ class HybridRetrievalService:
                     dense_by_type = {}
                     if DEGRADED_DENSE_UNAVAILABLE not in degraded:
                         degraded.append(DEGRADED_DENSE_UNAVAILABLE)
+                finally:
+                    # Timed in `finally` so a failed dense call still reports what it
+                    # cost: an outage that takes ten seconds to time out is a different
+                    # operational problem from one that refuses immediately.
+                    dense_seconds += perf_counter() - started
 
+        fusion_started = perf_counter()
         lexical_allocated = allocate(
             lexical_by_type, limit=limit, allocation=self.allocation
         )
@@ -148,6 +174,8 @@ class HybridRetrievalService:
             config=self.fusion,
             limit=limit,
         )
+        fusion_seconds = perf_counter() - fusion_started
+
         return HybridResult(
             candidates=fused,
             degraded=tuple(degraded),
@@ -157,6 +185,11 @@ class HybridRetrievalService:
             per_retriever={
                 lexical_name: len(lexical_allocated),
                 **({"dense": len(dense_allocated)} if dense_used else {}),
+            },
+            timings_ms={
+                "lexical": elapsed_ms(lexical_seconds),
+                "dense": elapsed_ms(dense_seconds),
+                "fusion": elapsed_ms(fusion_seconds),
             },
         )
 
@@ -176,3 +209,8 @@ def build_hybrid_retrieval_service() -> HybridRetrievalService:
         lexical=LexicalRetrievalService(primary=primary, fallback=fallback),
         dense=DenseRetriever(embedder=build_embedder(settings), index=index),
     )
+
+
+def elapsed_ms(seconds: float) -> int:
+    """Whole milliseconds. A sub-millisecond stage reports 0, which is the honest value."""
+    return int(seconds * 1000)

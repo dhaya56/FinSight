@@ -152,6 +152,15 @@ class SearchResponse(BaseModel):
     elapsed_ms: int = Field(
         description="Server-side wall time for the whole pipeline, measured per call."
     )
+    timings_ms: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Wall time per stage — lexical, dense, fusion, resolve, rerank — "
+            "**measured, not apportioned**. The trace surface previously split one total "
+            "across stages using ratios recorded in ENV-010, which were real on the query "
+            "they came from and a guess on every other."
+        ),
+    )
 
     @property
     def is_degraded(self) -> bool:

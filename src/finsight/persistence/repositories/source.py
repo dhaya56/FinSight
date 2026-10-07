@@ -348,6 +348,32 @@ class SourceRepository:
             for index, row in enumerate(rows)
         ]
 
+    def text_for(self, *, element_ids: Sequence[UUID]) -> dict[UUID, str]:
+        """The verbatim text of named source elements, for resolving a citation.
+
+        **This is the authority a released claim is checked against.** A chunk's text is a
+        *retrieval* representation — blocks joined for search — while §14.1 keeps citable
+        content with the source representation and §14.9 requires a citation to resolve to the
+        source regions a chunk was built from. Checking a numeral against chunk text would be
+        checking it against the join, not against the document.
+
+        An element with no text is absent from the result rather than present as an empty
+        string: a page and a table carry no text of their own, and "" would read as a span
+        that exists and says nothing, which a verification step would treat as refuting the
+        claim rather than as having nothing to say about it.
+        """
+        if not element_ids:
+            return {}
+        statement = select(SourceElement.id, SourceElement.text).where(
+            SourceElement.id.in_(list(element_ids)),
+            SourceElement.text.is_not(None),
+        )
+        return {
+            row.id: row.text
+            for row in self._session.execute(statement).all()
+            if row.text is not None
+        }
+
     def counts_for_run(self, *, run_id: UUID) -> ElementCounts:
         """Summarise a run without loading its elements.
 

@@ -12,7 +12,7 @@ simulation over recorded stage timings.
 import streamlit as st
 
 from finsight.ui import demo
-from finsight.ui.theme import Wiring, page_header, panel_caption, state_badge
+from finsight.ui.theme import page_header
 
 _RUN_KEY = "ingest.completed"
 
@@ -41,7 +41,19 @@ def render() -> None:
         "Ingest",
         "Add a filing to the corpus. Every document is treated as untrusted until it has "
         "passed validation and been parsed in isolation.",
-        Wiring.PREVIEW,
+    )
+
+    # **Said here, in words, because the badge that used to say it is gone.** Every other
+    # page is live, so a chip on each of them carried no information — but this one is
+    # not, and the honest place to say so is where a reader is about to use it rather
+    # than in a legend they have to go and find.
+    st.warning(
+        "**This page is not wired yet.** Nothing selected here is stored, parsed or "
+        "indexed. Ingestion runs from the command line today: indexing a filing takes "
+        "about forty minutes at the measured throughput, which is far longer than an "
+        "HTTP request may be held open, so it belongs to a background worker rather than "
+        "to a synchronous upload.",
+        icon=":material/construction:",
     )
 
     left, right = st.columns([3, 2], gap="large")
@@ -81,11 +93,7 @@ def render() -> None:
             _result_panel()
 
     with right, st.container(border=True):
-        header, badge = st.columns([4, 1], vertical_alignment="center")
-        with header:
-            st.markdown("##### Document safety")
-        with badge:
-            state_badge(Wiring.PREVIEW)
+        st.markdown("##### Document safety")
         st.caption(
             "Every filing is untrusted input. These controls are specified and partly "
             "implemented; the panel reports the intended set, not a live scan result."
@@ -95,7 +103,6 @@ def render() -> None:
                 st.badge("", icon=":material/shield:", color="blue")
                 st.markdown(f"**{name}**")
             st.caption(note)
-        panel_caption(Wiring.PREVIEW)
 
 
 def _simulate() -> None:
@@ -129,11 +136,7 @@ def _result_panel() -> None:
     total = sum(stage.seconds for stage in stages)
     st.container(height=8, border=False)
     with st.container(border=True):
-        header, badge = st.columns([5, 1], vertical_alignment="center")
-        with header:
-            st.markdown("##### Run complete")
-        with badge:
-            state_badge(Wiring.PREVIEW)
+        st.markdown("##### Run complete")
         columns = st.columns(4)
         columns[0].metric("Wall time", _duration(total), border=True)
         columns[1].metric("Source elements", "4,118", border=True)
@@ -144,7 +147,5 @@ def _result_panel() -> None:
             "belongs to a background worker rather than a request. Measured throughput on "
             "this host is 1.93 passages per second."
         )
-        panel_caption(
-            Wiring.PREVIEW,
-            "Simulated from recorded stage timings. No document was stored or parsed.",
+        st.caption("Simulated from recorded stage timings. No document was stored or parsed.",
         )

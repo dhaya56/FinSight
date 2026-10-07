@@ -346,6 +346,86 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ----------------------------------------------------------------- Generation
+
+    generation_model: str = Field(
+        default="llama3.1:8b",
+        description=(
+            "PROVISIONAL, not selected. §22 reserves the choice and ADR-008 adopts this "
+            "one on the same basis ADR-004 adopted the embedding model: it is already "
+            "pulled, it runs on this host, and no comparison has been made. Served by "
+            "host-native Ollama with no tools and no network of its own (§10.4)."
+        ),
+    )
+    generation_context_window: int = Field(
+        default=8192,
+        ge=512,
+        description=(
+            "Tokens the model may read. Unmeasured, and deliberately generous: Ollama "
+            "discards prompt tokens past this without erroring, so a window that is too "
+            "small drops evidence while the answer still cites it. The adapter refuses a "
+            "response whose prompt reached the ceiling rather than trusting one."
+        ),
+    )
+    generation_temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+        description=(
+            "Zero, because §26.7's substitution is deterministic and an answer that "
+            "varies between identical runs cannot be compared or reproduced. Not a "
+            "guarantee of reproducibility, only the least variance available."
+        ),
+    )
+    generation_evidence_budget_chars: int = Field(
+        default=22000,
+        ge=500,
+        description=(
+            "Characters of evidence a prompt may carry. Unmeasured, and bounded rather "
+            "than left to the context window because published guidance is explicit that "
+            "feeding everything retrieved to a model is not good practice. "
+            "Characters because the generation model's tokenizer is not available here; at "
+            "a conservative 3.5 characters per token this is roughly 6,300 tokens, leaving "
+            "room in an 8,192 window for instructions and the completion. The adapter "
+            "refuses a prompt that reached the window, so a wrong estimate fails loudly."
+        ),
+    )
+    generation_expand_below_chars: int = Field(
+        default=170,
+        ge=0,
+        description=(
+            "Expand a retrieved passage to its parent only when it is shorter than this. "
+            "MEASURED over six real queries and three policies: retrieved passages averaged "
+            "1,574 characters with 1 of 48 below this floor, because reranking already "
+            "filters out the corpus's 1,211 sub-floor children. Expanding everything "
+            "discarded 20 of 48 reranked passages to the budget. Expanding fragments "
+            "produced output identical to not expanding, because the one fragment that "
+            "surfaced has no parent. So this is a no-op on this corpus, kept because its "
+            "measured cost is zero and a retrieved fragment with a parent would benefit. "
+            "170 characters is the chunker's own 48-token floor in this module's unit; 0 "
+            "disables it, a large value restores expand-everything for comparison."
+        ),
+    )
+
+    generation_timeout_seconds: float = Field(
+        default=600.0,
+        gt=0,
+        description=(
+            "MEASURED, and raised from 300 s because 300 s was below the worst case the "
+            "other configured bounds permit. A real answer over four passages measured "
+            "287 s of generation — 96% of the old budget — and ENV-012 measures the rates "
+            "that explain it: prompt evaluation at 27.3 tokens per second and decode at "
+            "3.0, with no GPU offload available on this host. The full evidence budget is "
+            "5,362 prompt tokens (196 s), max_tokens of 800 is 263 s of decode, and a "
+            "cold model load measured 50 s: 510 s in total. The old default would have "
+            "abandoned a working generation after five minutes and reported it as the "
+            "model being unreachable — a timeout degrades the answer (§27.9), so the "
+            "reader would have been told the corpus had nothing when it had an answer. "
+            "Kept below the UI client's own 900 s so the server reports a clean "
+            "degradation with its evidence rather than the client losing the response."
+        ),
+    )
+
     embedding_config_version: str = Field(
         default="1",
         description=(

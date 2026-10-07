@@ -21,7 +21,8 @@ the two orderings can be compared on identical candidates — which is the compa
 
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from time import perf_counter
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -35,7 +36,7 @@ from finsight.persistence.repositories.chunks import (
 )
 from finsight.reranking.port import Passage, Reranker, RerankUnavailableError
 from finsight.retrieval.contracts import RetrievalFilters
-from finsight.retrieval.hybrid import HybridRetrievalService
+from finsight.retrieval.hybrid import HybridRetrievalService, elapsed_ms
 from finsight.retrieval.selection import Collapsed, dedupe
 
 __all__ = [
@@ -81,6 +82,15 @@ class RetrievedChunk:
     contributions: Mapping[str, int]
     rerank_score: float | None = None
 
+    reporting_basis: str | None = None
+    """Standalone, consolidated, or both. Carried because §27.7 validates it.
+
+    Added when the Evidence Gate's citation-context check was written and found it missing: the
+    repository loads it and the pipeline was dropping it, so a claim resting on a standalone and
+    a consolidated passage at once — exactly what §25.8 forbids comparing unasked — could not be
+    detected. Defaulted, so a caller that does not supply it is not implying the basis is known.
+    """
+
     citations: tuple[Citation, ...] = ()
     """The source regions this passage was built from (§14.7, §14.9).
 
@@ -102,6 +112,15 @@ class Result:
     lexical_retriever: str = ""
     dense_used: bool = True
     fusion_version: str = ""
+    timings_ms: dict[str, int] = field(default_factory=dict)
+    """Wall time per stage, measured per call (§20.13).
+
+    Lexical, dense and fusion come from the hybrid stage; resolve is the repository read
+    and rerank is the cross-encoder. The trace surface once apportioned one total across
+    stages using ratios from ENV-010 — real on the query they were taken from and a guess
+    on every other — so a reader saw a fabricated figure beside a measured one.
+    """
+
     collapsed: tuple[Collapsed, ...] = ()
     """Candidates removed as duplicate evidence (§20.9), and what absorbed them.
 
@@ -146,7 +165,9 @@ class RetrievalPipeline:
             raise ValueError(f"limit must be positive, got {limit}")
         window = max(self.depth, limit)
 
+        hybrid_started = perf_counter()
         fused = self.hybrid.search(query, filters=filters, limit=window)
+        timings: dict[str, int] = dict(fused.timings_ms)
         if not fused.candidates:
             return Result(
                 candidates=(),
@@ -155,8 +176,10 @@ class RetrievalPipeline:
                 lexical_retriever=fused.lexical_retriever,
                 dense_used=fused.dense_used,
                 fusion_version=fused.fusion_version,
+                timings_ms={**timings, "total": elapsed_ms(perf_counter() - hybrid_started)},
             )
 
+        resolve_started = perf_counter()
         order = [candidate.chunk_id for candidate in fused.candidates]
         with self.session_scope_factory() as session:
             repository = ChunkRepository(session)
@@ -164,6 +187,7 @@ class RetrievalPipeline:
             citations = repository.citations_for(chunk_ids=order)
             regions = repository.source_elements_for(chunk_ids=order)
         by_id = {chunk.chunk_id: chunk for chunk in loaded}
+        timings["resolve"] = elapsed_ms(perf_counter() - resolve_started)
 
         degraded = list(fused.degraded)
         ranked = order
@@ -171,6 +195,7 @@ class RetrievalPipeline:
         reranked = False
         reranker_model: str | None = None
 
+        rerank_started = perf_counter()
         if self.reranker is not None:
             passages = [
                 Passage(chunk_id=chunk_id, text=_reranker_input(by_id[chunk_id]))
@@ -187,6 +212,7 @@ class RetrievalPipeline:
                 scores = {item.chunk_id: item.score for item in scored}
                 reranked = True
                 reranker_model = self.reranker.model
+        timings["rerank"] = elapsed_ms(perf_counter() - rerank_started)
 
         # §20.9 before the limit, not after: collapsing duplicates afterwards would
         # return fewer results than asked for, and the whole point is that the budget
@@ -215,6 +241,7 @@ class RetrievalPipeline:
                     evidence_type=chunk.evidence_type,
                     issuer_name=chunk.issuer_name,
                     fiscal_period=chunk.fiscal_period,
+                    reporting_basis=chunk.reporting_basis,
                     fused_score=candidate.score,
                     contributions=candidate.contributions,
                     rerank_score=scores.get(chunk_id),
@@ -234,6 +261,7 @@ class RetrievalPipeline:
             dense_used=fused.dense_used,
             fusion_version=fused.fusion_version,
             collapsed=collapsed,
+            timings_ms={**timings, "total": elapsed_ms(perf_counter() - hybrid_started)},
         )
 
 

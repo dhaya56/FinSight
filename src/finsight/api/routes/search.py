@@ -10,25 +10,23 @@ interpreter for roughly two seconds. Declared ``async``, that work would run on 
 event loop and stall every other request in the process, health probes included. A
 plain ``def`` makes FastAPI run it in a threadpool, which is correct here.
 
-**The pipeline is built once per process.** Constructing it loads the cross-encoder
-from the local cache, so building it per request would add that load to every query.
-It is cached behind a dependency rather than created at import time, which keeps
-:func:`finsight.api.app.create_app` free of settings reads and lets tests substitute
-it through ``dependency_overrides``.
+**The pipeline is built once per process** and shared with the answer route; see
+:mod:`finsight.api.dependencies` for why that caching lives there rather than here.
 
 **This route generates nothing.** It returns source passages and the citations
 behind them. No answer is composed, no number is restated, and no Evidence Gate runs
-— those are Phase 8, and a response from here must not be presented as an answer.
+— ``POST /v1/ask`` is that surface, and a response from here must not be presented
+as an answer.
 """
 
 from dataclasses import replace
-from functools import lru_cache
 from time import perf_counter
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from finsight.api.auth import require_token
+from finsight.api.dependencies import get_pipeline
 from finsight.api.schemas.search import (
     CitationModel,
     RetrievedChunkModel,
@@ -38,11 +36,7 @@ from finsight.api.schemas.search import (
 from finsight.embedding.port import EmbeddingShapeError
 from finsight.reranking.port import RerankShapeError
 from finsight.retrieval.contracts import RetrievalFilters
-from finsight.retrieval.pipeline import (
-    RetrievalPipeline,
-    RetrievedChunk,
-    build_retrieval_pipeline,
-)
+from finsight.retrieval.pipeline import RetrievalPipeline, RetrievedChunk
 from finsight.vector_index.port import VectorIndexShapeError
 
 router = APIRouter(
@@ -50,22 +44,6 @@ router = APIRouter(
     tags=["retrieval"],
     dependencies=[Depends(require_token)],
 )
-
-
-@lru_cache(maxsize=1)
-def _cached_pipeline() -> RetrievalPipeline:
-    """Build the pipeline once, paying the cross-encoder load a single time."""
-    return build_retrieval_pipeline()
-
-
-def get_pipeline() -> RetrievalPipeline:
-    """Provide the process-wide pipeline.
-
-    A thin wrapper around the cache so that ``dependency_overrides`` has something
-    to replace: overriding an ``lru_cache``-decorated function directly would leave
-    the cache populated for whatever ran next.
-    """
-    return _cached_pipeline()
 
 
 @router.post(
@@ -121,6 +99,7 @@ def search(
         fusion_version=result.fusion_version,
         collapsed_count=len(result.collapsed),
         elapsed_ms=elapsed_ms,
+        timings_ms=dict(result.timings_ms),
     )
 
 

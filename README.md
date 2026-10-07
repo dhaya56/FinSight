@@ -11,11 +11,12 @@ implemented.
 
 ## Status
 
-Phase 7 — narrative retrieval. **A question typed at the command line returns ranked passages from
-real filings, each citing the exact source elements it was built from.**
+Phase 11 — generation. **A question asked at the command line, over the API, or in the UI returns
+an answer whose every claim cites stored source spans, and whose every numeral has been checked
+against a span that claim itself cites.**
 
 ```cmd
-python -m finsight.cli.main search "what does the company say about credit risk"
+python -m finsight.cli.main ask "what does the company say about credit risk"
 ```
 
 Implemented: packaging and tooling, application settings, PostgreSQL with Alembic migrations, an
@@ -23,16 +24,34 @@ S3-compatible object store behind a backend-neutral port, health and readiness e
 intake — validation, content-addressed preservation of originals, and identity recording — PDF
 extraction into a citable source representation of pages, blocks, tables, cells and footnotes with
 exact coordinates, a governed development corpus of real filings the extraction path has been
-measured against, and the retrieval path: structure-aware chunking, local embedding, a Qdrant index
+measured against, the retrieval path — structure-aware chunking, local embedding, a Qdrant index
 carrying dense and BM25 sparse vectors, hybrid retrieval under hard metadata filters, reciprocal
-rank fusion, and cross-encoder reranking.
+rank fusion, and cross-encoder reranking — an authenticated API, a Streamlit UI that holds no
+data-store credentials, and the answer path: schema-constrained generation, citation resolution,
+the Evidence Gate, one recorded decision per answer, and an audit record.
 
 The development corpus is indexed end to end: **1,403 pages → 40,476 blocks → 5,637 chunks → 4,867
 indexed vectors** across three filings, under chunking configuration 4.
 
 Intake has no HTTP route yet. PROJECT_BLUEPRINT.md §28.2 requires authentication on every
-non-health route, so upload is exposed in the authentication phase. Extraction, chunking, indexing
-and search are driven from the command line in the meantime.
+non-health route, and upload is exposed in a later phase; extraction, chunking and indexing are
+driven from the command line in the meantime. `search` and `ask` are available from the command
+line, from the API and from the UI.
+
+### An answer takes minutes on this host, and that is measured
+
+`POST /v1/ask` measured **302 seconds** for one question over four passages, of which **287 s was
+the model**. The cause is not the grounding — the Evidence Gate costs 0–53 ms — but that the only
+graphics device here is integrated Intel Iris Xe with 2 GB, which cannot hold a 6.25 GB model, so
+inference runs on the CPU at roughly **27 prompt tokens per second** and **3.0–3.8 output tokens
+per second**.
+
+Reading the evidence therefore dominates, and the evidence budget buys latency linearly. The
+budget has **not** been lowered to compensate: latency is measured and the recall it would cost is
+not, so choosing on the measurable half of the trade-off is declined until §22.6's golden question
+set exists.
+[ENV-012](evaluation/decision_records/architecture/ENV-012-generation-validation.md) carries the
+figures, the derivation and its limits.
 
 The PDF producer is **provisional**, not selected. No evaluation has compared it against
 alternatives on real filings; see [ADR-002](evaluation/decision_records/architecture/ADR-002-provisional-pdf-producer.md).
@@ -71,9 +90,44 @@ Measured across the 1,403 pages of the development corpus, a column-aware orderi
 Choosing between the two needs a recorded comparison on development data (§35.4), so the limitation
 is measured and asserted by test rather than assumed away.
 
-Not yet implemented: authentication, processing jobs, the Fact Ledger, generation, the Evidence
-Gate, the user interface, and the evaluation harness. The repository grows one phase at a time; a
-directory exists only once its capability is implemented.
+Not yet implemented: processing jobs, the Fact Ledger, and the evaluation harness. The repository
+grows one phase at a time; a directory exists only once its capability is implemented.
+
+### How generation is grounded
+
+Worth stating here because the design was changed on evidence, and the earlier one is still
+described in older records.
+
+The model **emits claims with citation references and never writes a value**. Code resolves each
+reference to the source span stored in PostgreSQL, and a numeral reaches a reader only if it
+appears in a span its own claim cites. An unsupported claim is removed and the answer becomes
+partial; an answer with nothing supported abstains. Every answer carries exactly one decision —
+answered, partial or abstained — and that decision, its reason codes and its claims are recorded.
+
+This replaces the typed numeric placeholders and deterministic substitution the blueprint
+originally specified. The reason is that a placeholder moves the failure rather than removing it:
+a model that emits the wrong placeholder produces a numeral that is genuinely source-bound,
+passes every gate check, and is wrong — undetectable by construction. A citation reference is
+checkable, because the resolved span either contains the asserted numeral or does not.
+[ADR-009](evaluation/decision_records/architecture/ADR-009-citation-resolution-over-typed-placeholders.md)
+carries the reasoning, the amended blueprint sections, and an audit of what was adopted and
+rejected from current practice.
+
+The response is constrained by a JSON schema sent to the runtime, not asked for in prose:
+measured against the running service, schema-constrained decoding parsed cleanly on every
+attempt. **What was withheld is returned alongside what was released**, because a reader who
+cannot see a removal cannot tell a complete answer from a dismantled one.
+
+**No hallucination or injection claim is made.** Four injection probes were resisted and zero
+citations fell outside the evidence set, which is four probes and not a property — see ENV-012 §3.
+Delimiting stops a passage closing its own container; nothing stops a passage persuading. What
+bounds the damage is that the output is checked against the evidence rather than trusted, and that
+check costs under 53 ms.
+
+**Arithmetic is refused rather than attempted.** Asked how much a figure grew year on year, the
+system reports both values with their periods and declines the subtraction, because comparison and
+calculation need the typed records the Fact Ledger will hold and no amount of prompting substitutes
+for them.
 
 ### The retrieval path
 
@@ -115,7 +169,7 @@ passage.
 
 ### What is known to be wrong
 
-Measured, recorded, and **not yet fixed**. Listed here because they are spread across seven records
+Measured, recorded, and **not yet fixed**. Listed here because they are spread across eight records
 and a reader deciding whether to trust a result needs them in one place. Severity is this project's
 judgement, not a metric.
 
@@ -126,16 +180,24 @@ judgement, not a metric.
 | 3 | **Dense retrieval is nearly blind to which number a sentence states.** `1,234.56 crore` against `4,321.65 crore` scores **0.9863**; changing the fiscal year moves the vector *less* than changing the metric | cosine table | register §21 |
 | 4 | **An acronym cannot reach its own expansion.** Zero shared lexemes for all seven pairs tested, dense cosine 0.52–0.64. "PAT" reaches 8 chunks where "profit after tax" reaches 229 | 7 pairs, corpus counts | register §21 |
 | 5 | **19% of detected tables have their text split across chunks**, one across 25, so a header row and its figures can land apart. **128 of those 166 are unavoidable** — the table exceeds the child budget outright (median 734 tokens, max 3,801) and no chunking rule reunites it. Two attempts at the remainder were measured and rejected | 166 of 861; achievable gain measured at 2 | register §20 |
-| 6 | **24% of children are under the stated size floor**, 427 under 10 tokens, the smallest a single word | 1,212 of 4,969 | register §18 |
+| 6 | **25% of children are under the stated size floor**, the smallest a single word. Reranking filters most of them out before retrieval — measured over six queries, **1 of 48** retrieved children was a fragment — so the floor matters less to an answer than the count suggests | 1,211 of 4,867 | register §18, ENV-012 |
 | 7 | **Reranking is 93% of query latency** — 2,273 ms median against 175 ms with it off. §23.4's FlashRank trigger is live | per-token scaling table | ADR-006, ENV-010 |
 | 8 | **Fixed and verified.** Chunks that were up to 91% dot leaders outranked the sections they point at. Leader lines are now withheld: **zero** dot-dominated chunks remain, and the two probes that returned a table of contents at rank 1 now return the section itself | 78 children and 13 parents over 80% dots → 0; max dot share in results 0.84 → 0.02 | ADR-007, ENV-011 |
-| 9 | **A footnote cannot be reached from the figure it qualifies.** The text is searchable — 34 of 36 bound footnotes are already in the index via the blocks they were read from — but `footnote_refs` resolves to nothing, so a retrieved figure never carries its own exclusion. Indexing the footnote elements would only duplicate text already present | 36 of 36 also stored as blocks, 34 findable | register §24 |
+| 9 | **A footnote cannot be reached from the figure it qualifies.** The text is searchable — 34 of 36 bound footnotes are already in the index via the blocks they were read from — but `footnote_refs` resolves to nothing, so a retrieved figure never carries its own exclusion. Indexing the footnote elements would only duplicate text already present. **This now reaches a reader**: before this phase nothing composed an answer, so an unqualified figure stayed inside a passage a reader could see whole | 36 of 36 also stored as blocks, 34 findable | register §24, ENV-012 |
 | 10 | **Consensus outranks exclusivity at every rank** while the fusion constant is 60, so a chunk both retrievers agree on beats one either ranked first alone | crossover arithmetic | ENV-010 |
 | 11 | **A superscript footnote marker is stored as part of the number it annotates.** `get_text("blocks")` discards font size, so `145,000` with a superscript 1 becomes `145,0001`. Three cases in the development split, all glued, one turning a three-digit figure into a four-digit one. A floor, not a count | 3 of 3 glued, 0 separated | register §23 |
 
-Three more that are deliberate rather than defective: table cells are excluded from retrieval
-(ADR-003), QueryTrace is **not persisted** so §31.9 is unsatisfied, and no query planner derives
-§20.2's filters from a question — they are CLI flags.
+Four more that are deliberate rather than defective: table cells are excluded from retrieval
+(ADR-003), QueryTrace is **not persisted** so §31.9 is unsatisfied, no query planner derives
+§20.2's filters from a question — they are request fields and CLI flags — and **§20.8's bounded
+context expansion is unexercised on this corpus**. The mechanism is built and measured to cost
+nothing; it needs a retrieved fragment that has a parent, and six queries produced none, so it is
+implemented rather than demonstrated.
+
+Problems 1, 3 and 4 are worth re-reading now that answers exist: a retrieval stage that cannot
+separate a figure from a different figure, or a claim from its negation, selects the evidence an
+answer is composed from. The Evidence Gate checks that a numeral appears in a cited span — it does
+not check that the *right* span was retrieved.
 
 Problems 1, 3, 4, 7 and 10 are **blocked on evidence rather than effort**: each has a realistic
 alternative, and §8 requires recorded evidence plus approval to choose one. With no golden
@@ -261,6 +323,57 @@ Readiness checks database reachability and schema currency. It returns 503 when 
 unreachable **or** when the schema is behind the head revision, and it names no component, because
 it is unauthenticated.
 
+Two authenticated routes carry the evidence surfaces:
+
+| Endpoint | Behavior |
+|---|---|
+| `POST /v1/search` | Ranked passages with the source regions behind each. |
+| `POST /v1/ask` | A composed answer: the decision, each released claim with its resolved spans, what the Evidence Gate withheld, and the evidence it rested on. |
+
+Both require `FINSIGHT_API_TOKEN`. **With no token configured the API refuses every non-health
+request with 503** rather than serving openly — §28.2 requires authentication and the failure mode
+of forgetting is a closed door, not an unguarded one. A wrong token and a missing one get the same
+401, so a single guess cannot confirm that exactly one secret guards the route.
+
+Two things a client of `/v1/ask` must get right:
+
+- **Set a read timeout of at least 600 seconds.** An answer takes two to five minutes on a host
+  without GPU offload. A default 30-second timeout abandons a request the server goes on to
+  complete and record, and the reader is then told the model failed when it did not.
+- **An abstention is 200**, with the reason in the body. So is a failed model — §26.10 returns the
+  evidence without prose rather than an error, because five cited passages are more use than a 503.
+
+A request rejects unknown fields with 422 rather than ignoring them: a misspelled filter that is
+silently dropped widens the evidence instead of narrowing it, and returns a plausible answer from
+outside the scope that was asked for.
+
+## Running the UI
+
+The API must already be running, and both processes need the same token.
+
+```cmd
+set FINSIGHT_API_TOKEN=<the same token the API was started with>
+python -m streamlit run src\finsight\ui\app.py
+```
+
+**The UI reaches FinSight only over the authenticated API, and that is enforced by its import
+list.** Nothing under `src/finsight/ui/` imports settings, persistence, the vector index or the
+object store, so there is no code path by which it could acquire a data-store credential — §28.12,
+and a test asserts the boundary so a convenience import added later cannot dissolve it quietly.
+`FINSIGHT_API_URL` overrides the default of `http://127.0.0.1:8000`.
+
+The Ask page issues **two requests**: retrieval first, so real passages appear in about two
+seconds, then the answer into a slot reserved above them. That is why the page is useful during
+the minutes an answer takes, and it reflects the architecture — evidence is primary and prose is
+built on it. Streaming the model's output is deliberately not an option: the Evidence Gate must
+verify every numeral before anything is released, and streaming tokens would put unverified
+figures in front of a reader.
+
+Every panel carries a badge saying whether it is live or a fixture. The pages that are still
+fixtures say so in a caption and invent their issuers as well as their numbers, because a
+fabricated figure beside a real company's name stays fabricated once it is screenshotted out of
+context.
+
 ## Extracting a document
 
 Extraction turns a stored document version into source elements — pages, blocks, tables, cells and
@@ -381,15 +494,37 @@ A query takes roughly **2.3 s** of processing warm, of which about **93% is the 
 `--no-rerank` returns in about **175 ms**. Those are in-process figures — a one-shot CLI invocation
 adds several seconds loading Python, torch and the model, and the first query after that pays
 Ollama's model load too (measured at 6.2 s cold against 337 ms warm). A long-lived process such as
-the Phase 9 interface pays both once.
-
-`search` is the one command that prints document text, and deliberately so — §6.8 makes inspecting
-the evidence behind an answer a product capability. Nothing it prints is logged, and passages are
-truncated to a snippet unless `--full` is given.
+the API or the UI pays both once. Note that the *first successful* retrieval in a process pays the
+cross-encoder load, not the first request: a query that retrieves nothing short-circuits before
+reranking, which is why one measured 1.2 s and the next, in the same process, measured 15.1 s.
 
 If Qdrant is unavailable the command still answers from PostgreSQL full-text search and prints
 `DEGRADED: lexical_fallback_postgres_fts` **before** the results, so a reader who stops at the first
 passage already knows the ordering is not the intended one.
+
+### Asking
+
+```cmd
+python -m finsight.cli.main ask "what does the company say about credit risk" --limit 4
+python -m finsight.cli.main ask "what was revenue" --issuer "Infosys Limited" --since 2024
+```
+
+The same hard filters as `search`, and they bound the evidence an answer may rest on. Output is the
+decision, the support band, each released claim with inline `[n]` citation marks, **what the
+Evidence Gate withheld and why**, and the stored span behind every citation.
+
+An abstention exits **0**. Declining to answer is a correct outcome, not a command failure — a
+script should branch on the decision line, not on the exit code.
+
+Expect **two to five minutes** per answer on a host without GPU offload, and about **1 s** when the
+filters match nothing: retrieval returning nothing short-circuits before the model, because a
+refusal that can be derived for nothing should not cost a model call.
+[ENV-012](evaluation/decision_records/architecture/ENV-012-generation-validation.md) has the full
+cost breakdown.
+
+`search` and `ask` are the only commands that print document text, and deliberately so — §6.8 makes
+inspecting the evidence behind an answer a product capability. Nothing they print is logged, and
+passages and spans are truncated to a snippet unless `--full` is given.
 
 ## The development corpus
 
@@ -496,6 +631,7 @@ The retrieval path inside `src/finsight/`, in the order a question travels throu
 | `indexing/` | The outbox drain, and the enriched string that gets embedded | Hold a transaction across a model or vector call (§29.7) |
 | `retrieval/` | Filters, both retrievers, fusion, allocation, deduplication, the pipeline | Let similarity override a hard filter (§7) |
 | `reranking/` | The reranking port, the cross-encoder adapter, a deterministic fake | Be required — §23.1 keeps it optional under degradation |
+| `generation/` | Evidence assembly, the prompt, the schema contract, citation resolution, the Evidence Gate, one decision per answer | Let a model write a value or transcribe a quotation (ADR-009) |
 
 ## Project claims
 

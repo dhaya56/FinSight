@@ -4,16 +4,18 @@
 # configuration: the API address and token come from the environment, because
 # §28.12 keeps the UI's credentials out of files the repository tracks.
 #
-# A deliberate palette rather than the default, because the default theme reads as
-# "a Streamlit script" and this is a frontend. Switch base to "light" if a room's
-# projector handles it better; nothing else depends on the choice.
+# Light and deliberately bright. The earlier dark palette read as a terminal, and
+# this is a frontend a financial analyst and a general reader both have to want to
+# look at. Colour carries meaning here rather than decoration — green for released,
+# amber for partial, rose for withheld — so the palette is part of the information
+# design and not a skin over it.
 
 [theme]
-base = "dark"
-primaryColor = "#6366f1"
-backgroundColor = "#0b0e14"
-secondaryBackgroundColor = "#141925"
-textColor = "#e6e9ef"
+base = "light"
+primaryColor = "#4f46e5"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f6f8fc"
+textColor = "#0f172a"
 font = "sans serif"
 
 [server]
