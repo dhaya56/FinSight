@@ -39,6 +39,7 @@ from finsight.corpus.store import CorpusStore
 from finsight.domain.errors import DocumentRejectedError
 from finsight.domain.identifiers import HASH_ALGORITHM
 from finsight.domain.representations.source import ExtractionState
+from finsight.embedding.port import Embedder
 from finsight.extraction.contracts import ExtractionError
 from finsight.extraction.service import ExtractionService, build_extraction_service
 from finsight.indexing.service import (
@@ -413,6 +414,11 @@ class CorpusIndexingService:
         self._store = store
         self._indexing = indexing
         self._session_scope = session_scope_factory
+
+    @property
+    def embedder(self) -> Embedder:
+        """The embedder behind this driver, so a caller can report what it did."""
+        return self._indexing.embedder
 
     def index(
         self, entries: Sequence[CorpusEntry], *, retry: bool = False

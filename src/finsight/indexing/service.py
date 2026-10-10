@@ -218,6 +218,16 @@ class IndexingService:
         self._bm25 = bm25 or BM25Config()
         self._batch_size = min(max(batch_size, 1), BATCH_CEILING)
 
+    @property
+    def embedder(self) -> Embedder:
+        """The embedder this service used, so a caller can report what it did.
+
+        Exposed rather than folded into :class:`RecordedIndexing`, which records
+        what became queryable. How many vectors were recomputed is a property of
+        the embedder and says nothing about whether the generation is correct.
+        """
+        return self._embedder
+
     def index(self, generation_id: UUID, *, retry: bool = False) -> RecordedIndexing:
         """Index every pending chunk, then activate the generation.
 
@@ -448,13 +458,13 @@ def _payload(chunk: PendingChunk, generation_id: UUID) -> dict[str, object]:
 def build_indexing_service() -> IndexingService:
     """Wire indexing to the configured model, index and database."""
     from finsight.config.settings import get_settings
-    from finsight.embedding.ollama_embedder import build_embedder
+    from finsight.embedding.cache import build_cached_embedder
     from finsight.vector_index.qdrant_index import build_vector_index
 
     settings = get_settings()
     return IndexingService(
         recorder=TransactionalIndexingRecorder(),
-        embedder=build_embedder(settings),
+        embedder=build_cached_embedder(settings),
         index=build_vector_index(settings),
         batch_size=settings.embedding_batch_size,
     )

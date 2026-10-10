@@ -374,3 +374,61 @@ class TestRecordedOutput:
         service, _ = build(journal, elements=())
 
         assert service.extract(uuid4()).state is ExtractionState.FAILED
+
+
+class TestGlyphNormalisation:
+    """Nothing a producer emits reaches the database with a glyph artefact in it.
+
+    Applied at the service rather than in each producer: three sites set text today —
+    blocks, and cells from two different table detectors — and a fourth arrives with
+    every new format. A producer that forgets is not a visible bug, because the text
+    looks right to a reader and is merely unreachable by search, which is how 573
+    passages went unfindable without anyone noticing.
+    """
+
+    def test_a_ligature_never_reaches_the_recorder(self) -> None:
+        journal: list[str] = []
+        service, recorder = build(
+            journal, elements=(page(text=f"{chr(0xFB01)}nancial instrument"),)
+        )
+
+        service.extract(uuid4())
+
+        assert recorder.recorded[0].children[0].text == "financial instrument"
+
+    def test_normalisation_reaches_nested_children(self) -> None:
+        """Table cells are grandchildren, and they carry figures."""
+        journal: list[str] = []
+        service, recorder = build(
+            journal, elements=(page(text=f"cash {chr(0xFB02)}ows"),)
+        )
+
+        service.extract(uuid4())
+
+        assert recorder.recorded[0].children[0].text == "cash flows"
+
+    def test_an_element_without_text_is_untouched(self) -> None:
+        """A coverage gap carries a failure reason and no text to normalise."""
+        journal: list[str] = []
+        service, recorder = build(
+            journal, elements=(page(failure_reason="no_text_extracted", text=None),)
+        )
+
+        service.extract(uuid4())
+
+        assert recorder.recorded[0].children == ()
+        assert recorder.recorded[0].text is None
+
+    def test_clean_text_is_passed_through_unchanged(self) -> None:
+        journal: list[str] = []
+        service, recorder = build(journal, elements=(page(text="Revenue 1,62,990"),))
+
+        service.extract(uuid4())
+
+        assert recorder.recorded[0].children[0].text == "Revenue 1,62,990"
+
+    def test_the_configuration_version_marks_the_change(self) -> None:
+        """Same bytes now yield different text, which is what the version records."""
+        from finsight.extraction.service import EXTRACTION_CONFIG_VERSION
+
+        assert EXTRACTION_CONFIG_VERSION == "3"

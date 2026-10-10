@@ -426,6 +426,22 @@ class Settings(BaseSettings):
         ),
     )
 
+    embedding_cache_enabled: bool = Field(
+        default=True,
+        description=(
+            "Serve vectors from the embedding_cache table when the exact text, "
+            "model, configuration version and kind were embedded before. MEASURED: "
+            "indexing 4,867 children took 40.7 min (ENV-011), and re-extraction "
+            "under a new configuration changes only 770 of them, so a re-index "
+            "without this recomputes 4,097 identical vectors. A hit measured 825 "
+            "texts/s against 1.93 cold — roughly 430x cheaper per text — and 200 of "
+            "200 hits were bit-identical to the model's own output, largest "
+            "component difference 0.0. Same key, verified text, double-precision "
+            "storage: this is a throughput switch and not a quality one. Off "
+            "disables the lookup entirely rather than bypassing any check."
+        ),
+    )
+
     embedding_config_version: str = Field(
         default="1",
         description=(

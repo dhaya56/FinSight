@@ -197,7 +197,7 @@ class HybridRetrievalService:
 def build_hybrid_retrieval_service() -> HybridRetrievalService:
     """Wire the hybrid stage from configuration."""
     from finsight.config.settings import get_settings
-    from finsight.embedding.ollama_embedder import build_embedder
+    from finsight.embedding.cache import build_cached_embedder
     from finsight.retrieval.dense import DenseRetriever
     from finsight.retrieval.lexical import build_retrievers
     from finsight.vector_index.qdrant_index import build_vector_index
@@ -207,7 +207,7 @@ def build_hybrid_retrieval_service() -> HybridRetrievalService:
     primary, fallback = build_retrievers(index=index)
     return HybridRetrievalService(
         lexical=LexicalRetrievalService(primary=primary, fallback=fallback),
-        dense=DenseRetriever(embedder=build_embedder(settings), index=index),
+        dense=DenseRetriever(embedder=build_cached_embedder(settings), index=index),
     )
 
 

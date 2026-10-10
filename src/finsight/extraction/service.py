@@ -29,7 +29,7 @@ tested without a database and the transaction boundary has exactly one home.
 
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Protocol
 from uuid import UUID
 
@@ -47,6 +47,7 @@ from finsight.extraction.contracts import (
     UnsupportedFormatError,
     derive_state,
 )
+from finsight.extraction.normalise import normalise
 from finsight.extraction.pdf.pymupdf_adapter import PyMuPdfProducer
 from finsight.object_store.port import ObjectStore
 from finsight.object_store.s3_store import build_s3_object_store
@@ -66,7 +67,7 @@ before it can still be told apart from the runs made after — which is what mak
 an evaluation across them meaningful.
 """
 
-EXTRACTION_CONFIG_VERSION: Final = "2"
+EXTRACTION_CONFIG_VERSION: Final = "3"
 """The versioned extraction configuration.
 
 Bump this whenever a change would make the same document produce different
@@ -82,6 +83,11 @@ consequence was exactly what this docstring warns about: the idempotency index
 made re-extraction a no-op, so a corpus extracted on 2026-09-29 stayed block-only
 and every later stage read Phase 5 output. Chunking ran against 14,686 blocks and
 zero tables while the producer in memory found 87.
+
+Bumped to "3" when Phase 12 began decoding glyph artefacts — ligatures, space
+variants, invisible characters and line-break hyphens — in
+:mod:`finsight.extraction.normalise`. The same bytes now yield different stored
+text, which is precisely the condition this constant exists to mark.
 """
 
 
@@ -307,7 +313,9 @@ class ExtractionService:
         """
         try:
             with self._object_store.open_stream(object_key) as stream:
-                return self._producer.produce(stream)
+                return tuple(
+                    _normalised(element) for element in self._producer.produce(stream)
+                )
         except DocumentUnreadableError:
             self._recorder.record_failure(
                 document_version_id=document_version_id,
@@ -315,6 +323,28 @@ class ExtractionService:
                 config_version=self._config_version,
             )
             raise
+
+
+def _normalised(element: ExtractedElement) -> ExtractedElement:
+    """Decode glyph artefacts in an element and everything beneath it.
+
+    **Applied here, at the one funnel every producer passes through**, rather than at
+    each producer. There are three sites that set text today — blocks, and cells from
+    two different table detectors — and a fourth arriving with a new format would have
+    to remember. A producer that forgets is not a visible bug: the text looks right to
+    a reader and is simply unreachable by search, which is how 573 passages went
+    unfindable without anyone noticing.
+
+    Not in :class:`ExtractedElement` itself: it lives in the domain layer, and a PDF
+    font encoding ``fi`` as one glyph is not a fact about the domain.
+    """
+    if element.text is None and not element.children:
+        return element
+    return replace(
+        element,
+        text=None if element.text is None else normalise(element.text),
+        children=tuple(_normalised(child) for child in element.children),
+    )
 
 
 def build_extraction_service() -> ExtractionService:
