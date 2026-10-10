@@ -223,10 +223,85 @@ to be rediscovered as an operational surprise.
   reranker are part of the same phase rather than a later improvement.
 - **No Qdrant storage-footprint or rebuild-time figure** yet (§22.9).
 
+## The comparison this ADR owes, specified in advance
+
+Added 2026-10-10, after a candidate list was proposed from public leaderboard
+rankings. Specifying the comparison before running it is the point: a bake-off
+designed after the numbers arrive tends to discover that the number it already has
+is the important one.
+
+### Candidates, and which of them the blueprint permits
+
+| Model | Parameters | Dimensions | Blueprint status |
+|---|---|---|---|
+| `nomic-embed-text` | **137M** (measured: `/api/tags`, 274 MB) | 768 | §22.2 baseline — **current, provisional** |
+| `bge-m3` | ~567M (**4.1x**) | 1024 | §22.3 **challenger — permitted** |
+| `mxbai-embed-large` | ~335M (**2.4x**) | 1024 | **Not named.** Occupies §22.4's slot, which is gated on BGE-M3 being too heavy **and** Nomic underperforming — neither tested. Needs its own ADR |
+| `snowflake-arctic-embed2` | ~568M (**4.1x**) | 1024, MRL to 256 | **Not named.** Same gate as above |
+
+BGE-M3's learned sparse output is **not** a free addition to the retrieval path. It
+is a candidate *alternative* to ADR-005's BM25, and §21.5 gates it explicitly:
+evaluate it "only after BGE-M3 dense evaluation demonstrates acceptable resource
+use". Hybrid retrieval already exists; what BGE-M3 offers is a different way to
+produce the sparse half, which has to beat an incumbent rather than fill a gap.
+
+### What each arm costs, before any quality is known
+
+Parameter count is a **crude proxy** for CPU time — it ignores sequence handling,
+hidden width and layer count — so the projections below are order-of-magnitude, not
+measurements, and the first thing each arm must do is replace its own row:
+
+| | Measured | Projected at 4.1x |
+|---|---|---|
+| Embedding throughput | **1.93 texts/s** (corpus average, 0% GPU offload) | ~0.5 texts/s |
+| Full corpus re-index, 4,867 children | **42 min** | **~2.5-3 hours** |
+
+Four fixed costs apply to every arm regardless of outcome:
+
+1. **The Qdrant collection is recreated.** Width is fixed at creation, so 768 → 1024
+   is a new collection and not an alteration.
+2. **The embedding cache invalidates completely.** The model is part of the key, by
+   design, so the 6.7-minute re-index path applies to re-running a model and never
+   to changing one. Each arm pays its full cost once.
+3. **Each candidate needs its prefix policy settled in code.** The adapter hardcodes
+   Nomic's `search_document:` / `search_query:`; BGE-M3 needs none and mxbai needs a
+   query-only prefix. Applying the wrong one is the failure this record already
+   measured at cosine **0.9388** — it presents as a mediocre model rather than as a
+   wiring bug, which is why the port has two methods and why a candidate with
+   different prefixes needs its own adapter.
+4. **A model download**, which is a CLAUDE.md §4 approval boundary in each case.
+
+### What the comparison must measure, and on what
+
+§22.6's metrics — **Recall@k, MRR, nDCG** — on **identical chunks, identical
+filters and identical queries**, against the Phase 13 golden question set over the
+development split. Resource cost recorded per arm: throughput, re-index wall time,
+peak resident memory against §41.11's shared 15.7 GB envelope (which has already
+failed once, at 0.8 GB available), and Qdrant storage footprint at 1024 dimensions.
+
+### Why leaderboard rank cannot settle it
+
+A public benchmark average is evidence about that benchmark's corpus, chunking and
+queries. It is not evidence about Indian annual reports and offer documents, chunked
+at 384 tokens with deterministic context headers, filtered by issuer and fiscal
+period, and queried about reporting basis and specific figures. §22.10 asks for "the
+smallest model that provides acceptable retrieval quality", and neither half of that
+sentence is readable off a leaderboard.
+
+This project has reversed four confident expectations by measuring them: the table
+detector that bounded 2 of 6 real pages, context expansion that discarded 20 of 48
+passages, a similarity floor that would have cut nearly every candidate, and
+semantic caching defeated by the fiscal year moving a vector less than the metric.
+An embedding swap is the most expensive of these to get wrong, because undoing it
+costs a full re-index of every arm already run.
+
+**So the ordering is fixed: golden question set first (Phase 13), then the
+comparison.** Running it earlier produces a resource measurement and a quality
+guess, and the guess is the part that would end up in production.
+
 ## What would trigger revisiting
 
-A recorded comparison under §22.6 and §35.14 — Nomic against BGE-M3 on identical
-chunks, filters and queries — with developer approval. Or a measured failure:
+The comparison specified above, with developer approval. Or a measured failure:
 retrieval that misses evidence a lexical search finds, memory contention with
 generation under §41.11, or indexing throughput that makes a full re-embed
 impractical. Any of these is a model swap behind the port, not a schema change.
