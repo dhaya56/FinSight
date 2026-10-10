@@ -96,6 +96,26 @@ ACTIVE_CHUNKS = (
     " ON v.active_generation_id = c.generation_id"
 )
 
+CURRENT_ELEMENTS = (
+    " FROM (SELECT e.text FROM source_elements e"
+    "       JOIN document_versions v"
+    "         ON v.current_extraction_run_id = e.extraction_run_id)"
+    " AS current_elements"
+)
+"""Only the elements the current extraction run produced.
+
+**Without this the script reports a successful fix as a no-op.** Extraction runs
+accumulate — a superseded run's elements stay in the table, because an active
+generation may still be citing them — so counting `source_elements` unfiltered sums
+every run ever made. After the Phase 12 reprocess that read 1,561 ligature elements
+both before and after, identical to the digit, while the current run contained
+**zero**: the old config-2 rows were the entire count.
+
+A subquery exposing only `text` rather than a join with an alias, so the probe
+predicates stay written against a bare `text` column. They contain thin spaces,
+private-use glyphs and ligatures that cannot be reviewed once qualified and retyped.
+"""
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -106,11 +126,11 @@ def main() -> int:
 
     with session_scope() as session:
         total = session.execute(
-            text("SELECT count(*) FROM source_elements WHERE text IS NOT NULL")
+            text(f"SELECT count(*){CURRENT_ELEMENTS} WHERE text IS NOT NULL")
         ).scalar_one()
         active = session.execute(text(f"SELECT count(*){ACTIVE_CHUNKS}")).scalar_one()
 
-        print(f"source elements carrying text : {total:,}")
+        print(f"source elements carrying text : {total:,}  (current runs only)")
         print(f"chunks in active generations  : {active:,}\n")
         report["source_elements"] = total
         report["active_chunks"] = active
@@ -129,7 +149,7 @@ def main() -> int:
             for label, predicate in probes:
                 count = session.execute(
                     text(
-                        "SELECT count(*) FROM source_elements"
+                        f"SELECT count(*){CURRENT_ELEMENTS}"
                         f" WHERE text IS NOT NULL AND {predicate}"
                     )
                 ).scalar_one()
@@ -190,7 +210,7 @@ def main() -> int:
         print("\n--- non-ASCII characters actually present (sampled) ---")
         rows = session.execute(
             text(
-                "SELECT text FROM source_elements"
+                f"SELECT text{CURRENT_ELEMENTS}"
                 " WHERE text IS NOT NULL AND text ~ '[^\\x00-\\x7F]' LIMIT 4000"
             )
         ).all()

@@ -55,12 +55,13 @@ place instead of scattered across fourteen records.
 | **Problem** | Faster embedding is exhausted (1.2). The remaining saving is to embed *less*. |
 | **Observation** | A re-chunk gives every chunk a new identifier while its text survives, so a cache keyed on chunk **identity** would miss everything. Keyed on **content**, it hits. This is why the cache is a PostgreSQL table and not something Qdrant could have provided. |
 | **Hit rate, measured** | Applied the Phase 12 text normalisation to the text the embedder actually sees and counted how much came back byte-identical: of 4,867 embedded children, **770 changed (15.8%)** and **4,097 are unchanged (84.2%)**. Only **127** chunks share identical text *within* one run, which is why an in-run deduplication would have been nearly worthless and the cache has to be durable. |
-| **Hit cost, measured** | 200 real child chunks, 7 batches of 32, through the real table and the real model. Cold **103.88 s → 1.93 texts/s**. Warm **0.24 s → 825 texts/s**. A hit is about **430× cheaper** per text than a miss. (197 misses for 200 texts: three were duplicates inside the sample, collapsed to one lookup each.) |
-| **Re-index projection from those two** | All-cold **42.1 min**; at the measured 84.2% mix **6.7 min** — a **6.2× speedup**, about 35 minutes saved per re-index. |
-| **Quality, measured** | **200 of 200 returned vectors bit-identical** to the ones the model produced. Largest difference in any single component across all 153,600 values: **exactly 0.0**. |
-| **What makes that true** | The key is the exact text plus model plus configuration version plus document-or-query kind. The stored text is compared against the requested text on every hit, so a digest collision is a miss rather than a wrong vector. Vectors round-trip through `double precision`, not `real` — a float32 column would have been a quarter the size and would have returned vectors differing in their last bits, enough to reorder two near-identical candidates and impossible to notice. |
-| **Limitation** | The 42.1 min figure extrapolates a 200-chunk sample of *raw* child text; ENV-011 measured 40.7 min on *enriched* text for the real corpus, so the two agree within 3.5% and the shape is sound. The end-to-end confirmation is still the Phase 12b reprocess. The 825 texts/s warm rate is a local PostgreSQL round trip and would be lower across a network. |
-| **Record** | this file; ENV-013 when the reprocess runs |
+| **Hit cost, measured on the whole corpus** | 4,859 enriched child texts, the real table, the real model. Cold **2,360.77 s**. Warm **2.91 s — 1,669 texts/s at a 100.00% hit rate**, 0 misses, 0 faults. **811× on unchanged text.** |
+| **Re-index, measured** | No cache **39.3 min**. At the measured 84.2% hit share **6.3 min** — **6.3×**, about 33 minutes saved. |
+| **Quality, measured** | **200 of 200 returned vectors bit-identical** to the ones the model produced; largest difference in any single component across 153,600 values **exactly 0.0**. Corpus-wide, 4,837 hits returned with zero misses — which is also the proof that the keying is byte-exact, since one character of drift would have surfaced as a miss. |
+| **What makes that true** | The key is the exact text plus model plus configuration version plus document-or-query kind. The stored text is compared against the requested text on every hit, so a digest collision is a miss rather than a wrong vector. Vectors round-trip through `double precision`, not `real` — float32 would have been a quarter the size and would have returned vectors differing in their last bits, enough to reorder two near-identical candidates and impossible to notice. |
+| **A shortcut refused** | The cache could have been back-filled from Qdrant, where 4,867 vectors already sat with their text, making the first reprocess ~6 min instead of 39. **Qdrant stores float32.** That would have loaded rounded values into a double-precision cache and served them as hits, turning a measured guarantee into an approximation. The 33 minutes were declined. |
+| **Limitation** | The 6.3 min figure mixes two measured rates at a measured hit share; it is not a stopwatch reading, and the next reprocess produces one. The 84.2% share was measured for this specific configuration change — a change that rewrites more text hits less. One model, one host, local PostgreSQL. |
+| **Record** | ENV-013 |
 
 ### 1.4 Semantic caching: rejected, with the measurement that killed it
 
@@ -177,8 +178,9 @@ The measurements that prevented work are worth as much as the ones that caused i
 | **Method** | Fifteen ordinary financial words, each searched in both spellings against the live index. |
 | **Measured** | **741** passages spell one of them with a ligature, and **573 of those cannot be reached** by a query spelling it normally. **441 of 5,637** retrievable chunks are affected. Separately: **338** elements over forty characters contain **no ASCII space at all** — their words are separated by thin, hair or no-break spaces, so the whole element becomes one token. **127** elements carry C0/C1 control characters, including eleven occurrences of U+0083. |
 | **Change** | Decode the artefacts as text leaves the producer: ligatures to their letters, indistinguishable spaces to spaces, invisible and control characters removed, line breaks closed. Deliberately *not* changed: curly apostrophes (2.5), U+2212 minus, en/em dashes, newlines, private-use glyphs. |
-| **Status** | Implemented and unit-tested. The 573 → 0 confirmation requires the reprocess and has **not** been run. |
-| **Record** | ENV-013 when the reprocess runs |
+| **Measured after the reprocess** | **Unreachable passages 573 → 0.** Chunks carrying a ligature **441 of 5,637 → 0 of 5,628**. Ligature elements 1,561 → **0**; non-breaking spaces 182 → **0**; thin/hair spaces 32 → **0**; control characters 127 → **0**; words split at a line break 874 → **1**. Both runs produced 61,150 elements carrying text from the same bytes, so this compares like with like. |
+| **What is still not zero** | Elements over 40 chars with no ASCII space: **338 → 169**, halved rather than fixed. The half that was fixed used non-breaking or thin spaces as separators; the remaining 169 have **no space-like character at all** to decode, so it is an extraction defect rather than a glyph one and is an open Phase 14 item. The one remaining split word has a *blank line* inside the break, which the pattern excludes on purpose — closing a word across a paragraph boundary would join two paragraphs to repair one word. |
+| **Record** | ENV-013 |
 
 ### 3.2 Leader lines: 91 dot-filled chunks → 0
 
@@ -244,8 +246,26 @@ Listed so the absence is deliberate rather than forgotten.
 | Item | Why unmeasured | Owning phase |
 |---|---|---|
 | Any retrieval- or answer-**quality** figure | No golden question set exists | 13 |
-| The 573 → 0 confirmation, and the cache's 6.7 min end to end | Both need the reprocess run | 12b |
+| A stopwatch reading for the 84.2%-mix re-index | The 6.3 min figure mixes two measured rates | the next reprocess |
+| 169 elements with no word separator of any kind | An extraction defect, not a glyph one | 14 |
 | In-process (torch) embedding versus Ollama over HTTP | Needs a ~500 MB model download, which is an approval boundary | 12a, if approved |
 | Peak reranker process memory alongside `llama3.1:8b` | Latency was the binding constraint and was measured; resident cost was not | 13 |
 | Real-document persistence throughput | ENV-004's figures are synthetic and understate the real cost | 14 |
 | Nomic versus BGE-M3; MiniLM versus a BGE reranker | Both adopted **provisionally**, not selected. §22.10 reserves selection for recorded evidence | 13–14 |
+
+### The embedding comparison is specified but deliberately not run
+
+Proposed candidates (BGE-M3, mxbai-embed-large, Arctic Embed 2) are all 1024-dimensional
+and **2.4× to 4.1× the parameters** of the current 137M model, on a host measured at 1.93
+texts/s with 0% GPU offload — so each arm projects to a **2.5–3 hour** re-index against the
+measured 42 minutes. Every arm also recreates the Qdrant collection, invalidates the entire
+embedding cache (the model is part of the key, by design), and needs its task-prefix policy
+settled in code.
+
+It is not run yet because the only available evidence is public leaderboard rank, which is
+evidence about *that* benchmark's corpus and not about Indian annual reports chunked at 384
+tokens and filtered by issuer and fiscal period. §22.6 requires Recall@k, MRR and nDCG on
+identical chunks and filters, which needs the Phase 13 golden question set. Running it
+earlier would produce a resource measurement and a quality guess — and the guess is the part
+that would reach production. **ADR-004** carries the full specification: candidates, costs
+per arm, metrics, and what would make a swap admissible.
