@@ -1,13 +1,78 @@
-# FinSight local infrastructure.
+# FinSight: infrastructure and application, single node.
 #
-# Services are added as their capability is implemented. Phase 2 introduces
-# PostgreSQL, which is authoritative for all application state.
+# Services are added as their capability is implemented. Phase 2 introduced
+# PostgreSQL; Phase 16a adds the API, the UI and the one-shot migrator.
 #
 # Values come from the repository-root .env, which is never committed. The
 # ${VAR:?message} form makes `docker compose config` fail fast with a named
 # variable rather than starting with a silent default.
+#
+# **Two variable namespaces, and the distinction is load-bearing.** FINSIGHT_* are
+# application settings, read by pydantic-settings with extra="forbid". PUBLISH_* are
+# host port mappings read only by Compose. They are kept apart because a FINSIGHT_*
+# name that is *not* a settings field is accepted as an environment variable and
+# **rejected** inside .env — measured: an unknown key in .env raises
+# extra_forbidden and the application will not start. So a Compose-only variable
+# named FINSIGHT_something is a crash waiting for someone to move it into .env.
+#
+# **Port allocation.** Everything binds 127.0.0.1, never 0.0.0.0, so nothing here is
+# reachable from the local network. The application tier uses a reserved 87xx block
+# chosen to stay clear of the 1xxxx range another project on this host publishes on,
+# and of the defaults a developer is likely to want elsewhere (8000, 8080, 8501).
+#
+# **Ollama stays on the host** (§9.8, §10.4) and is reached through
+# host.docker.internal. Verified on this host: Ollama listens on 127.0.0.1 only, and
+# Docker Desktop still routes host.docker.internal to it — HTTP 200 from inside a
+# container. extra_hosts declares the mapping explicitly so the same file works on
+# Linux Docker, where it is not automatic.
 
 name: finsight
+
+# The API image, defined once and used by both the server and the migrator. One
+# build, one artefact to scan and promote; the only difference is the command.
+x-api-image: &api-image
+  build:
+    context: .
+    dockerfile: docker/api/Dockerfile
+  image: finsight-api:local
+
+# Connection settings shared by the server and the migrator. Service names, not
+# loopback: inside the Compose network the database is "postgres".
+x-api-environment: &api-environment
+  FINSIGHT_ENV: ${FINSIGHT_ENV:-development}
+  FINSIGHT_POSTGRES_HOST: postgres
+  FINSIGHT_POSTGRES_PORT: 5432
+  FINSIGHT_POSTGRES_DB: ${FINSIGHT_POSTGRES_DB:?set FINSIGHT_POSTGRES_DB in .env}
+  FINSIGHT_POSTGRES_USER: ${FINSIGHT_POSTGRES_USER:?set FINSIGHT_POSTGRES_USER in .env}
+  FINSIGHT_POSTGRES_PASSWORD: ${FINSIGHT_POSTGRES_PASSWORD:?set FINSIGHT_POSTGRES_PASSWORD in .env}
+
+# Log rotation, applied to every service.
+#
+# Docker's json-file driver defaults to **no limit**, so a long-running stack writes
+# until the disk fills — and the first symptom is usually something unrelated failing
+# to write. uvicorn logs a line per request and PostgreSQL logs more than that, so
+# "it is only a dev stack" is not a bound.
+#
+# 10 MiB x 3 files caps each service at 30 MiB and the stack at 180 MiB. Enough to
+# diagnose a failure that happened minutes ago, which is what these logs are for;
+# anything needing real retention needs a log shipper, and §9 keeps observability
+# services disabled by default.
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# Hardening applied to every application container. The infrastructure services
+# carry no-new-privileges already; these add to it rather than replace it.
+x-hardened: &hardened
+  init: true
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
 
 services:
   postgres:
@@ -15,6 +80,7 @@ services:
     # reproducibility; it is not pinned here because a digest is platform
     # specific and multi-platform compatibility has not been verified.
     image: postgres:18.6
+    <<: *logging
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${FINSIGHT_POSTGRES_DB:?set FINSIGHT_POSTGRES_DB in .env}
@@ -28,6 +94,11 @@ services:
       # declares the volume at /var/lib/postgresql. Mounting the pre-18 path
       # (/var/lib/postgresql/data) would not persist data for this image.
       - finsight-postgres-data:/var/lib/postgresql
+    networks:
+      # Named explicitly. Once this file declares networks, a service that omits the
+      # key joins "default" instead — and the API, which is on backbone, would then
+      # be unable to resolve this one.
+      - backbone
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -71,6 +142,7 @@ services:
     # The image lives on Docker Hub. GHCR hosts a Helm chart under the same name,
     # not a container image, which is verified in ADR-001.
     image: chrislusf/seaweedfs:4.47
+    <<: *logging
     restart: unless-stopped
     # "mini" is the all-in-one single-node mode: master, volume, filer and S3 in
     # one process. The admin UI is disabled because nothing here uses it.
@@ -90,6 +162,8 @@ services:
     volumes:
       - finsight-objectstore-data:/data
       - ./docker/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    networks:
+      - backbone
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -116,13 +190,20 @@ services:
     # API shapes and a silent drift between them surfaces as a schema error on a
     # collection that worked yesterday.
     image: qdrant/qdrant:v1.19.1
+    <<: *logging
     restart: unless-stopped
     ports:
       # Loopback only, and only the REST port. gRPC (6334) stays unpublished
       # because nothing uses it; the client speaks REST by default.
-      - "127.0.0.1:${FINSIGHT_QDRANT_PORT:-6333}:6333"
+      # PUBLISH_, not FINSIGHT_: this is a host mapping, and the old
+      # FINSIGHT_QDRANT_PORT name was a trap. It is not a settings field, so moving
+      # it from the shell into .env — which .env.example invited — crashed the
+      # application with extra_forbidden rather than changing a port.
+      - "127.0.0.1:${PUBLISH_QDRANT_PORT:-6333}:6333"
     volumes:
       - finsight-qdrant-data:/qdrant/storage
+    networks:
+      - backbone
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -154,6 +235,147 @@ services:
       resources:
         limits:
           memory: 1g
+
+  # ------------------------------------------------------------------ application
+
+  migrate:
+    <<: [*api-image, *hardened, *logging]
+    environment: *api-environment
+    # Migrations are a deliberate step, never something the server does on start-up.
+    # Two API containers coming up together would both run `alembic upgrade head`
+    # against one database; Alembic's version table is not a lock, so the race is
+    # resolved by whichever transaction commits first and the loser fails partway
+    # through DDL. A one-shot service runs it exactly once, and the API waits for it
+    # to exit zero.
+    command: ["alembic", "upgrade", "head"]
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    networks:
+      - backbone
+
+  api:
+    <<: [*api-image, *hardened, *logging]
+    restart: unless-stopped
+    environment:
+      <<: *api-environment
+      FINSIGHT_QDRANT_URL: http://qdrant:6333
+      # The host, not a service. Ollama is deliberately not containerised.
+      FINSIGHT_OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # §28.2 requires a token on every non-health route. Unset does not open the
+      # API — the authenticated router returns 503 — so the failure mode is a closed
+      # door, but a closed door is still an outage, hence the hard requirement here.
+      FINSIGHT_API_TOKEN: ${FINSIGHT_API_TOKEN:?set FINSIGHT_API_TOKEN in .env}
+      # No S3 variables. The API reaches object storage through no code path: there
+      # is no upload route, and evidence text is read from PostgreSQL. Least
+      # privilege is cheaper to keep than to add back.
+      #
+      # Cross-encoder thread count, overriding the image default. MEASURED in
+      # ENV-014 rather than guessed: the image shipped 2, and reranking 25
+      # candidates cost about 2,500 ms against ADR-006's host-native 1,700 ms at the
+      # same depth — the cap, not the container, was the gap. Compose-only name, so
+      # it cannot collide with the FINSIGHT_ settings namespace.
+      OMP_NUM_THREADS: ${API_OMP_THREADS:-4}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${PUBLISH_API_PORT:-8701}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    tmpfs:
+      # The root filesystem is read-only, so the few paths that must be writable are
+      # named. /tmp is where torch and the tokenizer put scratch files; HOME exists
+      # because libraries probe it and a missing one surfaces as an obscure failure
+      # rather than a clear one. Both are size-capped: an unbounded tmpfs is host
+      # memory a container can consume without a memory limit noticing.
+      - /tmp:size=256m,mode=1777
+    networks:
+      - backbone
+      - edge
+
+    # MEASURED (ENV-014): 128 MiB at start-up, 493 MiB after five searches with the
+    # cross-encoder resident. The jump is torch loading lazily — the model is not in
+    # memory until the first reranked query, which is why an idle reading would have
+    # understated the limit by a factor of four.
+    #
+    # 2 GiB is ~4.1x the measured peak, the same ratio PostgreSQL carries here, and
+    # the headroom is deliberate: this container shares a 15.7 GB host with Ollama
+    # serving an 8B model, on a host that has already lost an indexing run to memory
+    # pressure (ADR-004). A limit set near a measured peak turns an ordinary heavier
+    # query into an OOM kill.
+    #
+    # **No CPU limit**, consistent with the infrastructure services. The reranker's
+    # thread count is bounded directly instead (OMP_NUM_THREADS above), which is the
+    # control that actually matters: it caps contention with Ollama at the source
+    # rather than throttling the container afterwards.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  ui:
+    build:
+      context: .
+      dockerfile: docker/ui/Dockerfile
+    image: finsight-ui:local
+    <<: [*hardened, *logging]
+    restart: unless-stopped
+    environment:
+      # The whole configuration of this tier: where the API is, and the token to
+      # call it with. No datastore address and no datastore credential.
+      FINSIGHT_API_URL: http://api:8000
+      FINSIGHT_API_TOKEN: ${FINSIGHT_API_TOKEN:?set FINSIGHT_API_TOKEN in .env}
+      HOME: /tmp
+    ports:
+      - "127.0.0.1:${PUBLISH_UI_PORT:-8702}:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    networks:
+      # **edge only.** This is the control, not the configuration: the UI is not
+      # attached to the backbone, so PostgreSQL, Qdrant and the object store are
+      # neither resolvable nor routable from it. Withholding credentials is policy;
+      # withholding the route is topology, and topology does not depend on anyone
+      # remembering the policy.
+      - edge
+
+    # MEASURED (ENV-014): 55 MiB, flat across idle and five searches — the UI holds
+    # no model and no connection pool, so its footprint is Streamlit's own.
+    #
+    # 512 MiB is ~9.3x that, looser than the ratio every other service here carries,
+    # and deliberately so: the measurement is one browser session, and Streamlit keeps
+    # per-session state, so the ceiling scales with concurrent viewers rather than
+    # with the workload. That ceiling is unmeasured. Tightening this needs a
+    # multi-session measurement, not a smaller number.
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+networks:
+  # Datastores and the services that are allowed to reach them.
+  #
+  # Not `internal: true`: that would disable published ports as well as egress, and
+  # the CLI on the host connects to PostgreSQL and Qdrant through exactly those
+  # ports. The separation that matters here is which containers share a network, and
+  # the UI does not share this one.
+  backbone:
+    driver: bridge
+
+  # The UI and the API. Nothing else.
+  edge:
+    driver: bridge
 
 volumes:
   finsight-postgres-data:

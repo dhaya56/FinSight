@@ -1,0 +1,19 @@
+# What the UI image installs directly, constrained by the root requirements.txt.
+#
+# **Two packages, and that is the whole point.** The UI reaches the API over HTTP and
+# nothing else: `ui/client.py` reads FINSIGHT_API_URL and FINSIGHT_API_TOKEN from the
+# environment and deliberately refuses to import `Settings`, whose own docstring gives
+# the reason — it carries the PostgreSQL password, and importing it to find a URL
+# would put a datastore credential in the most exposed tier of the system.
+#
+# That design is why this file has no database driver, no object-store client, no
+# vector-store client and no model runtime. The image cannot reach a datastore
+# because it has nothing to reach one with, which is a stronger guarantee than a
+# configuration that merely omits the credentials.
+#
+# Streamlit brings pandas, pyarrow, numpy and altair transitively. They are not
+# listed here because the UI does not import them directly; the constraints file
+# pins them.
+
+httpx==0.28.1
+streamlit==1.65.0

@@ -1,0 +1,56 @@
+# What may enter an image layer. This is a security control, not build hygiene.
+#
+# **Deny everything, then re-admit by name.** The opposite order — listing what to
+# exclude — fails silently the first time someone adds a file: a new credential, a
+# new corpus directory or a new dump lands in the build context because nobody
+# remembered to exclude it. With this order a new file is absent until it is named,
+# and the failure mode is a broken build rather than a leaked document.
+#
+# Three things in this repository must never reach a layer, and all three are
+# covered by the deny-all rather than by being listed:
+#
+#   .env                              PostgreSQL and object-store credentials
+#   data/corpus/held_out_*            filings frozen for evaluation (§8). An image
+#                                     is a distributable artefact, so held-out
+#                                     documents inside one are held out of nothing
+#   model_cache/                      506 MB of Docling artefacts no service here needs
+#
+# Note that a layer is permanent. Deleting a file in a later RUN does not remove it
+# from the image, so "COPY then clean up" is not a mitigation.
+
+*
+
+# The application itself. Source rather than a wheel, because
+# `persistence/database.py` resolves `migrations/` relative to its own __file__ and
+# the installed-package layout breaks that derivation. See docker/api/Dockerfile.
+!src/
+
+# Schema history. The readiness probe compares the database revision against this
+# directory, so an image that serves /health/ready has to carry it.
+!migrations/
+!alembic.ini
+
+# Version metadata: `finsight.__version__` is read through this at build time.
+!pyproject.toml
+
+# The pinned version authority, plus the per-image direct dependency lists.
+!requirements.txt
+!docker/api/requirements.txt
+!docker/ui/requirements.txt
+
+# The cross-encoder, staged by scripts/stage_reranker_model.py. It loads with
+# local_files_only=True, so an image without it fails at the first reranked query
+# rather than at start-up.
+!docker/api/model/
+
+# The CPU-only torch wheel, staged by scripts/stage_build_wheels.py, because its
+# index is not verifiable from inside the build. See docker/api/Dockerfile.
+!docker/api/wheels/
+
+# Streamlit theme. Committed, contains no configuration and no secret.
+!.streamlit/config.toml
+
+# Re-excluded after the re-admissions above, because `!src/` would otherwise pull
+# compiled caches from the developer's working tree into the layer.
+**/__pycache__/
+**/*.py[cod]

@@ -1,0 +1,41 @@
+# What the API image installs directly. Versions come from the root
+# requirements.txt, which is passed as a pip constraints file at build time.
+#
+# **One pinned file remains the version authority (CLAUDE.md §10).** This file names
+# *which* packages an image needs, never which version — every pin below is enforced
+# by `-c requirements.txt`, so a version can only change in one place and a drift
+# between the two is a build failure rather than a silent difference between the
+# image and the tested environment.
+#
+# **Why not install the root file.** It is a development superset: 187 pins including
+# Docling, OpenCV, SciPy, pandas, reportlab, python-docx, python-pptx and pytest.
+# Installing it produces a multi-gigabyte API image whose extra surface is parsers
+# the API never calls and a test runner that has no business in a serving image.
+#
+# The set was derived, not guessed: `create_app()` was imported under a module
+# tracer and every resulting distribution recorded. Three members are not in that
+# list and are here deliberately —
+#
+#   psycopg / psycopg-binary  the engine is built lazily, so the driver is absent at
+#                             import and required at the first query
+#   uvicorn                   the server, which imports the app rather than the
+#                             reverse
+#   torch / transformers      the cross-encoder loads inside the first reranked
+#                             query (ADR-006), not at start-up
+#
+# Absent on purpose: boto3 (the API never reaches object storage — no upload route
+# exists), torchvision (a Docling dependency; the sequence-classification head does
+# not use it), and every parser.
+
+alembic==1.20.0
+fastapi==0.141.1
+httpx==0.28.1
+psycopg==3.3.5
+psycopg-binary==3.3.5
+pydantic==2.13.5
+pydantic-settings==2.15.0
+qdrant-client==1.19.1
+SQLAlchemy==2.0.52
+torch==2.14.1+cpu
+transformers==5.18.0
+uvicorn==0.52.4

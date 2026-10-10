@@ -256,11 +256,69 @@ copy .env.example .env
 rejected at startup when empty or when it matches a known default value such as `postgres` or
 `changeme`. That check guards against well-known defaults; it is not a password-strength check.
 
+`FINSIGHT_API_TOKEN` is required whenever the API serves HTTP, including in the container. It must
+be at least 32 characters. An unset token does not leave the API open — the authenticated router
+returns 503 to everything — so the failure mode is a closed door rather than an unguarded one.
+Generate one; do not reuse a password:
+
+```cmd
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+**Two variable namespaces, and the difference matters.** `FINSIGHT_*` are application settings,
+read with `extra="forbid"`. `PUBLISH_*` are host port mappings read only by Compose. A
+`FINSIGHT_*` name that is not a settings field is *ignored* as an environment variable and
+**rejected** inside `.env` — it raises `extra_forbidden` and the application will not start. So a
+Compose-only variable must never be given a `FINSIGHT_` name.
+
+### Running the commands
+
+The package is not installed into the virtual environment, and `src/` is not on `sys.path` by
+default — `pytest` works only because `pyproject.toml` sets `pythonpath`, which `python -m` does
+not read. So an activated prompt needs:
+
+```cmd
+set PYTHONPATH=src
+python -m finsight.cli.main --help
+```
+
+Without it every `python -m finsight.cli.main ...` command below fails with
+`ModuleNotFoundError: No module named 'finsight'`. The container images set `PYTHONPATH`
+themselves and need nothing from you.
+
 ## Local infrastructure
 
-Two containers: PostgreSQL, authoritative for all application state, and SeaweedFS, which serves the
-S3 API for immutable source objects. Docker Desktop must be running with the WSL 2 Linux-container
-backend.
+Six services. Three are infrastructure — PostgreSQL, authoritative for all application state;
+Qdrant, a rebuildable derived vector index; and SeaweedFS, serving the S3 API for immutable source
+objects. Three are the application: a one-shot migrator, the API, and the UI. Docker Desktop must
+be running with the WSL 2 Linux-container backend.
+
+Ollama is **not** containerised (§9.8). It runs on the host and the API reaches it through
+`host.docker.internal`.
+
+Everything is published on `127.0.0.1` only. The application tier uses a reserved block — **8701**
+for the API, **8702** for the UI — chosen to clear the defaults a developer is likely to want
+elsewhere. Override with `PUBLISH_API_PORT` and `PUBLISH_UI_PORT`.
+
+### Build inputs to stage first
+
+Two artefacts have to be in the build context before the API image will build, and both are
+gitignored because they are reproducible build inputs rather than source:
+
+```cmd
+set PYTHONPATH=src
+python scripts\stage_reranker_model.py
+python scripts\stage_build_wheels.py
+```
+
+The first copies the cross-encoder out of the local HuggingFace cache: the adapter loads it with
+`local_files_only=True`, so an image without it fails at the first reranked query rather than at
+start-up. The second fetches the CPU-only torch wheel, because the index publishing it presents a
+certificate chain this network re-issues and the container cannot verify — so the wheel is fetched
+where verification succeeds and carried in. Both are idempotent and both take `--verify`.
+
+ENV-014 records why neither disabling certificate verification nor installing the issuing root into
+the image was acceptable.
 
 ### Object-store credentials
 
@@ -279,19 +337,49 @@ powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path docker
 
 ```cmd
 docker compose config
+docker compose build
 docker compose up -d
 docker compose ps
 ```
 
 `docker compose config` fails with a named variable if anything required is missing from `.env`.
-Both services are published on the loopback interface only. Data lives in the named volumes
-`finsight-postgres-data` and `finsight-objectstore-data` and survives `docker compose down`.
+
+Start-up is ordered rather than simultaneous: the datastores come up and must report healthy, then
+`migrate` runs `alembic upgrade head` once and must exit zero, then the API starts and must pass
+its readiness probe — which is itself the schema check — and only then does the UI start. A failure
+anywhere stops the chain instead of leaving a half-started stack.
+
+The UI is then at <http://127.0.0.1:8702> and the API's docs at <http://127.0.0.1:8701/docs>.
+
+Data lives in the named volumes `finsight-postgres-data`, `finsight-qdrant-data` and
+`finsight-objectstore-data` and survives `docker compose down`.
 
 ```cmd
 docker compose down
 ```
 
 `docker compose down -v` additionally destroys the volumes and everything in them.
+
+Compose project isolation means these commands affect only FinSight's containers, networks and
+volumes, even with other projects' containers running on the same host.
+
+### How the tiers are separated
+
+The UI is attached only to the `edge` network and the datastores only to `backbone`, with the API
+bridging the two. So PostgreSQL, Qdrant and the object store are **not resolvable** from the UI
+container — verified in ENV-014 — and its image contains no database driver, no object-store
+client, no vector-store client and no ORM. The most exposed tier cannot reach a datastore because
+it has neither the route nor the library, which does not depend on anyone remembering a policy.
+
+Both application containers run non-root with a read-only root filesystem, `cap_drop: ALL` and
+`no-new-privileges`, with size-capped tmpfs for the few paths that must be writable.
+
+### Migrations are a service, not a start-up step
+
+`migrate` exists so that the API never migrates on start-up. Two API containers coming up together
+would both run `alembic upgrade head` against one database, and Alembic's version table is not a
+lock: the race resolves to whichever transaction commits first, and the loser fails partway through
+DDL.
 
 ## Database migrations
 
@@ -611,7 +699,7 @@ service, install nothing, and download nothing.
 | `tests/` | Test suite, grouped by test type |
 | `config/` | Versioned runtime pipeline configuration |
 | `migrations/` | Alembic revisions; PostgreSQL schema history |
-| `docker/` | Service configuration for the local stack |
+| `docker/` | Dockerfiles, per-image dependency lists, and service configuration for the local stack |
 | `data/` | Corpus manifest, reference seed data, fixtures, golden sets |
 | `evaluation/` | Experiment configurations and decision records |
 | `scripts/` | Environment and dependency verification, model staging, evaluation harnesses |
