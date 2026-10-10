@@ -96,6 +96,32 @@ place instead of scattered across fourteen records.
 | **Limitation** | One host, one quantisation (`llama3.1:8b` Q4_K_M). The chars-per-token conversion used downstream is a **two-point linear fit**, not a measurement. |
 | **Record** | ENV-012, ADR-008 |
 
+### 1.7 Container images: 3.15 GB → 1.66 GB, from reading `docker history`
+
+| | |
+|---|---|
+| **Problem** | The first API image was 3.15 GB and the UI 1.19 GB, against a 374 MB virtual environment. The gap was unexplained, which is the reason to look rather than to shrug. |
+| **Method** | `docker history`, largest layer first. |
+| **Cause** | The largest layer was **1.14 GB** and it was `RUN chown -R root:root … && chmod -R a-w …`. A recursive mode change rewrites every file, and a rewritten file is a new layer entry — so the environment was stored **twice**, the copies differing in a permission bit. |
+| **It also secured nothing** | `COPY` already lands root-owned files that group and other cannot write, the process runs as an unprivileged uid, and Compose mounts the root filesystem read-only. The chmod was asserting the permissions already in place. |
+| **After** | API **1.66 GB (−47%)**, UI **683 MB (−43%)**. |
+| **Separate decision, same phase** | Per-image dependency subsets constrained by the one pinned lock file: the API installs **57** packages instead of 187, against roughly 4 GB if the development superset were installed. The set was derived by importing `create_app()` under a module tracer, not guessed. |
+| **Limitation** | 1.66 GB is what a CPU PyTorch runtime costs. Trimming torch's headers and test data is the remaining lever and is unmeasured. |
+| **Record** | ENV-014 |
+
+### 1.8 Reranker threads: a cautious guess was costing 18%
+
+| | |
+|---|---|
+| **Problem** | torch sizes its thread pool from the host's CPU count, ignoring the container's limit, and every surplus thread contends with host-native Ollama — the process ADR-004 records an indexing run being lost to. So the count has to be bounded. The image shipped `OMP_NUM_THREADS=2` as a guess. |
+| **Method** | Reranking 25 candidates, same query, three samples per setting, after a warm-up call to exclude the model load. |
+| **Result** | 1 thread **5,094 ms** · 2 threads **2,648 ms** · **4 threads 2,248 ms** · 8 threads **2,300 ms**. |
+| **The finding** | **8 is the same run as 4.** `torch.get_num_threads()` reports 4 when asked for 8, clamping to the physical cores of a 4-core / 8-thread host. And 2 — the shipped guess — was costing about **18%** of rerank latency for no benefit. |
+| **Decision** | 4, overridable for a host with a different core count. |
+| **Also measured** | Reranking is **92%** of a warm request. The remaining path costs ~207 ms, against ENV-010's host-native 337 ms for the same stages — which excluded reranking. The container is not the cost; the cross-encoder is. |
+| **Limitation** | One host, one query, one depth. A thread-count comparison, not a reranker benchmark. |
+| **Record** | ENV-014 |
+
 ---
 
 ## 2. Decisions that refused a change
@@ -145,7 +171,21 @@ The measurements that prevented work are worth as much as the ones that caused i
 | **Limitation** | Defect counts, not relevance. Fewer split regions is better by an invariant the project states; it is not evidence that answers improved. |
 | **Record** | ENV-011 |
 
-### 2.5 Curly apostrophes: 994 changes that would have bought nothing
+### 2.5 A corporate TLS interception, and the 33-minute shortcut not taken
+
+Two refusals in the containerisation work, both for the same reason — the cheap option
+would have traded a verifiable property for time.
+
+| | |
+|---|---|
+| **The build problem** | Measured from inside the build container: `pypi.org` verifies normally, while the index publishing the CPU-only torch build presents a chain this host's network re-issues and the container cannot verify. Same `pip install` succeeds on the host, fails one layer down. |
+| **Rejected** | Disabling certificate verification for that index (forbidden by §10, and it turns a network control into a hole in the build), and installing the issuing root into the image (embeds an organisation's certificate in a distributable artefact and leaves the container trusting a CA it has no reason to). |
+| **Taken** | Fetch the wheel where verification succeeds, record its SHA-256, resolve it through `--find-links`. The build reaches no second index at all. Cost: 187 MiB of build context. |
+| **The cache problem** | The first reprocess cost 39.3 min with an empty cache. Qdrant already held 4,867 vectors paired with their text, so back-filling the cache from it would have skipped ~84% and finished in about 6 minutes. |
+| **Rejected, and why** | **Qdrant stores float32.** Back-filling would have loaded rounded values into a double-precision cache and then served them as hits, converting the measured guarantee of §1.3 — largest component difference exactly 0.0 — into an approximation nothing downstream could detect. 33 minutes declined. |
+| **Record** | ENV-014, ENV-013 |
+
+### 2.6 Curly apostrophes: 994 changes that would have bought nothing
 
 | | |
 |---|---|
@@ -155,7 +195,7 @@ The measurements that prevented work are worth as much as the ones that caused i
 | **Decision** | Left alone. 994 occurrences would have been rewritten in stored text — which §14.4 keeps comparable to its source — for exactly zero retrieval gain. |
 | **Record** | `extraction/normalise.py`, ENV-013 when the reprocess runs |
 
-### 2.6 Line-break hyphens: joining words is wrong 63% of the time
+### 2.7 Line-break hyphens: joining words is wrong 63% of the time
 
 | | |
 |---|---|

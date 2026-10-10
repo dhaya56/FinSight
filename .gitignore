@@ -32,6 +32,15 @@ artifacts/
 # Downloaded and verified model artifacts
 model_cache/
 
+# The cross-encoder staged into the API image's build context by
+# scripts/stage_reranker_model.py. A build input reproduced from the local
+# HuggingFace cache, not source: 87.6 MiB of weights do not belong in git history.
+docker/api/model/
+
+# The CPU-only torch wheel staged by scripts/stage_build_wheels.py. Reproducible
+# from the pin in requirements.txt; 196 MiB of binary is not source either.
+docker/api/wheels/
+
 # Source documents: never committed unless redistribution is explicitly permitted
 data/corpus/development/
 data/corpus/held_out_pdf_core/
