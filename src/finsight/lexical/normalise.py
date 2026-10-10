@@ -69,4 +69,48 @@ def for_analysis(text: str) -> str:
     The last two need a different text-search configuration, which §9.7 reserves for
     a recorded decision.
     """
-    return _GROUPED.sub("", text)
+    return _dehyphenated(_GROUPED.sub("", text))
+
+
+_INTRA_WORD_HYPHEN: Final = re.compile(r"(?<=[^\W\d_])-(?=[^\W\d_])")
+"""A hyphen between two letters, which may or may not belong to the word.
+
+Digits are excluded: ``2023-24`` is a range, and joining it would invent ``202324``.
+"""
+
+
+def _dehyphenated(text: str) -> str:
+    """Append the closed-up spelling of every hyphenated word, for the index only.
+
+    **This is where the line-break decision is paid for.** Extraction closes
+    ``finan-\\nncial`` to ``finan-cial`` and keeps the hyphen, because measured over 421
+    split words the hyphenated spelling is the one the corpus uses in 63% of cases and
+    the joined spelling in only 11% — guessing per word needs a dictionary this project
+    does not carry. Keeping the hyphen is right for the majority and leaves the
+    minority unreachable:
+
+    | Stored text | Lexemes without this | Reachable by |
+    |---|---|---|
+    | ``long-term`` | ``long-term``, ``long``, ``term`` | "long term", "long-term" |
+    | ``finan-cial`` | ``finan``, ``cial`` | **nothing a reader would type** |
+
+    Adding the closed-up form costs one lexeme on each hyphenated word and makes the
+    second row reachable by ``financial``, without a dictionary, without a judgement
+    about what the author meant, and without altering a byte of stored text. The first
+    row gains a harmless ``longterm``.
+
+    Appended rather than substituted, because substituting would lose ``long-term``
+    itself — the compound token is the more precise match when a reader types it.
+    """
+    extra = [
+        _INTRA_WORD_HYPHEN.sub("", word)
+        for word in _HYPHENATED_WORD.findall(text)
+    ]
+    return f"{text} {' '.join(extra)}" if extra else text
+
+
+_HYPHENATED_WORD: Final = re.compile(r"[^\W\d_]+(?:-[^\W\d_]+)+")
+"""A whole hyphenated word, so the closed-up form is appended once per word.
+
+``state-of-the-art`` yields one ``stateoftheart`` rather than three partial joins.
+"""

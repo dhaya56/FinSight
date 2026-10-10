@@ -12,12 +12,12 @@ from logging.config import fileConfig
 
 from alembic import context
 
+# Imported for the side effect: the package registers every table with
+# ``Base.metadata`` (see its docstring). It replaced a hand-maintained list here that
+# had gone stale — ``answers`` and ``answer_claims`` were missing from it, so
+# autogenerate would have proposed dropping them.
+import finsight.persistence.tables  # noqa: F401
 from finsight.persistence.database import get_engine
-from finsight.persistence.tables import chunks as _chunks  # noqa: F401
-from finsight.persistence.tables import document_metadata as _metadata  # noqa: F401
-from finsight.persistence.tables import documents as _documents  # noqa: F401
-from finsight.persistence.tables import generations as _generations  # noqa: F401
-from finsight.persistence.tables import source as _source  # noqa: F401
 from finsight.persistence.tables.base import Base
 
 config = context.config

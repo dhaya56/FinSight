@@ -21,12 +21,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-import finsight.persistence.tables.answers
-import finsight.persistence.tables.chunks
-import finsight.persistence.tables.document_metadata
-import finsight.persistence.tables.documents
-import finsight.persistence.tables.generations
-import finsight.persistence.tables.source  # noqa: F401
+# Imported for the side effect: the package registers every table with
+# ``Base.metadata``, which is what the parity check below compares against. This used
+# to be a hand-maintained list of table modules, and a third copy of the same list.
+import finsight.persistence.tables  # noqa: F401
 from finsight.generation.decision import (
     AnswerDecision,
     Decision,

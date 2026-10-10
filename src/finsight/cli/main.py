@@ -20,6 +20,7 @@ rule is narrower than "never print document text": an *operational* command must
 """
 
 import argparse
+import datetime
 import json
 import sys
 from collections.abc import Sequence
@@ -37,6 +38,7 @@ from finsight.corpus.service import (
 )
 from finsight.corpus.store import CorpusStore, digest_of, media_type_for
 from finsight.domain.errors import DomainError
+from finsight.embedding.cache import CachingEmbedder, describe
 from finsight.embedding.port import EmbeddingError
 from finsight.extraction.service import build_extraction_service
 from finsight.generation.decision import AnswerDecision, ReleasedClaim
@@ -45,6 +47,8 @@ from finsight.generation.service import AskedAnswer, build_ask_service
 from finsight.indexing.pruning import REBUILD_HINT, build_pruning_service
 from finsight.indexing.service import build_indexing_service
 from finsight.object_store.port import ObjectStoreError
+from finsight.persistence.database import session_scope
+from finsight.persistence.repositories.embedding_cache import EmbeddingCacheRepository
 from finsight.persistence.repositories.source import ElementCounts
 from finsight.reranking.port import RerankError
 from finsight.retrieval.contracts import RetrievalFilters
@@ -125,6 +129,32 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     prune.set_defaults(handler=run_prune)
+
+    cache = subcommands.add_parser(
+        "cache",
+        help="Report, and on --confirm prune, the embedding cache.",
+    )
+    cache.add_argument(
+        "--prune-unused-days",
+        type=int,
+        default=None,
+        metavar="DAYS",
+        help=(
+            "Report entries not used for this many days. Document entries are "
+            "bounded by the corpus; query entries grow with every distinct question "
+            "ever asked, at about 6 KB each."
+        ),
+    )
+    cache.add_argument(
+        "--confirm",
+        action="store_true",
+        help=(
+            "Actually delete the reported entries. Deleting cannot lose evidence — "
+            "the model recomputes the same vector from the same text — so the only "
+            "cost of pruning too eagerly is time."
+        ),
+    )
+    cache.set_defaults(handler=run_cache)
 
     _add_search_command(subcommands)
     _add_ask_command(subcommands)
@@ -550,9 +580,8 @@ def run_corpus_index(args: argparse.Namespace) -> int:
         print("no documents recorded for that selection")
         return EXIT_OK
 
-    report = build_corpus_indexing_service(_corpus_store()).index(
-        entries, retry=args.retry
-    )
+    service = build_corpus_indexing_service(_corpus_store())
+    report = service.index(entries, retry=args.retry)
 
     for outcome in report.outcomes:
         if outcome.failure is not None:
@@ -573,6 +602,7 @@ def run_corpus_index(args: argparse.Namespace) -> int:
         f"{len(report.outcomes) - failed} succeeded, {failed} failed, "
         f"{report.total_seconds:.2f}s total"
     )
+    _print_cache_behaviour(service.embedder)
     return EXIT_FAILED if failed else EXIT_OK
 
 
@@ -651,7 +681,8 @@ def run_index(args: argparse.Namespace) -> int:
     makes the chunks visible to retrieval (§11.13), and a run that indexed
     everything and did not activate is a failure however healthy the counts look.
     """
-    result = build_indexing_service().index(args.generation_id, retry=args.retry)
+    service = build_indexing_service()
+    result = service.index(args.generation_id, retry=args.retry)
 
     print("indexing complete")
     print(f"  generation: {result.generation_id}")
@@ -660,6 +691,71 @@ def run_index(args: argparse.Namespace) -> int:
     if result.already_complete:
         print("  note:       every chunk was already indexed by an earlier run")
     print(f"  activated:  {result.activated}")
+    _print_cache_behaviour(service.embedder)
+    return EXIT_OK
+
+
+def _print_cache_behaviour(embedder: object) -> None:
+    """Report what the embedding cache skipped, when one is wired.
+
+    Printed after the activation line because it is the cost of the run and not
+    part of whether the run was correct: the vectors are identical with or without
+    a cache, so a collapsed hit rate is an operational signal, never a quality one.
+    """
+    if not isinstance(embedder, CachingEmbedder):
+        return
+    for line in describe(embedder.statistics):
+        print(line)
+
+
+def run_cache(args: argparse.Namespace) -> int:
+    """Report the embedding cache, and on ``--confirm`` prune it by disuse.
+
+    Prints identifiers, counts and model names only. The cached *text* is a chunk of
+    a filing and a question someone asked, so it is never printed — which is why the
+    report is a census rather than a listing.
+    """
+    cutoff = (
+        datetime.datetime.now(datetime.UTC)
+        - datetime.timedelta(days=args.prune_unused_days)
+        if args.prune_unused_days is not None
+        else None
+    )
+
+    with session_scope() as session:
+        repository = EmbeddingCacheRepository(session)
+        stats = repository.statistics()
+        prunable = (
+            repository.count_unused_since(cutoff) if cutoff is not None else 0
+        )
+        removed = (
+            repository.prune_unused_since(cutoff)
+            if cutoff is not None and args.confirm
+            else None
+        )
+
+    print(f"cached vectors:       {stats.entries}")
+    print(f"  document entries:   {stats.document_entries}")
+    print(f"  query entries:      {stats.query_entries}")
+    if stats.models:
+        print(f"  models:             {', '.join(stats.models)}")
+    if stats.oldest_use is not None and stats.newest_use is not None:
+        print(f"  least recently used: {stats.oldest_use.isoformat(timespec='seconds')}")
+        print(f"  most recently used:  {stats.newest_use.isoformat(timespec='seconds')}")
+
+    if cutoff is None:
+        if stats.entries:
+            print()
+            print("pass --prune-unused-days DAYS to report what could be removed")
+        return EXIT_OK
+
+    print()
+    print(f"unused since {cutoff.isoformat(timespec='seconds')}: {prunable}")
+    if removed is None:
+        print("reported only; nothing was removed. Pass --confirm to remove.")
+        return EXIT_OK
+    print(f"removed:              {removed}")
+    print(f"remaining:            {stats.entries - removed}")
     return EXIT_OK
 
 
