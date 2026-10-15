@@ -153,7 +153,8 @@ def banner() -> Path:
     )
     centre(
         draw,
-        "Self-hosted  ·  hybrid retrieval  ·  every released figure traced to the page it came from",
+        "Self-hosted  ·  hybrid retrieval"
+        "  ·  every released figure traced to the page it came from",
         font(REG, 32),
         344,
         width,
@@ -164,9 +165,9 @@ def banner() -> Path:
         ("1,403", "pages indexed", CYAN),
         ("4,859", "passages embedded", INDIGO),
         ("573 → 0", "unreachable passages", EMERALD),
-        # Not "faster re-index": 811× is the cache *hit path* (2,360.77 s cold against
-        # 2.91 s warm, ENV-013). A real re-index mixes hits and misses and measured 6.3×.
-        ("811×", "faster on cached text", AMBER),
+        # Not "faster re-index": 811x is the cache *hit path* (2,360.77 s cold against
+        # 2.91 s warm, ENV-013). A real re-index mixes hits and misses and measured 6.3x.
+        ("811×", "faster on cached text", AMBER),  # noqa: RUF001 — rendered glyph, not code
         ("1,794", "tests passing", ROSE),
     ]
     box_w, gap = 400, 28
@@ -174,7 +175,9 @@ def banner() -> Path:
     x = (width - total) // 2
     y0, y1 = 452, 644
     for value, label, colour in stats:
-        draw.rounded_rectangle([(x, y0), (x + box_w, y1)], radius=18, fill=NAVY_SOFT, outline=colour, width=3)
+        draw.rounded_rectangle(
+            [(x, y0), (x + box_w, y1)], radius=18, fill=NAVY_SOFT, outline=colour, width=3
+        )
         f_value = font(BOLD, 58)
         w = draw.textlength(value, font=f_value)
         draw.text((x + (box_w - w) / 2, y0 + 26), value, font=f_value, fill=colour)
@@ -206,7 +209,8 @@ def architecture() -> Path:
     centre(draw, "System Architecture", font(BOLD, 62), 40, width, INK)
     centre(
         draw,
-        "Three tiers, two networks, one host-native model runtime — a tier may reach only what it is attached to",
+        "Three tiers, two networks, one host-native model runtime"
+        " — a tier may reach only what it is attached to",
         font(REG, 30),
         122,
         width,
@@ -220,7 +224,7 @@ def architecture() -> Path:
         """A labelled boundary. Both captions sit on an opaque patch, because an
         outline drawn through a word is the fastest way to make a diagram look
         unfinished."""
-        x0, y0, x1, y1 = rect
+        x0, y0, x1, _ = rect
         draw.rounded_rectangle(rect, radius=20, outline=colour, width=4)
         f_label, f_note = font(BOLD, 28), font(REG, 24)
         label_w = draw.textlength(label, font=f_label)
@@ -237,27 +241,33 @@ def architecture() -> Path:
     # so drawing it inside the edge boundary claimed an isolation it does not have.
     # It is noted in the footer instead.
     edge_y0, edge_y1 = 230, 440
-    zone((margin, edge_y0, margin + inner, edge_y1), "EDGE NETWORK", "browser-facing tier", INDIGO)
+    zone(
+        (margin, edge_y0, margin + inner, edge_y1), "EDGE NETWORK", "browser-facing tier", INDIGO
+    )
     half = (inner - 120 - 60) // 2
     card(
         draw,
         (margin + 60, edge_y0 + 46, margin + 60 + half, edge_y1 - 40),
         "Streamlit UI",
-        "non-root uid 10002 · read-only root filesystem · reaches the API over HTTP and nothing else",
+        "non-root uid 10002 · read-only root filesystem"
+        " · reaches the API over HTTP and nothing else",
         FILL_EDGE,
     )
     card(
         draw,
         (margin + 120 + half, edge_y0 + 46, margin + inner - 60, edge_y1 - 40),
         "No datastore client in the image",
-        "no database driver, no ORM, no object-store client, no vector client — isolation by contents, not by policy",
+        "no database driver, no ORM, no object-store client, no vector client"
+        " — isolation by contents, not by policy",
         FILL_NO,
         ROSE,
     )
 
     # ---- application tier
     app_y0, app_y1 = 560, 790
-    zone((margin, app_y0, margin + inner, app_y1), "APPLICATION", "bridges both networks", EMERALD)
+    zone(
+        (margin, app_y0, margin + inner, app_y1), "APPLICATION", "bridges both networks", EMERALD
+    )
     card(
         draw,
         (margin + 60, app_y0 + 46, margin + 900, app_y1 - 46),
@@ -282,7 +292,12 @@ def architecture() -> Path:
 
     # ---- data tier
     data_y0, data_y1 = 910, 1140
-    zone((margin, data_y0, margin + inner, data_y1), "BACKBONE NETWORK", "not reachable from the edge", CYAN)
+    zone(
+        (margin, data_y0, margin + inner, data_y1),
+        "BACKBONE NETWORK",
+        "not reachable from the edge",
+        CYAN,
+    )
     tiles = [
         ("PostgreSQL 18.6", "authoritative: source elements, chunks,\ngenerations, answers, audit"),
         ("Qdrant 1.19", "derived index: 768-d dense + BM25 sparse,\n9 indexed filter fields"),
@@ -294,12 +309,23 @@ def architecture() -> Path:
     tile_w = (inner - 120 - 3 * 40) // 4
     x = margin + 60
     for title, detail in tiles:
-        card(draw, (x, data_y0 + 46, x + tile_w, data_y1 - 46), title, detail.replace("\n", " "), FILL_DATA)
+        card(
+            draw,
+            (x, data_y0 + 46, x + tile_w, data_y1 - 46),
+            title,
+            detail.replace("\n", " "),
+            FILL_DATA,
+        )
         x += tile_w + 40
 
     # ---- host tier
     host_y0, host_y1 = 1262, 1422
-    zone((margin, host_y0, margin + inner, host_y1), "HOST (NOT CONTAINERISED)", "no outbound internet from any model", AMBER)
+    zone(
+        (margin, host_y0, margin + inner, host_y1),
+        "HOST (NOT CONTAINERISED)",
+        "no outbound internet from any model",
+        AMBER,
+    )
     card(
         draw,
         (margin + 60, host_y0 + 34, margin + 1100, host_y1 - 30),
@@ -319,7 +345,9 @@ def architecture() -> Path:
     arrow(draw, (mid, edge_y1 + 6), (mid, app_y0 - 6), INDIGO)
     arrow(draw, (mid, app_y1 + 6), (mid, data_y0 - 6), EMERALD)
     draw.text((mid + 26, edge_y1 + 20), "HTTP + bearer token only", font=font(REG, 24), fill=MUTED)
-    draw.text((mid + 26, app_y1 + 20), "SQL, vector search, object reads", font=font(REG, 24), fill=MUTED)
+    draw.text(
+        (mid + 26, app_y1 + 20), "SQL, vector search, object reads", font=font(REG, 24), fill=MUTED
+    )
 
     # No arrow is drawn from the data tier to the host tier.
     #
@@ -337,8 +365,10 @@ def architecture() -> Path:
     )
 
     footer = [
-        "Every published port binds 127.0.0.1.  Containers run non-root with cap_drop ALL, no-new-privileges and a read-only root filesystem.",
-        "The operator CLI runs on the host, outside both networks, and reaches PostgreSQL and Qdrant through those loopback ports.",
+        "Every published port binds 127.0.0.1.  Containers run non-root with cap_drop ALL,"
+        " no-new-privileges and a read-only root filesystem.",
+        "The operator CLI runs on the host, outside both networks, and reaches PostgreSQL"
+        " and Qdrant through those loopback ports.",
     ]
     y = height - 86
     for line in footer:
@@ -359,7 +389,8 @@ def evidence_gate() -> Path:
     centre(draw, "How a sentence becomes a released claim", font(BOLD, 60), 40, width, INK)
     centre(
         draw,
-        "The model proposes. Code disposes. Every check below runs outside the model, on stored evidence.",
+        "The model proposes. Code disposes."
+        " Every check below runs outside the model, on stored evidence.",
         font(REG, 30),
         120,
         width,
@@ -371,7 +402,11 @@ def evidence_gate() -> Path:
     y0, y1 = 250, 470
     stages = [
         ("1 · Model output", "a claim plus the passage numbers it says it used", FILL),
-        ("2 · Citation resolution", "passage numbers mapped to stored source element ids, by code", FILL_APP),
+        (
+            "2 · Citation resolution",
+            "passage numbers mapped to stored source element ids, by code",
+            FILL_APP,
+        ),
         ("3 · Numeral check", "every figure matched against the spans this claim cites", FILL_APP),
         ("4 · Scope check", "issuer, period and reporting basis must agree", FILL_APP),
         ("5 · Decision", "release, withhold the claim, or abstain entirely", FILL_OK),
@@ -387,8 +422,18 @@ def evidence_gate() -> Path:
     out_y0, out_y1 = 620, 830
     third = (width - 2 * margin - 2 * 40) // 3
     outcomes = [
-        ("Released", "the claim cites at least one stored span, and every numeral in it appears there", FILL_OK, EMERALD),
-        ("Withheld", "the claim is removed from the answer and the reason is recorded", FILL_NO, ROSE),
+        (
+            "Released",
+            "the claim cites at least one stored span, and every numeral in it appears there",
+            FILL_OK,
+            EMERALD,
+        ),
+        (
+            "Withheld",
+            "the claim is removed from the answer and the reason is recorded",
+            FILL_NO,
+            ROSE,
+        ),
         ("Abstained", "no evidence survived, so the model is never called at all", FILL, MUTED),
     ]
     centres = []
@@ -412,7 +457,9 @@ def evidence_gate() -> Path:
 
     # What the model is never allowed to do
     bar_y0, bar_y1 = 900, 1150
-    draw.rounded_rectangle((margin, bar_y0, width - margin, bar_y1), radius=18, fill="#fff1f2", outline=ROSE, width=3)
+    draw.rounded_rectangle(
+        (margin, bar_y0, width - margin, bar_y1), radius=18, fill="#fff1f2", outline=ROSE, width=3
+    )
     draw.text((margin + 36, bar_y0 + 26), "The model never:", font=font(BOLD, 34), fill=INK)
     # Bullet 1 is deliberately not "never writes a figure". ADR-009 removed the typed
     # placeholders and the deterministic substitution that would have made that literally
@@ -420,9 +467,11 @@ def evidence_gate() -> Path:
     # it against the spans the claim itself cites. Stating the stronger claim here would
     # describe a design this project measured and replaced.
     never = [
-        "releases a figure on its own word — every numeral is matched against the spans that claim cites",
+        "releases a figure on its own word — every numeral is matched against the spans"
+        " that claim cites",
         "transcribes a quotation — spans are rendered by code from the stored source region",
-        "cites outside its evidence — passage numbers are resolved against the passages it was given",
+        "cites outside its evidence — passage numbers are resolved against the passages"
+        " it was given",
         "reaches a tool, a filesystem, a database or the network — it has no such capability",
     ]
     y = bar_y0 + 78
@@ -458,7 +507,8 @@ def pipeline() -> Path:
     centre(draw, "Input to Output — the two pipelines", font(BOLD, 58), 38, width, INK)
     centre(
         draw,
-        "Indexing runs once per document version. Querying runs once per question. They meet only in the stores.",
+        "Indexing runs once per document version. Querying runs once per question."
+        " They meet only in the stores.",
         font(REG, 30),
         116,
         width,
@@ -495,7 +545,8 @@ def pipeline() -> Path:
         x0, x1 = col_x(index)
         card(draw, (x0, top_y0, x1, top_y1), name, detail, fill, title_size=27, detail_size=23)
         if index:
-            arrow(draw, (col_x(index - 1)[1] + 5, (top_y0 + top_y1) // 2), (x0 - 6, (top_y0 + top_y1) // 2))
+            mid_y = (top_y0 + top_y1) // 2
+            arrow(draw, (col_x(index - 1)[1] + 5, mid_y), (x0 - 6, mid_y))
 
     # ------------------------------------------------------------- store band
     store_y0, store_y1 = 506, 648
@@ -509,7 +560,15 @@ def pipeline() -> Path:
     ]
     for index, (name, detail) in enumerate(stores):
         x0 = margin + index * (sw + sgap)
-        card(draw, (x0, store_y0, x0 + sw, store_y1), name, detail, FILL_DATA, title_size=28, detail_size=23)
+        card(
+            draw,
+            (x0, store_y0, x0 + sw, store_y1),
+            name,
+            detail,
+            FILL_DATA,
+            title_size=28,
+            detail_size=23,
+        )
 
     # One connector, not one per store.
     #
@@ -544,7 +603,8 @@ def pipeline() -> Path:
         x0, x1 = col_x(index)
         card(draw, (x0, bot_y0, x1, bot_y1), name, detail, fill, title_size=27, detail_size=23)
         if index:
-            arrow(draw, (col_x(index - 1)[1] + 5, (bot_y0 + bot_y1) // 2), (x0 - 6, (bot_y0 + bot_y1) // 2))
+            mid_y = (bot_y0 + bot_y1) // 2
+            arrow(draw, (col_x(index - 1)[1] + 5, mid_y), (x0 - 6, mid_y))
 
     arrow(draw, (bus_x, store_y1 + 6), (bus_x, bot_y0 - 6))
     draw.multiline_text(
@@ -594,7 +654,8 @@ def pipeline() -> Path:
     notes = [
         "Ollama runs host-native. No model has tool, filesystem, database or network access.",
         "Qdrant is rebuildable from PostgreSQL, so losing it costs time, never evidence.",
-        "Reprocessing builds a shadow generation and activates it atomically, so a reader is never served a half-built index.",
+        "Reprocessing builds a shadow generation and activates it atomically,"
+        " so a reader is never served a half-built index.",
     ]
     y = 1150
     for note in notes:
@@ -649,7 +710,9 @@ def hbar(
     # A floor of 7 px, so a value that rounds to nothing still shows that it exists.
     filled = max(7, round(track * value / maximum)) if maximum else 7
     draw.rounded_rectangle([(bar_x, y), (bar_x + filled, y + height)], radius=10, fill=colour)
-    draw.text((bar_x + track + 20, y + (height - 27) / 2 - 2), reading, font=font(BOLD, 27), fill=INK)
+    draw.text(
+        (bar_x + track + 20, y + (height - 27) / 2 - 2), reading, font=font(BOLD, 27), fill=INK
+    )
 
 
 def layout_chips(
@@ -691,7 +754,9 @@ def draw_chips(
 ) -> None:
     f = font(REG, size)
     for (x0, y0, x1, y1), text in placed:
-        draw.rounded_rectangle((x0, y0, x1, y1), radius=(y1 - y0) // 2, fill=fill, outline=outline, width=2)
+        draw.rounded_rectangle(
+            (x0, y0, x1, y1), radius=(y1 - y0) // 2, fill=fill, outline=outline, width=2
+        )
         draw.text((x0 + 20, y0 + (y1 - y0 - size) / 2 - 3), text, font=f, fill=INK)
 
 
@@ -727,7 +792,12 @@ def kpi_dashboard() -> Path:
 
     # ---- panel 1: where a query's time goes (ENV-014 §3)
     rect = (cols[0], rows[0], cols[0] + pw, rows[0] + ph)
-    panel(draw, rect, "Query latency, warm", "ENV-014 §3 · depth 25, in the container, cross-encoder resident")
+    panel(
+        draw,
+        rect,
+        "Query latency, warm",
+        "ENV-014 §3 · depth 25, in the container, cross-encoder resident",
+    )
     y = rows[0] + 150
     peak = 2248.0
     for label, value, reading, colour in (
@@ -741,14 +811,20 @@ def kpi_dashboard() -> Path:
         y += 76
     draw.text(
         (cols[0] + 34, rows[0] + ph - 96),
-        "Reranking is 92% of a warm request. Turn it off and the\nsame query returns in 175 ms — accuracy bought with latency.",
+        "Reranking is 92% of a warm request. Turn it off and the\n"
+        "same query returns in 175 ms — accuracy bought with latency.",
         font=font(REG, 25),
         fill=MUTED,
     )
 
     # ---- panel 2: the embedding cache (ENV-013 §4)
     rect = (cols[1], rows[0], cols[1] + pw, rows[0] + ph)
-    panel(draw, rect, "Embedding cache, full corpus", "ENV-013 §4 · 4,859 child chunks re-embedded, 100% hit rate")
+    panel(
+        draw,
+        rect,
+        "Embedding cache, full corpus",
+        "ENV-013 §4 · 4,859 child chunks re-embedded, 100% hit rate",
+    )
     y = rows[0] + 160
     for label, value, reading, colour in (
         ("Cold — cache empty", 2360.77, "2,360.77 s", ROSE),
@@ -757,23 +833,32 @@ def kpi_dashboard() -> Path:
         hbar(draw, (cols[1] + 34, y), label, value, 2360.77, reading, colour, height=62)
         y += 104
     big = font(BOLD, 110)
-    draw.text((cols[1] + 54, rows[0] + 388), "811×", font=big, fill=INDIGO)
+    # The glyphs below are the ones the rendered chart must show: a real multiplication
+    # sign and a real minus sign, not their ASCII lookalikes.
+    draw.text((cols[1] + 54, rows[0] + 388), "811×", font=big, fill=INDIGO)  # noqa: RUF001
     draw.text(
         (cols[1] + 400, rows[0] + 404),
-        "faster on unchanged text,\nand a hit is bit-identical: 200 of 200\nvectors matched to exactly 0.0",
+        "faster on unchanged text,\n"
+        "and a hit is bit-identical: 200 of 200\n"
+        "vectors matched to exactly 0.0",
         font=font(REG, 26),
         fill=MUTED,
     )
     draw.text(
         (cols[1] + 34, rows[0] + ph - 66),
-        "A real re-index mixes hits and misses: 39.3 min → 6.3 min, 6.3×.",
+        "A real re-index mixes hits and misses: 39.3 min → 6.3 min, 6.3×.",  # noqa: RUF001
         font=font(REG, 25),
         fill=MUTED,
     )
 
     # ---- panel 3: text-quality defects (ENV-013 §1)
     rect = (cols[0], rows[1], cols[0] + pw, rows[1] + ph)
-    panel(draw, rect, "Text-quality defects eliminated", "ENV-013 §1 · extraction config 2 → config 3, same bytes")
+    panel(
+        draw,
+        rect,
+        "Text-quality defects eliminated",
+        "ENV-013 §1 · extraction config 2 → config 3, same bytes",
+    )
     y = rows[1] + 150
     worst = 874.0
     for label, value, reading, colour in (
@@ -795,13 +880,18 @@ def kpi_dashboard() -> Path:
 
     # ---- panel 4: image size (ENV-014 §1)
     rect = (cols[1], rows[1], cols[1] + pw, rows[1] + ph)
-    panel(draw, rect, "Container images slimmed", "ENV-014 §1 · one recursive chmod was storing the venv twice")
+    panel(
+        draw,
+        rect,
+        "Container images slimmed",
+        "ENV-014 §1 · one recursive chmod was storing the venv twice",
+    )
     y = rows[1] + 150
     for label, value, reading, colour in (
         ("API — before", 3150, "3.15 GB", "#94a3b8"),
-        ("API — after", 1660, "1.66 GB  −47%", INDIGO),
+        ("API — after", 1660, "1.66 GB  −47%", INDIGO),  # noqa: RUF001
         ("UI — before", 1190, "1.19 GB", "#94a3b8"),
-        ("UI — after", 683, "683 MB  −43%", EMERALD),
+        ("UI — after", 683, "683 MB  −43%", EMERALD),  # noqa: RUF001
     ):
         hbar(draw, (cols[1] + 34, y), label, value, 3150.0, reading, colour)
         y += 76
@@ -857,7 +947,9 @@ def corpus_funnel() -> Path:
     y0, y1 = 200, 478
     x = margin
     for index, (value, label, note, fill, outline) in enumerate(stages):
-        draw.rounded_rectangle([(x, y0), (x + cw, y1)], radius=18, fill=fill, outline=outline, width=3)
+        draw.rounded_rectangle(
+            [(x, y0), (x + cw, y1)], radius=18, fill=fill, outline=outline, width=3
+        )
         f_value = font(BOLD, 72)
         vw = draw.textlength(value, font=f_value)
         draw.text((x + (cw - vw) / 2, y0 + 46), value, font=f_value, fill=INK)
@@ -866,15 +958,20 @@ def corpus_funnel() -> Path:
         draw.text((x + (cw - lw) / 2, y0 + 150), label, font=f_label, fill=INK)
         for offset, line in enumerate(wrap(draw, note, font(REG, 23), cw - 40)):
             nw = draw.textlength(line, font=font(REG, 23))
-            draw.text((x + (cw - nw) / 2, y0 + 196 + offset * 30), line, font=font(REG, 23), fill=MUTED)
+            draw.text(
+                (x + (cw - nw) / 2, y0 + 196 + offset * 30), line, font=font(REG, 23), fill=MUTED
+            )
         if index:
             arrow(draw, (x - gap + 4, (y0 + y1) // 2), (x - 8, (y0 + y1) // 2))
         x += cw + gap
 
     notes = [
-        "61,150 elements carry text. Every one keeps its page, its coordinates and the bytes it was read from, so a claim can point at it.",
-        "A page that yields no text is stored as a recorded coverage gap with a reason — never silently dropped, so a reader can be told a region was never searched.",
-        "PostgreSQL holds 127.44 MiB for the whole corpus; Qdrant holds 81.1 MiB resident and is rebuildable from it.",
+        "61,150 elements carry text. Every one keeps its page, its coordinates and the bytes"
+        " it was read from, so a claim can point at it.",
+        "A page that yields no text is stored as a recorded coverage gap with a reason"
+        " — never silently dropped, so a reader can be told a region was never searched.",
+        "PostgreSQL holds 127.44 MiB for the whole corpus; Qdrant holds 81.1 MiB resident"
+        " and is rebuildable from it.",
     ]
     y = 540
     for note in notes:
@@ -968,7 +1065,13 @@ def tech_stack() -> Path:
             "Run locally before anything is reported.",
             "#8b5cf6",
             "#f5f3ff",
-            ("pytest 9.1.1 · 1,794 tests", "ruff 0.16.7", "mypy 2.3.1 strict", "pip-audit", "pip check"),
+            (
+                "pytest 9.1.1 · 1,794 tests",
+                "ruff 0.16.7",
+                "mypy 2.3.1 strict",
+                "pip-audit",
+                "pip check",
+            ),
         ),
     )
 
@@ -989,7 +1092,8 @@ def tech_stack() -> Path:
     centre(draw, "Technology Stack", font(BOLD, 58), 38, width, INK)
     centre(
         draw,
-        "Six layers, and the dependency arrow points only downwards — the domain core imports no adapter, "
+        "Six layers, and the dependency arrow points only downwards"
+        " — the domain core imports no adapter, "
         "which is what makes a store replaceable",
         font(REG, 28),
         114,
@@ -997,7 +1101,9 @@ def tech_stack() -> Path:
         MUTED,
     )
 
-    for (name, rule, accent, fill, chips), (band_y, band_height, placed) in zip(layers, bands, strict=True):
+    for (name, rule, accent, fill, _), (band_y, band_height, placed) in zip(
+        layers, bands, strict=True
+    ):
         draw.rounded_rectangle(
             [(margin, band_y), (margin + inner, band_y + band_height)],
             radius=18,
@@ -1005,15 +1111,20 @@ def tech_stack() -> Path:
             outline=accent,
             width=3,
         )
-        draw.rectangle([(margin, band_y + 12), (margin + 10, band_y + band_height - 12)], fill=accent)
+        draw.rectangle(
+            [(margin, band_y + 12), (margin + 10, band_y + band_height - 12)], fill=accent
+        )
         draw.text((margin + 36, band_y + 26), name, font=font(BOLD, 31), fill=INK)
         for offset, line in enumerate(wrap(draw, rule, font(REG, 23), 270)):
-            draw.text((margin + 36, band_y + 68 + offset * 30), line, font=font(REG, 23), fill=MUTED)
+            draw.text(
+                (margin + 36, band_y + 68 + offset * 30), line, font=font(REG, 23), fill=MUTED
+            )
         draw_chips(draw, placed, WHITE, accent)
 
     draw.text(
         (margin, height - 56),
-        "Python 3.12 throughout. 165 pinned dependencies in one requirements.txt; the API image installs the 57 it actually imports.",
+        "Python 3.12 throughout. 165 pinned dependencies in one requirements.txt;"
+        " the API image installs the 57 it actually imports.",
         font=font(REG, 25),
         fill=MUTED,
     )
@@ -1096,7 +1207,9 @@ def data_model() -> Path:
     zone_y0, zone_y1 = 200, 872
     x = margin
     for name, accent, fill, tables in groups:
-        draw.rounded_rectangle([(x, zone_y0), (x + gw, zone_y1)], radius=18, outline=accent, width=4)
+        draw.rounded_rectangle(
+            [(x, zone_y0), (x + gw, zone_y1)], radius=18, outline=accent, width=4
+        )
         label_w = draw.textlength(name, font=font(BOLD, 27))
         draw.rectangle([(x + 26, zone_y0 - 19), (x + 48 + label_w, zone_y0 + 19)], fill=WHITE)
         draw.text((x + 36, zone_y0 - 15), name, font=font(BOLD, 27), fill=accent)
@@ -1107,7 +1220,9 @@ def data_model() -> Path:
             indent = depth * 34
             cx0, cx1 = x + 26 + indent, x + gw - 26
             card_h = 104
-            draw.rounded_rectangle([(cx0, y), (cx1, y + card_h)], radius=12, fill=fill, outline=accent, width=2)
+            draw.rounded_rectangle(
+                [(cx0, y), (cx1, y + card_h)], radius=12, fill=fill, outline=accent, width=2
+            )
             draw.text((cx0 + 18, y + 16), table, font=font(MONO, 27), fill=INK)
             for offset, line in enumerate(wrap(draw, note, font(REG, 22), cx1 - cx0 - 36)):
                 draw.text((cx0 + 18, y + 54 + offset * 26), line, font=font(REG, 22), fill=MUTED)
@@ -1130,12 +1245,17 @@ def data_model() -> Path:
 
     for index in range(3):
         cx = margin + (index + 1) * gw + index * gap + gap // 2
-        arrow(draw, (cx - gap // 2 + 4, (zone_y0 + zone_y1) // 2), (cx + gap // 2 - 6, (zone_y0 + zone_y1) // 2))
+        mid_y = (zone_y0 + zone_y1) // 2
+        arrow(draw, (cx - gap // 2 + 4, mid_y), (cx + gap // 2 - 6, mid_y))
 
     notes = [
-        "Nothing is ever updated in place. A re-extraction writes a new run, a re-chunk writes a new generation, and the previous one keeps serving queries until the replacement is indexed and reconciled.",
-        "Superseded rows are kept, because a citation issued against them must keep resolving — that audit trail is the reason generations exist.",
-        "Qdrant holds no text. A vector search answers with identifiers, and the text is read back from PostgreSQL, so the index can be rebuilt without losing evidence.",
+        "Nothing is ever updated in place. A re-extraction writes a new run, a re-chunk writes"
+        " a new generation, and the previous one keeps serving queries until the replacement"
+        " is indexed and reconciled.",
+        "Superseded rows are kept, because a citation issued against them must keep resolving"
+        " — that audit trail is the reason generations exist.",
+        "Qdrant holds no text. A vector search answers with identifiers, and the text is read"
+        " back from PostgreSQL, so the index can be rebuilt without losing evidence.",
     ]
     y = 920
     for note in notes:
